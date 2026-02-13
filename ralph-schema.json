@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ralph-tasks-schema",
+  "title": "Ralph Task Executor Schema",
+  "description": "JSON schema for tasks.json used by ralph.sh - a Claude Code task orchestrator",
+  "type": "object",
+  "required": ["tasks"],
+  "properties": {
+    "projectName": {
+      "type": "string",
+      "description": "Name of the project these tasks belong to"
+    },
+    "version": {
+      "type": "string",
+      "description": "Schema or task file version",
+      "examples": ["1.0.0"]
+    },
+    "workflow": {
+      "type": "object",
+      "description": "Workflow-level settings that control behavior after task execution",
+      "properties": {
+        "onTaskComplete": {
+          "type": "object",
+          "description": "Actions to perform when a task completes",
+          "properties": {
+            "commitChanges": {
+              "type": "boolean",
+              "default": false,
+              "description": "If true, automatically run git add -A && git commit after each task completes"
+            },
+            "commitMessageTemplate": {
+              "type": "string",
+              "default": "[Task #{taskId}] {taskTitle}",
+              "description": "Template for git commit messages. Supports {taskId} and {taskTitle} placeholders"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "apiSpecs": {
+      "type": "object",
+      "description": "Optional API specification references that tasks may consult",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+            "description": "HTTP method"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "API endpoint path"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of the API endpoint"
+          },
+          "requestBody": {
+            "type": "object",
+            "description": "Expected request body schema"
+          },
+          "responseBody": {
+            "type": "object",
+            "description": "Expected response body schema"
+          }
+        }
+      }
+    },
+    "samplePages": {
+      "type": "object",
+      "description": "Optional sample page definitions that tasks may reference",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Page URL or route"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of the page"
+          }
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "description": "Ordered list of tasks to execute. Tasks are processed in array order; the first task with done=false is picked next.",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "task": {
+      "type": "object",
+      "required": ["id", "title", "done"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique task identifier. Used in --task <id> flag and commit messages.",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "examples": ["phase1-backend-api", "task-001", "setup_db"]
+        },
+        "title": {
+          "type": "string",
+          "description": "Short human-readable title for the task",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description of what the task accomplishes"
+        },
+        "phase": {
+          "type": "string",
+          "description": "Project phase this task belongs to (e.g., phase1, phase2)",
+          "examples": ["phase1", "phase2", "setup", "testing"]
+        },
+        "category": {
+          "type": "string",
+          "description": "Category or domain of the task",
+          "examples": ["backend", "frontend", "database", "infrastructure", "testing"]
+        },
+        "done": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this task has been completed. Set to true by ralph.sh upon completion."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "The prompt text sent to Claude Code for execution. If omitted or empty, Claude Code will not be invoked for this task."
+        },
+        "outputFiles": {
+          "type": "array",
+          "description": "List of file paths expected to be created or modified by this task",
+          "items": {
+            "type": "string"
+          },
+          "examples": [["src/api/routes.ts", "src/models/user.ts"]]
+        },
+        "dependsOn": {
+          "type": "array",
+          "description": "List of task IDs that must be completed before this task can run (not yet enforced by ralph.sh, but useful for documentation)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subtasks": {
+          "type": "array",
+          "description": "Optional ordered list of subtasks within this task",
+          "items": {
+            "$ref": "#/$defs/subtask"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "subtask": {
+      "type": "object",
+      "required": ["id", "title", "done"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique subtask identifier within the parent task",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short human-readable title for the subtask",
+          "minLength": 1
+        },
+        "done": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this subtask has been completed"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Optional prompt for this specific subtask"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
