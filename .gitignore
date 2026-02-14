@@ -1,0 +1,37 @@
+# .NET build output
+Ralph/bin/
+Ralph/obj/
+
+# Tasks and logs (runtime artifacts)
+tasks.json
+*.tmp.*
+*.backup.*
+.ralph-logs/
+
+# Published binaries
+Ralph/publish/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Claude Code
+.claude/
+
+# Sensitive files
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json

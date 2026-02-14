@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Ralph</RootNamespace>
+    <AssemblyName>ralph</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>true</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+    <!-- IL2026: Suppress trim warnings for JSON reflection-based serialization (dev builds) -->
+    <NoWarn>IL2026</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Spectre.Console" Version="0.49.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\ralph-schema.json" LogicalName="ralph-schema.json" />
+  </ItemGroup>
+
+</Project>
