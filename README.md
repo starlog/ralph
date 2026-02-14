@@ -18,9 +18,45 @@ user-auth-plan ─→ user-auth-impl ─→ user-auth-test ─→ user-auth-comm
 payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit
 ```
 
+## 버전
+
+| 버전 | 구현 | 플랫폼 |
+|---|---|---|
+| v0.1 | `ralph.sh` (Bash) | macOS, Linux |
+| v0.2 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux |
+
 ## 설치
 
-### 필수 의존성
+### .NET 8 버전 (v0.2, 권장)
+
+#### 필수 의존성
+
+| 도구 | 설치 |
+|---|---|
+| .NET 8 SDK | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0) (빌드 시에만 필요) |
+| claude | [Claude Code](https://claude.ai/code) 설치 |
+| git | 기본 포함 |
+
+#### 빌드 및 설치
+
+```bash
+# 빌드 (단일 파일 바이너리 생성)
+cd Ralph
+dotnet publish -c Release -r win-x64    # Windows
+dotnet publish -c Release -r osx-x64    # macOS (Intel)
+dotnet publish -c Release -r osx-arm64  # macOS (Apple Silicon)
+dotnet publish -c Release -r linux-x64  # Linux
+
+# 생성된 바이너리를 PATH에 복사
+# Windows: Ralph/bin/Release/net8.0/win-x64/publish/ralph.exe
+# macOS/Linux: Ralph/bin/Release/net8.0/{rid}/publish/ralph
+```
+
+빌드된 단일 바이너리(~14MB)에는 .NET 런타임이 포함되어 있어 별도 설치가 필요 없다.
+
+### Bash 버전 (v0.1, macOS/Linux 전용)
+
+#### 필수 의존성
 
 | 도구 | 설치 |
 |---|---|
@@ -28,21 +64,13 @@ payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit
 | claude | [Claude Code](https://claude.ai/code) 설치 |
 | git | 기본 포함 |
 
-### 설치 방법
+#### 설치 방법
 
 ```bash
-git clone <repository-url>
-cd ralph
 ./install.sh
 ```
 
 `install.sh`는 `ralph.sh`와 `ralph-schema.json`을 `~/bin`에 복사하고 PATH를 설정한다.
-
-설치 후 터미널을 재시작하거나:
-
-```bash
-source ~/.zshrc   # 또는 ~/.bashrc
-```
 
 ## 사용법
 
@@ -50,16 +78,16 @@ source ~/.zshrc   # 또는 ~/.bashrc
 
 ```bash
 # 1. PRD에서 작업 계획 생성
-ralph.sh --plan docs/PRD.md
+ralph --plan docs/PRD.md
 
 # 2. 생성된 작업 확인
-ralph.sh --list
+ralph --list
 
 # 3. 실행 미리보기 (실제 변경 없음)
-ralph.sh --dry-run
+ralph --dry-run
 
 # 4. 전체 작업 자동 실행
-ralph.sh --run
+ralph --run
 ```
 
 ### 전체 명령어
@@ -83,18 +111,17 @@ ralph.sh --run
 `--run`에 파일 경로를 전달하면 기본 `tasks.json` 대신 해당 파일을 사용한다:
 
 ```bash
-ralph.sh --run my-project-tasks.json
+ralph --run my-project-tasks.json
 ```
 
 ### 대화형 모드
 
 `--interactive`로 실행하면 각 작업마다 선택지가 표시된다:
 
-- `y` — 실행
-- `n` — 건너뛰기
-- `p` — 프롬프트 미리보기
-- `s` — 건너뛰기
-- `q` — 종료
+- `Yes - Execute` — 실행
+- `Preview prompt` — 프롬프트 미리보기
+- `Skip` — 건너뛰기
+- `Quit` — 종료
 
 ### 환경 변수
 
@@ -105,12 +132,39 @@ ralph.sh --run my-project-tasks.json
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | 65536 | plan 생성 시 최대 토큰 수 |
 
 ```bash
-MAX_RETRIES=3 RETRY_DELAY=10 ralph.sh --run
+# Linux/macOS
+MAX_RETRIES=3 RETRY_DELAY=10 ralph --run
+
+# Windows (PowerShell)
+$env:MAX_RETRIES=3; $env:RETRY_DELAY=10; ralph --run
+```
+
+## 프로젝트 구조
+
+```
+ralph/
+├── Ralph/                      # .NET 8 프로젝트 (v0.2)
+│   ├── Ralph.csproj            # 프로젝트 설정 (단일 파일 배포)
+│   ├── Program.cs              # CLI 진입점 및 명령어 처리
+│   ├── Models/
+│   │   ├── TasksFile.cs        # tasks.json 모델 (TaskItem, SubTask 등)
+│   │   └── RalphJsonContext.cs # JSON 소스 생성기 (IL 트리밍 호환)
+│   └── Services/
+│       ├── ClaudeService.cs    # Claude Code 프로세스 실행 및 스트리밍
+│       ├── TaskManager.cs      # tasks.json 로드/저장/쿼리
+│       ├── GitService.cs       # Git 커밋 자동화
+│       ├── PlanGenerator.cs    # PRD → tasks.json 생성
+│       └── RalphLogger.cs      # 파일 로깅
+├── ralph.sh                    # Bash 버전 (v0.1)
+├── ralph-schema.json           # tasks.json JSON Schema
+├── install.sh                  # Bash 버전 설치 스크립트
+├── CLAUDE.md                   # Claude Code 가이드
+└── README.md
 ```
 
 ## tasks.json 구조
 
-`ralph.sh --plan`으로 자동 생성되거나 직접 작성할 수 있다. 스키마는 `ralph-schema.json`에 정의되어 있다.
+`ralph --plan`으로 자동 생성되거나 직접 작성할 수 있다. 스키마는 `ralph-schema.json`에 정의되어 있다.
 
 ### 최소 예시
 
@@ -149,17 +203,6 @@ MAX_RETRIES=3 RETRY_DELAY=10 ralph.sh --run
   "tasks": [ ... ]
 }
 ```
-
-### 최상위 속성
-
-| 속성 | 필수 | 타입 | 설명 |
-|---|---|---|---|
-| `projectName` | | string | 프로젝트 이름 |
-| `version` | | string | 버전 (예: `"1.0.0"`) |
-| `workflow` | | object | 작업 완료 후 동작 설정 |
-| `apiSpecs` | | object | API 사양 참조 (프롬프트에서 활용) |
-| `samplePages` | | object | 샘플 페이지 정의 (프롬프트에서 활용) |
-| `tasks` | **필수** | array | 작업 배열 |
 
 ### task 객체
 
@@ -250,10 +293,7 @@ MAX_RETRIES=3 RETRY_DELAY=10 ralph.sh --run
 
 ```bash
 # 최근 로그 확인
-ralph.sh --logs
-
-# 최신 로그 내용 보기
-cat .ralph-logs/$(ls -t .ralph-logs/ | head -1)
+ralph --logs
 ```
 
 ## 보안
