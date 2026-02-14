@@ -1,6 +1,7 @@
 # Ralph
 
 PRD(Product Requirements Document) 기반 작업 계획을 생성하고, Claude Code를 통해 순차적으로 자동 실행하는 CLI 태스크 오케스트레이터.
+Dotnet Core 8 Lts로 구현 (Windows, MacOS, Linux에서 다 사용해야 해서)
 
 ## 동작 원리
 
