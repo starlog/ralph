@@ -3,7 +3,7 @@ using Ralph.Models;
 using Ralph.Services;
 using Spectre.Console;
 
-const string Version = "0.2";
+const string Version = "0.3";
 
 // ─── UTF-8 console encoding ─────────────────────────────────────────────────
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -81,7 +81,12 @@ async Task<int> HandlePlan()
 
     var schemaContent = LoadEmbeddedSchema();
     var claude = new ClaudeService(maxRetries, retryDelay);
+    var git = new GitService();
     using var logger = new RalphLogger();
+
+    // Initialize git repo if not already initialized
+    if (!await git.IsRepoInitializedAsync(cts.Token))
+        await git.InitAsync(logger, cts.Token);
 
     var generator = new PlanGenerator();
     return await generator.GenerateAsync(prdFile, schemaContent, tasksFile, claude, logger, cts.Token);

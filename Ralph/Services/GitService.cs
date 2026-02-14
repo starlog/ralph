@@ -16,6 +16,29 @@ public class GitService
     private static readonly string[] SensitiveExtensions =
         [".env", ".pem", ".key", ".p12", ".pfx", ".secrets"];
 
+    public async Task<bool> IsRepoInitializedAsync(CancellationToken ct = default)
+    {
+        var (exitCode, _) = await RunAsync(["rev-parse", "--git-dir"], ct);
+        return exitCode == 0;
+    }
+
+    public async Task InitAsync(RalphLogger? logger = null, CancellationToken ct = default)
+    {
+        AnsiConsole.MarkupLine("[yellow]Git 저장소가 없습니다. 초기화합니다...[/]");
+        logger?.Info("Running git init");
+        var (exitCode, output) = await RunAsync(["init"], ct);
+        if (exitCode == 0)
+        {
+            AnsiConsole.MarkupLine("[green]Git 저장소 초기화 완료.[/]");
+            logger?.Info($"git init: {output.Trim()}");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[red]git init 실패: {Markup.Escape(output.Trim())}[/]");
+            logger?.Error($"git init failed: {output.Trim()}");
+        }
+    }
+
     public async Task<(int ExitCode, string Output)> RunAsync(
         string[] arguments, CancellationToken ct = default)
     {
