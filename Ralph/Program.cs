@@ -3,7 +3,7 @@ using Ralph.Models;
 using Ralph.Services;
 using Spectre.Console;
 
-const string Version = "0.6";
+const string Version = "0.7";
 
 // ─── UTF-8 console encoding ─────────────────────────────────────────────────
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -57,6 +57,7 @@ try
         "--task" => HandleSingleTask(),
         "--interactive" => HandleInteractive(),
         "--list" or "-l" => HandleList(),
+        "--graph" or "-g" => HandleGraph(),
         "--prompts" or "-p" => HandlePrompts(),
         "--status" or "-s" => HandleStatus(),
         "--reset" or "-r" => HandleReset(),
@@ -224,6 +225,15 @@ async Task<int> HandleList()
         AnsiConsole.MarkupLine($"\n[green]{readyTasks.Count}개 태스크가 병렬 실행 가능합니다.[/]");
     }
 
+    return 0;
+}
+
+async Task<int> HandleGraph()
+{
+    RequireFile(tasksFile);
+    var tm = await TaskManager.LoadAsync(tasksFile);
+    var renderer = new GraphRenderer(tm);
+    renderer.RenderToConsole();
     return 0;
 }
 
@@ -435,6 +445,7 @@ int ShowHelp()
     table.AddRow("[green]--task[/] <id>", "Run a specific task by ID");
     table.AddRow("[green]--interactive[/]", "Run tasks interactively (confirm each)");
     table.AddRow("[green]--list[/], -l", "List all pending tasks");
+    table.AddRow("[green]--graph[/], -g", "Show ASCII task dependency graph");
     table.AddRow("[green]--prompts[/], -p", "Show all task prompts");
     table.AddRow("[green]--status[/], -s", "Show progress status (with parallel batch info)");
     table.AddRow("[green]--reset[/], -r", "Reset all tasks to pending");

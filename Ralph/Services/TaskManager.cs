@@ -246,6 +246,60 @@ public class TaskManager
         }
     }
 
+    /// <summary>
+    /// Kahn's algorithm으로 전체 태스크를 위상 정렬 레이어별로 그룹화합니다.
+    /// 각 레이어는 동시 실행 가능한 태스크 그룹입니다.
+    /// </summary>
+    public List<List<string>> ComputeTopologicalLayers()
+    {
+        var inDegree = new Dictionary<string, int>();
+        var adj = new Dictionary<string, List<string>>();
+
+        foreach (var task in _data.Tasks)
+        {
+            inDegree.TryAdd(task.Id, 0);
+            adj.TryAdd(task.Id, []);
+        }
+
+        foreach (var task in _data.Tasks)
+        {
+            if (task.DependsOn is not { Count: > 0 }) continue;
+            foreach (var dep in task.DependsOn)
+            {
+                if (!adj.ContainsKey(dep)) continue;
+                adj[dep].Add(task.Id);
+                inDegree[task.Id] = inDegree.GetValueOrDefault(task.Id) + 1;
+            }
+        }
+
+        var layers = new List<List<string>>();
+        var queue = new Queue<string>(inDegree.Where(kv => kv.Value == 0).Select(kv => kv.Key));
+
+        while (queue.Count > 0)
+        {
+            var layer = new List<string>();
+            var nextQueue = new Queue<string>();
+
+            while (queue.Count > 0)
+            {
+                var node = queue.Dequeue();
+                layer.Add(node);
+                foreach (var neighbor in adj[node])
+                {
+                    inDegree[neighbor]--;
+                    if (inDegree[neighbor] == 0)
+                        nextQueue.Enqueue(neighbor);
+                }
+            }
+
+            if (layer.Count > 0)
+                layers.Add(layer);
+            queue = nextQueue;
+        }
+
+        return layers;
+    }
+
     public int GetTaskIndex(string taskId)
     {
         for (var i = 0; i < _data.Tasks.Count; i++)
