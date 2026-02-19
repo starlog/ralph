@@ -162,7 +162,7 @@ ralph/
 ├── samples/                        # 예제 파일
 │   └── PRD.md                      # 병렬 실행 예제 PRD (CLI 계산기)
 ├── ralph.sh                        # (레거시) Bash 버전 v0.1 — 사용 불필요
-├── ralph-schema.json               # tasks.json JSON Schema
+├── ralph-schema.json               # (레거시) 빌드 시 바이너리에 embed됨, 별도 파일 불필요
 ├── install.sh                      # (레거시) Bash 버전 설치 스크립트 — 사용 불필요
 ├── CLAUDE.md                       # Claude Code 가이드
 └── README.md
@@ -202,12 +202,12 @@ ralph/
     "onTaskComplete": {
       "commitChanges": true,
       "commitMessageTemplate": "[Task #{taskId}] {taskTitle}"
+    },
+    "parallel": {
+      "enabled": true,
+      "maxConcurrent": 3,
+      "conflictStrategy": "claude"
     }
-  },
-  "parallel": {
-    "enabled": true,
-    "maxConcurrent": 3,
-    "conflictStrategy": "claude"
   },
   "apiSpecs": { ... },
   "samplePages": { ... },
@@ -389,14 +389,16 @@ ralph --run ────────┤                                         
 
 ### tasks.json 병렬 설정
 
-`ralph --plan`이 자동 생성하며, 수동으로도 설정 가능하다:
+`ralph --plan`이 자동 생성하며, 수동으로도 설정 가능하다. `workflow` 내부에 위치한다:
 
 ```json
 {
-  "parallel": {
-    "enabled": true,
-    "maxConcurrent": 3,
-    "conflictStrategy": "claude"
+  "workflow": {
+    "parallel": {
+      "enabled": true,
+      "maxConcurrent": 3,
+      "conflictStrategy": "claude"
+    }
   }
 }
 ```

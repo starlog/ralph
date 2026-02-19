@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ralph-tasks-schema",
   "title": "Ralph Task Executor Schema",
-  "description": "JSON schema for tasks.json used by ralph.sh - a Claude Code task orchestrator",
+  "description": "JSON schema for tasks.json used by Ralph - a Claude Code task orchestrator with parallel execution support",
   "type": "object",
   "required": ["tasks"],
   "properties": {
@@ -35,31 +35,31 @@
             }
           },
           "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
-    "parallel": {
-      "type": "object",
-      "description": "Settings for parallel task execution using git worktrees",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable parallel execution of independent tasks via git worktrees"
         },
-        "maxConcurrent": {
-          "type": "integer",
-          "default": 3,
-          "minimum": 1,
-          "maximum": 10,
-          "description": "Maximum number of tasks to run concurrently in separate worktrees"
-        },
-        "conflictStrategy": {
-          "type": "string",
-          "enum": ["claude", "abort", "auto-theirs", "auto-ours"],
-          "default": "claude",
-          "description": "How to handle merge conflicts: 'claude' asks Claude to resolve, 'abort' stops and falls back to sequential, 'auto-theirs'/'auto-ours' uses git merge strategies"
+        "parallel": {
+          "type": "object",
+          "description": "Settings for parallel task execution using git worktrees",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable parallel execution of independent tasks via git worktrees"
+            },
+            "maxConcurrent": {
+              "type": "integer",
+              "default": 3,
+              "minimum": 1,
+              "maximum": 10,
+              "description": "Maximum number of tasks to run concurrently in separate worktrees"
+            },
+            "conflictStrategy": {
+              "type": "string",
+              "enum": ["claude", "abort", "auto-theirs", "auto-ours"],
+              "default": "claude",
+              "description": "How to handle merge conflicts: 'claude' asks Claude to resolve, 'abort' stops and falls back to sequential, 'auto-theirs'/'auto-ours' uses git merge strategies"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -155,7 +155,7 @@
         "done": {
           "type": "boolean",
           "default": false,
-          "description": "Whether this task has been completed. Set to true by ralph.sh upon completion."
+          "description": "Whether this task has been completed. Set to true by Ralph upon completion."
         },
         "prompt": {
           "type": "string",
