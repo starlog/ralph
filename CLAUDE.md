@@ -17,11 +17,12 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 |---|---|
 | `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, sonnet model) to produce tasks.json |
 | `ClaudeService.cs` | Runs Claude Code process with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY) |
-| `TaskManager.cs` | Loads/saves/queries tasks.json, dependency DAG traversal, parallel batch computation |
+| `TaskManager.cs` | Loads/saves/queries tasks.json, dependency DAG traversal, parallel batch computation, topological layer computation |
 | `ParallelExecutor.cs` | Worktree-based parallel task execution with live progress dashboard, merge handling |
 | `WorktreeService.cs` | Git worktree lifecycle: create, merge, cleanup, stale detection |
 | `TaskProgressTracker.cs` | Live Spectre.Console table showing per-task status during parallel execution |
 | `GitService.cs` | Git operations: init, commit, branch management, auto initial commit for worktree support |
+| `GraphRenderer.cs` | ASCII task dependency graph rendering with parallel/sequential visualization |
 | `RalphLogger.cs` | File-based logging to `.ralph-logs/` |
 
 ### Execution Modes
@@ -60,6 +61,7 @@ ralph --run --max-parallel 4     # Limit concurrent tasks
 ralph --task <id>                # Run single task
 
 # Monitoring
+ralph --graph                    # ASCII task dependency graph
 ralph --status                   # Progress dashboard with parallel batch info
 ralph --logs                     # List log files
 ralph --logs <task-id>           # View specific task log
