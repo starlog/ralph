@@ -56,23 +56,9 @@ dotnet publish -c Release -r linux-x64  # Linux
 
 빌드된 단일 바이너리(~14MB)에는 .NET 런타임이 포함되어 있어 별도 설치가 필요 없다.
 
-### Bash 버전 (v0.1, macOS/Linux 전용)
+### ~~Bash 버전 (v0.1, macOS/Linux 전용)~~ — 레거시, 사용 불필요
 
-#### 필수 의존성
-
-| 도구 | 설치 |
-|---|---|
-| jq | `brew install jq` |
-| claude | [Claude Code](https://claude.ai/code) 설치 |
-| git | 기본 포함 |
-
-#### 설치 방법
-
-```bash
-./install.sh
-```
-
-`install.sh`는 `ralph.sh`와 `ralph-schema.json`을 `~/bin`에 복사하고 PATH를 설정한다.
+> **참고:** `ralph.sh`와 `install.sh`는 v0.1 Bash 구현의 잔존 파일로, 현재 .NET 8 버전(v0.6)에서는 **사용하지 않는다.** 병렬 실행, worktree, live log 등 최신 기능은 .NET 버전에만 포함되어 있다.
 
 ## 사용법
 
@@ -173,9 +159,11 @@ ralph/
 │       ├── WorktreeService.cs      # Git worktree 생성/병합/정리
 │       ├── TaskProgressTracker.cs  # 병렬 실행 실시간 진행 상황 표시
 │       └── RalphLogger.cs          # 파일 로깅
-├── ralph.sh                        # Bash 버전 (v0.1, 레거시)
+├── samples/                        # 예제 파일
+│   └── PRD.md                      # 병렬 실행 예제 PRD (CLI 계산기)
+├── ralph.sh                        # (레거시) Bash 버전 v0.1 — 사용 불필요
 ├── ralph-schema.json               # tasks.json JSON Schema
-├── install.sh                      # Bash 버전 설치 스크립트
+├── install.sh                      # (레거시) Bash 버전 설치 스크립트 — 사용 불필요
 ├── CLAUDE.md                       # Claude Code 가이드
 └── README.md
 ```
@@ -514,6 +502,33 @@ ralph --logs add-impl
 # 실시간 로그 추적 (병렬 실행 중 모니터링)
 ralph --logs --live add-impl
 ```
+
+## 예제
+
+`samples/` 디렉토리에 Ralph 사용 예제가 포함되어 있다.
+
+### samples/PRD.md — CLI 계산기
+
+병렬 실행에 최적화된 PRD 예제. Python 사칙연산 계산기를 구현하며, 다음 구조를 보여준다:
+
+- **Phase 1** — 4개 연산 모듈(`add.py`, `subtract.py`, `multiply.py`, `divide.py`)이 각각 독립적이므로 **병렬 실행**
+- **Phase 2** — `main.py`가 4개 모듈을 모두 import하므로 Phase 1 완료 후 **순차 실행**
+- **Phase 3** — 통합 테스트, Phase 2 완료 후 실행
+
+```bash
+# 예제 실행 방법
+mkdir my-calculator && cd my-calculator
+cp /path/to/ralph/samples/PRD.md .
+
+ralph --plan PRD.md       # 24개 태스크 생성 (4개 병렬 시작점)
+ralph --status            # 병렬 배치 구조 확인
+ralph --run               # 실행 (Phase 1은 4개 동시, Phase 2~3은 순차)
+```
+
+이 PRD의 핵심 포인트:
+- 각 모듈이 **별도 파일**을 수정하므로 병합 충돌 없이 병렬 실행 가능
+- Phase와 의존성을 **명시적으로 기술**하여 plan generator가 정확한 `dependsOn`을 생성
+- `"병렬 실행 가능"` 힌트를 PRD에 포함하여 병렬 구조 유도
 
 ## 보안
 
