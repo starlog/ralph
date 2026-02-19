@@ -50,6 +50,9 @@ public class TaskItem
     [JsonPropertyName("outputFiles")]
     public List<string>? OutputFiles { get; set; }
 
+    [JsonPropertyName("modifiedFiles")]
+    public List<string>? ModifiedFiles { get; set; }
+
     [JsonPropertyName("subtasks")]
     public List<SubTask>? Subtasks { get; set; }
 
@@ -79,6 +82,24 @@ public class WorkflowSettings
 {
     [JsonPropertyName("onTaskComplete")]
     public OnTaskComplete? OnTaskComplete { get; set; }
+
+    [JsonPropertyName("parallel")]
+    public ParallelSettings? Parallel { get; set; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+public class ParallelSettings
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; } = true;
+
+    [JsonPropertyName("maxConcurrent")]
+    public int MaxConcurrent { get; set; } = 3;
+
+    [JsonPropertyName("conflictStrategy")]
+    public string ConflictStrategy { get; set; } = "claude";
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }

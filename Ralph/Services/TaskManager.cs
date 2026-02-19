@@ -7,7 +7,7 @@ namespace Ralph.Services;
 public class TaskManager
 {
     private readonly string _filePath;
-    private readonly TasksFile _data;
+    private TasksFile _data;
 
     public static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -26,6 +26,9 @@ public class TaskManager
         => _data.Workflow?.OnTaskComplete?.CommitMessageTemplate
            ?? "[Task #{taskId}] {taskTitle}";
 
+    public ParallelSettings ParallelConfig
+        => _data.Workflow?.Parallel ?? new ParallelSettings();
+
     private TaskManager(string filePath, TasksFile data)
     {
         _filePath = filePath;
@@ -38,6 +41,13 @@ public class TaskManager
         var data = JsonSerializer.Deserialize<TasksFile>(json, JsonOptions)
                    ?? throw new InvalidOperationException($"Failed to deserialize {filePath}");
         return new TaskManager(filePath, data);
+    }
+
+    public async Task ReloadAsync()
+    {
+        var json = await File.ReadAllTextAsync(_filePath);
+        _data = JsonSerializer.Deserialize<TasksFile>(json, JsonOptions)
+                ?? throw new InvalidOperationException($"Failed to deserialize {_filePath}");
     }
 
     public async Task SaveAsync()
@@ -96,6 +106,117 @@ public class TaskManager
                 return task.Id;
         }
         return null;
+    }
+
+    /// <summary>
+    /// 의존성이 모두 충족된 모든 pending 태스크를 반환합니다.
+    /// </summary>
+    public List<string> GetAllReadyTasks()
+    {
+        return _data.Tasks
+            .Where(t => !t.Done && CheckDependencies(t.Id, out _))
+            .Select(t => t.Id)
+            .ToList();
+    }
+
+    /// <summary>
+    /// ready 태스크들을 파일 충돌이 없는 배치로 그룹화합니다.
+    /// 같은 파일을 수정하는 태스크는 서로 다른 배치에 배치됩니다.
+    /// </summary>
+    public List<List<string>> GetParallelBatches()
+    {
+        var readyTasks = GetAllReadyTasks();
+        var batches = new List<List<string>>();
+        var scheduled = new HashSet<string>();
+
+        while (scheduled.Count < readyTasks.Count)
+        {
+            var batch = new List<string>();
+            var batchFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var taskId in readyTasks.Where(t => !scheduled.Contains(t)))
+            {
+                var task = GetTask(taskId)!;
+                var taskFiles = GetTaskFiles(task);
+
+                // 파일 충돌 검사: 이 배치의 다른 태스크와 파일이 겹치지 않으면 추가
+                if (taskFiles.Count == 0 || !taskFiles.Any(f => batchFiles.Contains(f)))
+                {
+                    batch.Add(taskId);
+                    batchFiles.UnionWith(taskFiles);
+                }
+            }
+
+            if (batch.Count == 0)
+                break; // 무한루프 방지
+
+            batches.Add(batch);
+            scheduled.UnionWith(batch);
+        }
+
+        return batches;
+    }
+
+    /// <summary>
+    /// 태스크가 수정할 파일 목록을 반환합니다. (outputFiles + modifiedFiles 통합)
+    /// </summary>
+    private static HashSet<string> GetTaskFiles(TaskItem task)
+    {
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (task.OutputFiles is { Count: > 0 })
+            files.UnionWith(task.OutputFiles);
+        if (task.ModifiedFiles is { Count: > 0 })
+            files.UnionWith(task.ModifiedFiles);
+        return files;
+    }
+
+    /// <summary>
+    /// 의존성 그래프에 순환 참조가 있는지 검사합니다. (Kahn's algorithm)
+    /// </summary>
+    public bool HasCycle(out List<string> cycle)
+    {
+        cycle = [];
+        var inDegree = new Dictionary<string, int>();
+        var adj = new Dictionary<string, List<string>>();
+
+        foreach (var task in _data.Tasks)
+        {
+            inDegree.TryAdd(task.Id, 0);
+            adj.TryAdd(task.Id, []);
+        }
+
+        foreach (var task in _data.Tasks)
+        {
+            if (task.DependsOn is not { Count: > 0 }) continue;
+            foreach (var dep in task.DependsOn)
+            {
+                if (!adj.ContainsKey(dep)) continue;
+                adj[dep].Add(task.Id);
+                inDegree[task.Id] = inDegree.GetValueOrDefault(task.Id) + 1;
+            }
+        }
+
+        var queue = new Queue<string>(inDegree.Where(kv => kv.Value == 0).Select(kv => kv.Key));
+        var visited = 0;
+
+        while (queue.Count > 0)
+        {
+            var node = queue.Dequeue();
+            visited++;
+            foreach (var neighbor in adj[node])
+            {
+                inDegree[neighbor]--;
+                if (inDegree[neighbor] == 0)
+                    queue.Enqueue(neighbor);
+            }
+        }
+
+        if (visited == _data.Tasks.Count)
+            return false;
+
+        // 순환에 포함된 노드 찾기
+        cycle = inDegree.Where(kv => kv.Value > 0).Select(kv => kv.Key).ToList();
+        return true;
     }
 
     public void MarkTaskDone(string taskId)

@@ -39,6 +39,31 @@
       },
       "additionalProperties": false
     },
+    "parallel": {
+      "type": "object",
+      "description": "Settings for parallel task execution using git worktrees",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable parallel execution of independent tasks via git worktrees"
+        },
+        "maxConcurrent": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum number of tasks to run concurrently in separate worktrees"
+        },
+        "conflictStrategy": {
+          "type": "string",
+          "enum": ["claude", "abort", "auto-theirs", "auto-ours"],
+          "default": "claude",
+          "description": "How to handle merge conflicts: 'claude' asks Claude to resolve, 'abort' stops and falls back to sequential, 'auto-theirs'/'auto-ours' uses git merge strategies"
+        }
+      },
+      "additionalProperties": false
+    },
     "apiSpecs": {
       "type": "object",
       "description": "Optional API specification references that tasks may consult",
@@ -144,9 +169,16 @@
           },
           "examples": [["src/api/routes.ts", "src/models/user.ts"]]
         },
+        "modifiedFiles": {
+          "type": "array",
+          "description": "List of file paths this task will modify. Used to detect potential merge conflicts for parallel execution.",
+          "items": {
+            "type": "string"
+          }
+        },
         "dependsOn": {
           "type": "array",
-          "description": "List of task IDs that must be completed before this task can run (not yet enforced by ralph.sh, but useful for documentation)",
+          "description": "List of task IDs that must be completed before this task can run. Used for dependency resolution and parallel execution planning.",
           "items": {
             "type": "string"
           }

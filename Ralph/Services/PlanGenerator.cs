@@ -43,6 +43,10 @@ public partial class PlanGenerator
         // Run Claude (no tools, sonnet model)
         AnsiConsole.Write(new Rule("[yellow]Claude Code Output[/]").RuleStyle("yellow"));
 
+        // Track if Claude writes the file directly via tools
+        var preExisting = File.Exists(tasksFile);
+        var preWriteTime = preExisting ? File.GetLastWriteTimeUtc(tasksFile) : DateTime.MinValue;
+
         var result = await claude.RunStreamAsync(prompt, noTools: true, logger: logger, ct: ct);
 
         AnsiConsole.Write(new Rule().RuleStyle("yellow"));
@@ -56,6 +60,22 @@ public partial class PlanGenerator
 
         // Extract JSON from output
         var jsonContent = ExtractJson(result.Output);
+
+        // Fallback: Claude may have written the file directly using tools
+        if (jsonContent == null && File.Exists(tasksFile))
+        {
+            var postWriteTime = File.GetLastWriteTimeUtc(tasksFile);
+            if (!preExisting || postWriteTime > preWriteTime)
+            {
+                var fileContent = await File.ReadAllTextAsync(tasksFile, ct);
+                if (TryParseTasksJson(fileContent, out var fromFile))
+                {
+                    jsonContent = fromFile;
+                    AnsiConsole.MarkupLine("[cyan]Note: Using tasks.json created by Claude directly.[/]");
+                }
+            }
+        }
+
         if (jsonContent == null)
         {
             AnsiConsole.MarkupLine("[red]Error: No valid JSON found in Claude output.[/]");
@@ -104,6 +124,10 @@ public partial class PlanGenerator
         var formatted = JsonSerializer.Serialize(parsed, TaskManager.JsonOptions);
         await File.WriteAllTextAsync(tasksFile, formatted, ct);
 
+        // Analyze parallelism potential
+        var noDeps = parsed.Tasks.Count(t => t.DependsOn is not { Count: > 0 });
+        var withModFiles = parsed.Tasks.Count(t => t.ModifiedFiles is { Count: > 0 });
+
         // Summary
         AnsiConsole.MarkupLine("\n[green]Plan generated successfully![/]");
         AnsiConsole.Write(new Rule().RuleStyle("blue"));
@@ -118,13 +142,16 @@ public partial class PlanGenerator
         table.AddRow("[cyan]Implementation[/]", $"{implCount} tasks");
         table.AddRow("[cyan]Testing[/]", $"{testCount} tasks");
         table.AddRow("[cyan]Commit[/]", $"{commitCount} tasks");
+        table.AddRow("[green]Root tasks (no deps)[/]", $"{noDeps} (parallel start points)");
+        table.AddRow("[green]With modifiedFiles[/]", $"{withModFiles} tasks");
         AnsiConsole.Write(table);
 
         AnsiConsole.Write(new Rule().RuleStyle("blue"));
         AnsiConsole.MarkupLine("\nNext steps:");
         AnsiConsole.MarkupLine("  [green]ralph --list[/]       Review generated tasks");
+        AnsiConsole.MarkupLine("  [green]ralph --status[/]     Check parallel execution plan");
         AnsiConsole.MarkupLine("  [green]ralph --dry-run[/]    Preview execution");
-        AnsiConsole.MarkupLine("  [green]ralph --run[/]        Execute all tasks\n");
+        AnsiConsole.MarkupLine("  [green]ralph --run[/]        Execute all tasks (parallel by default)\n");
         return 0;
     }
 
@@ -133,6 +160,7 @@ public partial class PlanGenerator
         var sb = new StringBuilder();
         sb.AppendLine("""
             You are a project planner that generates a tasks.json file for the Ralph task executor.
+            Ralph supports **parallel execution** of independent tasks using git worktrees.
 
             ## Your Goal
             Read the PRD (Product Requirements Document) below and produce a **single valid JSON** object that conforms to the provided JSON schema. Output ONLY the JSON — no markdown fences, no commentary.
@@ -146,7 +174,6 @@ public partial class PlanGenerator
                Step A - **Plan** (category: "plan")
                   - id: `{feature}-plan`
                   - The prompt must instruct Claude to: analyze requirements for this feature, examine the existing codebase, identify files to create/modify, design the architecture, and write a detailed implementation plan as a markdown file.
-                  - No dependsOn for the first feature's plan. Subsequent feature plans depend on the previous feature's commit task.
 
                Step B - **Implementation** (category: "implementation")
                   - id: `{feature}-impl`
@@ -163,19 +190,37 @@ public partial class PlanGenerator
                   - dependsOn: [`{feature}-test`]
                   - The prompt must instruct Claude to: review all changes, stage the relevant files (not sensitive files like .env), and create a git commit with a descriptive message in Korean.
 
-            3. **Task ID format:** Use lowercase kebab-case.
+            3. **Cross-feature dependencies (IMPORTANT for parallel execution):**
+               - Features that are **independent** (don't share files or code dependencies) should have NO cross-feature dependencies. This allows Ralph to execute them in parallel using git worktrees.
+               - Only add cross-feature dependencies when features genuinely depend on each other (e.g., feature B uses APIs created by feature A, or both modify the same files).
+               - Example of GOOD parallel structure:
+                 ```
+                 auth-plan (no deps) → auth-impl → auth-test → auth-commit
+                 payment-plan (no deps) → payment-impl → payment-test → payment-commit
+                 ```
+                 Here auth and payment can run in parallel because they are independent.
+               - Example of REQUIRED sequential dependency:
+                 ```
+                 db-setup-plan → db-setup-impl → db-setup-test → db-setup-commit
+                 user-api-plan (depends: db-setup-commit) → user-api-impl → ...
+                 ```
+                 Here user-api depends on db-setup because it uses the database schema.
 
-            4. **Phase naming:** Group related features into phases (e.g., "phase1-setup", "phase2-core", "phase3-ui").
+            4. **`modifiedFiles` field:** List the specific files each task will create or modify. This is critical for parallel execution — Ralph uses this to detect potential merge conflicts and avoid running conflicting tasks simultaneously.
 
-            5. **Prompts must be detailed and self-contained.**
+            5. **`outputFiles` field:** List the files each task is expected to create or modify.
 
-            6. **outputFiles:** List the files each task is expected to create or modify.
+            6. **Task ID format:** Use lowercase kebab-case.
 
-            7. **Workflow settings:** Set `workflow.onTaskComplete.commitChanges` to `true`.
+            7. **Phase naming:** Group related features into phases (e.g., "phase1-setup", "phase2-core", "phase3-ui").
 
-            8. **All tasks start with `"done": false`.**
+            8. **Prompts must be detailed and self-contained.**
 
-            9. **Include a `projectName` and `version` field** derived from the PRD.
+            9. **Workflow settings:** Set `workflow.onTaskComplete.commitChanges` to `true`. Include `workflow.parallel.enabled: true`.
+
+            10. **All tasks start with `"done": false`.**
+
+            11. **Include a `projectName` and `version` field** derived from the PRD.
 
             ## JSON Schema
             """);
@@ -208,7 +253,20 @@ public partial class PlanGenerator
 
         // Strategy 2: Try the entire output after stripping fences
         var stripped = FenceMarkerRegex().Replace(output, "").Trim();
-        return TryParseTasksJson(stripped, out var fallback) ? fallback : null;
+        if (TryParseTasksJson(stripped, out var fallback))
+            return fallback;
+
+        // Strategy 3: Find the outermost { ... } that contains a valid tasks JSON
+        var firstBrace = output.IndexOf('{');
+        var lastBrace = output.LastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace)
+        {
+            var candidate = output[firstBrace..(lastBrace + 1)];
+            if (TryParseTasksJson(candidate, out var braceResult))
+                return braceResult;
+        }
+
+        return null;
     }
 
     private static bool TryParseTasksJson(string text, out string formatted)

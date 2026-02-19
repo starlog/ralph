@@ -18,7 +18,9 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
     public async Task<ClaudeResult> RunStreamAsync(
         string prompt,
         bool noTools = false,
+        string? workingDirectory = null,
         RalphLogger? logger = null,
+        TextWriter? output = null,
         CancellationToken ct = default)
     {
         var psi = new ProcessStartInfo
@@ -32,6 +34,9 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+
+        if (!string.IsNullOrEmpty(workingDirectory))
+            psi.WorkingDirectory = workingDirectory;
 
         // Build arguments via ArgumentList (safe escaping)
         psi.ArgumentList.Add("-p");
@@ -56,7 +61,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         psi.Environment.Remove("CLAUDECODE");
 
         using var process = new Process { StartInfo = psi };
-        var output = new StringBuilder();
+        var outputBuf = new StringBuilder();
+        var streamedOutput = new StringBuilder();
 
         process.Start();
 
@@ -75,7 +81,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             var earlyStderr = await stderrTask;
             await process.WaitForExitAsync(ct);
             var errMsg = !string.IsNullOrWhiteSpace(earlyStderr) ? earlyStderr : ex.Message;
-            AnsiConsole.MarkupLine($"[red]Claude process failed to start: {Markup.Escape(errMsg.Trim())}[/]");
+            if (output == null)
+                AnsiConsole.MarkupLine($"[red]Claude process failed to start: {Markup.Escape(errMsg.Trim())}[/]");
             logger?.Error($"Claude stdin pipe broken: {errMsg.Trim()}");
             return new ClaudeResult
             {
@@ -85,6 +92,9 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                 ExitCode = process.ExitCode,
             };
         }
+
+        // Determine where streaming chunks go: log file or console
+        var sink = output ?? Console.Out;
 
         // Read stdout line by line — each line is a stream-json object
         var reader = process.StandardOutput;
@@ -108,26 +118,35 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
                     if (eventType == "content_block_start")
                     {
-                        Console.WriteLine();
+                        sink.WriteLine();
                     }
                     else if (eventType == "content_block_delta"
                              && evt.TryGetProperty("delta", out var delta)
                              && delta.TryGetProperty("text", out var text))
                     {
                         var chunk = text.GetString() ?? "";
-                        Console.Write(chunk);
+                        sink.Write(chunk);
+                        streamedOutput.Append(chunk);
                     }
                 }
                 else if (type == "assistant" && root.TryGetProperty("message", out var msg))
                 {
                     if (msg.TryGetProperty("content", out var content))
                     {
+                        // Clear and rebuild to handle partial message updates
+                        outputBuf.Clear();
                         foreach (var item in content.EnumerateArray())
                         {
                             if (item.TryGetProperty("text", out var txt))
-                                output.AppendLine(txt.GetString());
+                                outputBuf.AppendLine(txt.GetString());
                         }
                     }
+                }
+                else if (type == "result" && root.TryGetProperty("result", out var resultText))
+                {
+                    var resultStr = resultText.GetString();
+                    if (!string.IsNullOrWhiteSpace(resultStr) && outputBuf.Length == 0)
+                        outputBuf.Append(resultStr);
                 }
             }
             catch (JsonException)
@@ -140,18 +159,22 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         var stderr = await stderrTask;
         await process.WaitForExitAsync(ct);
 
-        Console.WriteLine(); // Final newline
+        sink.WriteLine(); // Final newline
 
         if (!string.IsNullOrWhiteSpace(stderr) && process.ExitCode != 0)
         {
-            AnsiConsole.MarkupLine($"[red]Claude stderr: {Markup.Escape(stderr.Trim())}[/]");
+            if (output == null)
+                AnsiConsole.MarkupLine($"[red]Claude stderr: {Markup.Escape(stderr.Trim())}[/]");
             logger?.Error($"Claude stderr: {stderr.Trim()}");
         }
+
+        // Use assistant/result message if available, otherwise fall back to streamed deltas
+        var finalOutput = outputBuf.Length > 0 ? outputBuf.ToString() : streamedOutput.ToString();
 
         return new ClaudeResult
         {
             Success = process.ExitCode == 0,
-            Output = output.ToString(),
+            Output = finalOutput,
             Stderr = stderr,
             ExitCode = process.ExitCode,
         };
@@ -160,22 +183,25 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
     public async Task<ClaudeResult> RunWithRetryAsync(
         string prompt,
         bool noTools = false,
+        string? workingDirectory = null,
         RalphLogger? logger = null,
+        TextWriter? output = null,
         CancellationToken ct = default)
     {
         for (var attempt = 1; attempt <= maxRetries; attempt++)
         {
             if (attempt > 1)
             {
-                AnsiConsole.MarkupLine(
-                    $"[yellow]Retry attempt {attempt}/{maxRetries} (waiting {retryDelay}s)...[/]");
+                if (output == null)
+                    AnsiConsole.MarkupLine(
+                        $"[yellow]Retry attempt {attempt}/{maxRetries} (waiting {retryDelay}s)...[/]");
                 logger?.Info($"Retry attempt {attempt}/{maxRetries}");
                 await Task.Delay(retryDelay * 1000, ct);
             }
 
             logger?.Info($"Running Claude Code (attempt {attempt})");
 
-            var result = await RunStreamAsync(prompt, noTools, logger, ct);
+            var result = await RunStreamAsync(prompt, noTools, workingDirectory, logger, output, ct);
             if (result.Success)
             {
                 logger?.Info("Claude Code execution successful");
@@ -183,11 +209,13 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             }
 
             logger?.Error($"Claude Code failed with exit code {result.ExitCode} (attempt {attempt})");
-            AnsiConsole.MarkupLine($"[red]Claude Code failed (exit code: {result.ExitCode})[/]");
+            if (output == null)
+                AnsiConsole.MarkupLine($"[red]Claude Code failed (exit code: {result.ExitCode})[/]");
         }
 
         logger?.Error($"Claude Code failed after {maxRetries} attempts");
-        AnsiConsole.MarkupLine($"[red]Claude Code failed after {maxRetries} attempts[/]");
+        if (output == null)
+            AnsiConsole.MarkupLine($"[red]Claude Code failed after {maxRetries} attempts[/]");
         return new ClaudeResult { Success = false, ExitCode = 1 };
     }
 }

@@ -4,55 +4,79 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Ralph is a CLI task orchestrator that generates execution plans from PRD (Product Requirements Document) files and runs them sequentially using Claude Code. It follows a 4-phase pattern per feature: **plan → implementation → testing → commit**, with dependency tracking between tasks.
+Ralph is a CLI task orchestrator that generates execution plans from PRD (Product Requirements Document) files and runs them in parallel (or sequentially) using Claude Code. It follows a 4-phase pattern per feature: **plan → implementation → testing → commit**, with dependency tracking between tasks. Built with .NET 8 for cross-platform support (Windows, macOS, Linux).
 
 ## Architecture
 
-- **ralph.sh** — Single-file bash script containing the entire orchestrator: CLI parsing, task querying, Claude Code integration (streaming JSON), dependency resolution, git auto-commit, logging, and signal handling.
-- **ralph-schema.json** — JSON Schema (2020-12) defining the `tasks.json` structure: tasks array with id/title/done/prompt/dependsOn/outputFiles/subtasks, workflow settings, and optional apiSpecs/samplePages.
-- **install.sh** — Copies ralph.sh and ralph-schema.json to `~/bin` and updates PATH.
+- **Ralph/** — .NET 8 C# project producing a self-contained single-file binary.
+- **ralph-schema.json** — JSON Schema (2020-12) defining the `tasks.json` structure: tasks array with id/title/done/prompt/dependsOn/outputFiles/modifiedFiles/subtasks, workflow settings (including parallel config), and optional apiSpecs/samplePages.
 
-### Key Internal Components (ralph.sh)
+### Key Services (Ralph/Services/)
 
-| Function | Purpose |
+| Service | Purpose |
 |---|---|
-| `generate_plan()` | Sends PRD + schema to Claude (tools disabled, sonnet model) to produce tasks.json |
-| `run_claude_stream()` | Runs Claude in background with stream-json output, polls for new lines, parses deltas — designed for Ctrl+C safety via `wait` builtin |
-| `run_claude()` | Wraps `run_claude_stream` with retry logic (MAX_RETRIES/RETRY_DELAY) |
-| `safe_jq_update()` | Atomic jq-based JSON mutation with validation (prevents corrupt tasks.json) |
-| `check_dependencies()` / `get_next_ready_task()` | Dependency DAG traversal for task ordering |
-| `commit_changes()` | Auto git-add with sensitive file exclusion patterns |
+| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, sonnet model) to produce tasks.json |
+| `ClaudeService.cs` | Runs Claude Code process with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY) |
+| `TaskManager.cs` | Loads/saves/queries tasks.json, dependency DAG traversal, parallel batch computation |
+| `ParallelExecutor.cs` | Worktree-based parallel task execution with live progress dashboard, merge handling |
+| `WorktreeService.cs` | Git worktree lifecycle: create, merge, cleanup, stale detection |
+| `TaskProgressTracker.cs` | Live Spectre.Console table showing per-task status during parallel execution |
+| `GitService.cs` | Git operations: init, commit, branch management, auto initial commit for worktree support |
+| `RalphLogger.cs` | File-based logging to `.ralph-logs/` |
 
 ### Execution Modes
 
-- `--run [file]` — Auto mode: runs all ready tasks sequentially (optional custom tasks JSON, defaults to tasks.json)
-- `--interactive` — Prompts before each task (y/n/p/s/q)
+- `--run [file]` — Auto mode: parallel by default (uses git worktrees), falls back to sequential for single tasks
+- `--run --sequential` — Force sequential execution (no worktrees)
+- `--interactive` — Prompts before each task
 - `--dry-run` — Simulates execution, restores tasks.json afterward
 - `--task <id>` — Runs a single task by ID
+
+### Parallel Execution Flow
+
+1. Ensures at least one commit exists (required for worktree creation)
+2. Detects and cleans stale worktrees
+3. Groups independent tasks into parallel batches
+4. Creates a git worktree per task (`ralph/{taskId}` branch)
+5. Runs Claude Code in each worktree concurrently (with live progress table)
+6. Sequentially merges completed branches back to base branch
+7. Handles merge conflicts via configured strategy (claude/abort/auto-theirs/auto-ours)
 
 ## Commands
 
 ```bash
 # Standard workflow
-./ralph.sh --plan PRD.md          # Generate tasks.json from PRD
-./ralph.sh --list                 # List pending tasks
-./ralph.sh --dry-run              # Preview execution (no changes)
-./ralph.sh --run                  # Execute all pending tasks
-./ralph.sh --run custom.json      # Execute from custom task file
+ralph --plan PRD.md              # Generate tasks.json from PRD
+ralph --list                     # List pending tasks
+ralph --dry-run                  # Preview execution (no changes)
+ralph --run                      # Execute all tasks (parallel by default)
+ralph --run custom.json          # Execute from custom task file
 
-# Other
-./ralph.sh --task <id>            # Run single task
-./ralph.sh --prompts              # Show all task prompts
-./ralph.sh --status               # Progress dashboard
-./ralph.sh --reset                # Reset all tasks to pending
-./ralph.sh --logs                 # Show recent log files
+# Execution options
+ralph --run --sequential         # Force sequential execution
+ralph --run --max-parallel 4     # Limit concurrent tasks
+
+# Single task
+ralph --task <id>                # Run single task
+
+# Monitoring
+ralph --status                   # Progress dashboard with parallel batch info
+ralph --logs                     # List log files
+ralph --logs <task-id>           # View specific task log
+ralph --logs --live <task-id>    # Live tail task log (like tail -f)
+
+# Maintenance
+ralph --interactive              # Run tasks interactively
+ralph --prompts                  # Show all task prompts
+ralph --reset                    # Reset all tasks to pending
+ralph --worktree-cleanup         # Clean up stale worktrees
 ```
 
 ## Dependencies
 
-- **jq** — Required for all JSON operations (`brew install jq`)
 - **claude** — Claude Code CLI, invoked with `--dangerously-skip-permissions --output-format stream-json`
-- **git** — Auto-commit after each task completion
+- **git** — Auto-commit after each task completion, worktree-based parallel execution
+- **.NET 8 SDK** — Build only (published binary is self-contained)
 
 ## Environment Variables
 
@@ -60,12 +84,15 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 |---|---|---|
 | `MAX_RETRIES` | 2 | Claude Code retry attempts |
 | `RETRY_DELAY` | 5 | Seconds between retries |
-| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | 65536 | Token limit for plan generation |
+| `RALPH_MAX_PARALLEL` | 0 (use tasks.json) | Override max concurrent tasks |
+| `RALPH_PARALLEL` | true | Set to `false` to disable parallel execution |
 
 ## Conventions
 
 - Task IDs use kebab-case: `{feature}-plan`, `{feature}-impl`, `{feature}-test`, `{feature}-commit`
 - Git commit messages must be in Korean
 - Sensitive files (.env, *.pem, *.key, credentials.json, etc.) are auto-excluded from commits
-- Logs go to `.ralph-logs/ralph-YYYYMMDD-HHMMSS.log`
-- `RALPH_HOME` resolves to the directory containing ralph.sh; schema is loaded relative to it
+- Session logs: `.ralph-logs/ralph-YYYYMMDD-HHMMSS.log`
+- Task logs (parallel): `.ralph-logs/{taskId}.log`
+- Worktrees created at `.ralph-worktrees/{taskId}` (auto-cleaned after execution)
+- Schema is embedded in the binary as an EmbeddedResource

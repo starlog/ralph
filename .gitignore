@@ -7,6 +7,7 @@ tasks.json
 *.tmp.*
 *.backup.*
 .ralph-logs/
+.ralph-worktrees/
 
 # Published binaries
 Ralph/publish/
