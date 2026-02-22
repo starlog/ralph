@@ -15,6 +15,13 @@ public class ClaudeResult
 
 public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 {
+    private static string BuildArgsSummary(ProcessStartInfo psi)
+    {
+        var args = string.Join(" ", psi.ArgumentList.Select(a =>
+            a.Contains(' ') || a.Length == 0 ? $"\"{a}\"" : a));
+        return $"{psi.FileName} {args}";
+    }
+
     public async Task<ClaudeResult> RunStreamAsync(
         string prompt,
         bool noTools = false,
@@ -44,12 +51,11 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         psi.ArgumentList.Add("--output-format");
         psi.ArgumentList.Add("stream-json");
         psi.ArgumentList.Add("--verbose");
-        psi.ArgumentList.Add("--include-partial-messages");
 
         if (noTools)
         {
             psi.ArgumentList.Add("--allowedTools");
-            psi.ArgumentList.Add("none");
+            psi.ArgumentList.Add("");
             psi.ArgumentList.Add("--model");
             psi.ArgumentList.Add("sonnet");
 
@@ -59,6 +65,10 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
         // Prevent "nested session" error when ralph is invoked from within Claude Code
         psi.Environment.Remove("CLAUDECODE");
+
+        logger?.Info($"Running: {BuildArgsSummary(psi)}");
+        if (!string.IsNullOrEmpty(workingDirectory))
+            logger?.Info($"Working directory: {workingDirectory}");
 
         using var process = new Process { StartInfo = psi };
         var outputBuf = new StringBuilder();
@@ -95,6 +105,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
         // Determine where streaming chunks go: log file or console
         var sink = output ?? Console.Out;
+        var errorMessages = new StringBuilder();
 
         // Read stdout line by line — each line is a stream-json object
         var reader = process.StandardOutput;
@@ -112,7 +123,19 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
                 var type = typeProp.GetString();
 
-                if (type == "stream_event" && root.TryGetProperty("event", out var evt))
+                if (type == "error")
+                {
+                    // Handle error messages from Claude Code stream-json
+                    var errorMsg = root.TryGetProperty("error", out var errObj)
+                        ? (errObj.TryGetProperty("message", out var em) ? em.GetString() : errObj.GetString())
+                        : root.TryGetProperty("message", out var m) ? m.GetString()
+                        : line;
+                    errorMessages.AppendLine(errorMsg);
+                    logger?.Error($"Claude stream error: {errorMsg}");
+                    if (output == null)
+                        AnsiConsole.MarkupLine($"[red]Claude error: {Markup.Escape(errorMsg ?? line)}[/]");
+                }
+                else if (type == "stream_event" && root.TryGetProperty("event", out var evt))
                 {
                     var eventType = evt.TryGetProperty("type", out var et) ? et.GetString() : null;
 
@@ -151,7 +174,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             }
             catch (JsonException)
             {
-                // Non-JSON line — skip
+                // Non-JSON line — log for diagnostics
+                logger?.Warn($"Claude non-JSON output: {line}");
             }
         }
 
@@ -161,11 +185,18 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
         sink.WriteLine(); // Final newline
 
-        if (!string.IsNullOrWhiteSpace(stderr) && process.ExitCode != 0)
+        if (!string.IsNullOrWhiteSpace(stderr))
         {
-            if (output == null)
+            if (output == null && process.ExitCode != 0)
                 AnsiConsole.MarkupLine($"[red]Claude stderr: {Markup.Escape(stderr.Trim())}[/]");
             logger?.Error($"Claude stderr: {stderr.Trim()}");
+        }
+
+        if (process.ExitCode != 0)
+        {
+            logger?.Error($"Claude exited with code {process.ExitCode}");
+            if (output == null && errorMessages.Length == 0 && string.IsNullOrWhiteSpace(stderr))
+                AnsiConsole.MarkupLine($"[red]Claude exited with code {process.ExitCode} (no error details available)[/]");
         }
 
         // Use assistant/result message if available, otherwise fall back to streamed deltas

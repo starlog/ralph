@@ -54,7 +54,11 @@ public partial class PlanGenerator
 
         if (!result.Success)
         {
-            AnsiConsole.MarkupLine("[red]Error: Claude Code execution failed.[/]");
+            AnsiConsole.MarkupLine($"[red]Error: Claude Code execution failed (exit code: {result.ExitCode}).[/]");
+            if (!string.IsNullOrWhiteSpace(result.Stderr))
+                AnsiConsole.MarkupLine($"[red]Stderr: {Markup.Escape(result.Stderr.Trim())}[/]");
+            if (!string.IsNullOrWhiteSpace(result.Output))
+                AnsiConsole.MarkupLine($"[yellow]Output: {Markup.Escape(result.Output.Trim())}[/]");
             return 1;
         }
 
