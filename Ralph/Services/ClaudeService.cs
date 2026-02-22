@@ -55,7 +55,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         if (noTools)
         {
             psi.ArgumentList.Add("--allowedTools");
-            psi.ArgumentList.Add("");
+            psi.ArgumentList.Add("none");
             psi.ArgumentList.Add("--model");
             psi.ArgumentList.Add("sonnet");
 
