@@ -283,10 +283,13 @@ public class ParallelExecutor
                 AnsiConsole.MarkupLine($"[green]태스크 완료: {Markup.Escape(task.Title)}[/]");
                 _logger.TaskEnd(taskId, "completed");
             }
+
+            // 5. tasks.json 변경사항 커밋 (다음 배치 병합 시 충돌 방지)
+            await CommitTasksFileAsync(taskIds, ct);
         }
         finally
         {
-            // 5. worktree 정리
+            // 6. worktree 정리
             AnsiConsole.MarkupLine("\n[dim]Worktree 정리 중...[/]");
             foreach (var taskId in worktrees.Keys)
             {
@@ -440,6 +443,31 @@ public class ParallelExecutor
 
         await _worktree.AbortMergeAsync(ct);
         return false;
+    }
+
+    /// <summary>
+    /// tasks.json 변경사항(done 상태 업데이트)을 커밋합니다.
+    /// 다음 배치의 worktree 병합 시 충돌을 방지합니다.
+    /// </summary>
+    private async Task CommitTasksFileAsync(List<string> completedTaskIds, CancellationToken ct)
+    {
+        var (exitCode, _) = await _git.RunAsync(["add", _tasksFile], ct: ct);
+        if (exitCode != 0) return;
+
+        var taskList = string.Join(", ", completedTaskIds);
+        var commitMsg = $"chore: 태스크 상태 업데이트 ({taskList})";
+
+        (exitCode, _) = await _git.RunAsync(
+            ["commit", "-m", commitMsg], ct: ct);
+
+        if (exitCode == 0)
+        {
+            _logger.Info($"Tasks file committed: {taskList}");
+        }
+        else
+        {
+            _logger.Warn("No tasks file changes to commit");
+        }
     }
 
     /// <summary>

@@ -50,6 +50,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         psi.ArgumentList.Add("--dangerously-skip-permissions");
         psi.ArgumentList.Add("--output-format");
         psi.ArgumentList.Add("stream-json");
+        psi.ArgumentList.Add("--include-partial-messages");
         psi.ArgumentList.Add("--verbose");
 
         if (noTools)
