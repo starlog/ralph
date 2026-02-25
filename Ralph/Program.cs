@@ -3,7 +3,7 @@ using Ralph.Models;
 using Ralph.Services;
 using Spectre.Console;
 
-const string Version = "0.7";
+const string Version = "0.8";
 
 // ─── UTF-8 console encoding ─────────────────────────────────────────────────
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -433,7 +433,7 @@ async Task<int> TailFollowAsync(string filePath, string taskId, CancellationToke
 
 int ShowHelp()
 {
-    AnsiConsole.Write(new Rule($"[green]RALPH - Task Orchestrator[/] [dim]v{Version}[/]").RuleStyle("blue"));
+    AnsiConsole.Write(new Rule($"[green]RALPH - Task Orchestrator[/] [cyan]v{Version}[/]").RuleStyle("grey"));
     AnsiConsole.MarkupLine("\nUsage: [green]ralph[/] [yellow][[command]][/] [dim][[options]][/]\n");
 
     var table = new Table().Border(TableBorder.Simple);
@@ -492,14 +492,14 @@ void ShowProgress(TaskManager tm, RalphLogger? logger)
     var blocked = pending.Count(t => !tm.CheckDependencies(t.Id, out _));
     var ready = pending.Count - blocked;
 
-    AnsiConsole.Write(new Rule($"[green]RALPH - Task Orchestrator[/] [dim]v{Version}[/]").RuleStyle("blue"));
+    AnsiConsole.Write(new Rule($"[green]RALPH - Task Orchestrator[/] [cyan]v{Version}[/]").RuleStyle("grey"));
     AnsiConsole.MarkupLine(
         $"Total: {total} | [green]Done: {done}[/] | [yellow]Ready: {ready}[/] | [red]Blocked: {blocked}[/]");
     if (ready > 1)
         AnsiConsole.MarkupLine($"[green]{ready}개 태스크 병렬 실행 가능[/]");
     if (logger != null)
         AnsiConsole.MarkupLine($"[cyan]Log: {Markup.Escape(logger.LogFile)}[/]");
-    AnsiConsole.Write(new Rule().RuleStyle("blue"));
+    AnsiConsole.Write(new Rule().RuleStyle("grey"));
 }
 
 void DisplayTask(TaskManager tm, string taskId)
@@ -512,7 +512,7 @@ void DisplayTask(TaskManager tm, string taskId)
     var deps = task.DependsOn is { Count: > 0 } ? string.Join(", ", task.DependsOn) : "";
 
     AnsiConsole.WriteLine();
-    AnsiConsole.Write(new Rule().RuleStyle("blue"));
+    AnsiConsole.Write(new Rule().RuleStyle("grey"));
     AnsiConsole.MarkupLine(
         $"[yellow][[{index}/{total}]][/] [green]Task ID:[/] {Markup.Escape(task.Id)}");
     AnsiConsole.MarkupLine(
@@ -541,7 +541,7 @@ void DisplayTask(TaskManager tm, string taskId)
         }
     }
 
-    AnsiConsole.Write(new Rule().RuleStyle("blue"));
+    AnsiConsole.Write(new Rule().RuleStyle("grey"));
     AnsiConsole.WriteLine();
 }
 
