@@ -107,6 +107,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         // Determine where streaming chunks go: log file or console
         var sink = output ?? Console.Out;
         var errorMessages = new StringBuilder();
+        var hasStreamDeltas = false;
+        var lastDisplayedLen = 0;
 
         // Read stdout line by line — each line is a stream-json object
         var reader = process.StandardOutput;
@@ -149,6 +151,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                              && delta.TryGetProperty("text", out var text))
                     {
                         var chunk = text.GetString() ?? "";
+                        hasStreamDeltas = true;
                         sink.Write(chunk);
                         streamedOutput.Append(chunk);
                     }
@@ -159,10 +162,26 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                     {
                         // Clear and rebuild to handle partial message updates
                         outputBuf.Clear();
+                        var partialText = new StringBuilder();
                         foreach (var item in content.EnumerateArray())
                         {
                             if (item.TryGetProperty("text", out var txt))
-                                outputBuf.AppendLine(txt.GetString());
+                            {
+                                var t = txt.GetString() ?? "";
+                                outputBuf.AppendLine(t);
+                                partialText.Append(t);
+                            }
+                        }
+
+                        // Fallback: display from partial messages when stream_event deltas aren't flowing
+                        if (!hasStreamDeltas)
+                        {
+                            var pText = partialText.ToString();
+                            if (pText.Length > lastDisplayedLen)
+                            {
+                                sink.Write(pText[lastDisplayedLen..]);
+                                lastDisplayedLen = pText.Length;
+                            }
                         }
                     }
                 }
