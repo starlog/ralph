@@ -96,7 +96,7 @@ public class ParallelSettings
     public bool Enabled { get; set; } = true;
 
     [JsonPropertyName("maxConcurrent")]
-    public int MaxConcurrent { get; set; } = 3;
+    public int MaxConcurrent { get; set; } = 5;
 
     [JsonPropertyName("conflictStrategy")]
     public string ConflictStrategy { get; set; } = "claude";

@@ -14,21 +14,6 @@ public partial class PlanGenerator
     {
         var prdContent = await File.ReadAllTextAsync(prdFile, ct);
 
-        // Check for existing tasks.json
-        if (File.Exists(tasksFile))
-        {
-            AnsiConsole.MarkupLine($"[yellow]Warning: {Markup.Escape(tasksFile)} already exists.[/]");
-            if (!AnsiConsole.Confirm("Overwrite?", defaultValue: false))
-            {
-                AnsiConsole.MarkupLine("[red]Aborted.[/]");
-                return 1;
-            }
-
-            var backup = $"{tasksFile}.backup.{DateTime.Now:yyyyMMdd-HHmmss}";
-            File.Copy(tasksFile, backup);
-            AnsiConsole.MarkupLine($"[cyan]Backup saved: {Markup.Escape(backup)}[/]");
-        }
-
         // Header
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Rule("[green]RALPH - Plan Generator[/]").RuleStyle("blue"));

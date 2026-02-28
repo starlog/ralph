@@ -3,7 +3,7 @@ using Ralph.Models;
 using Ralph.Services;
 using Spectre.Console;
 
-const string Version = "0.8";
+const string Version = "0.9";
 
 // ─── UTF-8 console encoding ─────────────────────────────────────────────────
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -13,9 +13,15 @@ Console.InputEncoding = System.Text.Encoding.UTF8;
 var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
+    if (cts.IsCancellationRequested)
+    {
+        // Second Ctrl+C: force exit immediately
+        e.Cancel = false;
+        return;
+    }
     e.Cancel = true;
     cts.Cancel();
-    AnsiConsole.MarkupLine("\n[red]Interrupted. Cleaning up...[/]");
+    AnsiConsole.MarkupLine("\n[red]Interrupted. Aborting...[/]");
 };
 
 // ─── Environment variables ───────────────────────────────────────────────────
@@ -91,6 +97,15 @@ async Task<int> HandlePlan()
     {
         AnsiConsole.MarkupLine($"[red]Error: File '{Markup.Escape(prdFile)}' not found.[/]");
         return 1;
+    }
+
+    // Backup existing tasks.json before generating new one
+    if (File.Exists(tasksFile))
+    {
+        var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+        var backupPath = $"{tasksFile}.backup.{timestamp}";
+        File.Copy(tasksFile, backupPath);
+        AnsiConsole.MarkupLine($"[yellow]기존 tasks.json을 백업했습니다: {Markup.Escape(backupPath)}[/]");
     }
 
     var schemaContent = LoadEmbeddedSchema();
@@ -457,7 +472,7 @@ int ShowHelp()
 
     AnsiConsole.MarkupLine("\n[blue]Options:[/]");
     AnsiConsole.MarkupLine("  [green]--sequential[/]         Force sequential execution (disable parallel)");
-    AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 3)");
+    AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
 
     AnsiConsole.MarkupLine("\n[blue]Workflow:[/]");
     AnsiConsole.MarkupLine("  1. ralph --plan PRD.md");
