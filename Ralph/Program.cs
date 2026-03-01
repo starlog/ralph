@@ -36,6 +36,7 @@ CheckCommand("git", "Git", "https://git-scm.com");
 
 // ─── Parse CLI arguments ────────────────────────────────────────────────────
 var argList = args.ToList();
+var debug = argList.Remove("--debug");
 var sequential = argList.Remove("--sequential");
 var maxParallelArg = 0;
 var maxParallelIdx = argList.IndexOf("--max-parallel");
@@ -109,7 +110,7 @@ async Task<int> HandlePlan()
     }
 
     var schemaContent = LoadEmbeddedSchema();
-    var claude = new ClaudeService(maxRetries, retryDelay);
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
     var git = new GitService();
     using var logger = new RalphLogger();
 
@@ -125,7 +126,7 @@ async Task<int> HandleRun()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay);
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info($"Tasks file: {tasksFile}");
@@ -161,7 +162,7 @@ async Task<int> HandleDryRun()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay);
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info("Exec mode: dry-run");
@@ -196,7 +197,7 @@ async Task<int> HandleSingleTask()
         return 1;
     }
 
-    var claude = new ClaudeService(maxRetries, retryDelay);
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
     var git = new GitService();
     using var logger = new RalphLogger();
 
@@ -208,7 +209,7 @@ async Task<int> HandleInteractive()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay);
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info("Exec mode: interactive");
@@ -473,6 +474,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("\n[blue]Options:[/]");
     AnsiConsole.MarkupLine("  [green]--sequential[/]         Force sequential execution (disable parallel)");
     AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
+    AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
     AnsiConsole.MarkupLine("\n[blue]Workflow:[/]");
     AnsiConsole.MarkupLine("  1. ralph --plan PRD.md");

@@ -15,11 +15,31 @@ public class ClaudeResult
 
 public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 {
+    public bool Debug { get; set; }
     private static string BuildArgsSummary(ProcessStartInfo psi)
     {
         var args = string.Join(" ", psi.ArgumentList.Select(a =>
             a.Contains(' ') || a.Length == 0 ? $"\"{a}\"" : a));
         return $"{psi.FileName} {args}";
+    }
+
+    private static async Task RunSpinnerAsync(CancellationToken ct, Func<string> getMessage)
+    {
+        var frames = new[] { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+        var i = 0;
+        var maxLen = 0;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var msg = $"  {frames[i++ % frames.Length]} {getMessage()}";
+                maxLen = Math.Max(maxLen, msg.Length);
+                Console.Write($"\r{msg.PadRight(maxLen)}");
+                await Task.Delay(80, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        Console.Write("\r" + new string(' ', maxLen + 2) + "\r");
     }
 
     public async Task<ClaudeResult> RunStreamAsync(
@@ -74,8 +94,17 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         using var process = new Process { StartInfo = psi };
         var outputBuf = new StringBuilder();
         var streamedOutput = new StringBuilder();
+        var debugSw = Stopwatch.StartNew();
 
+        void DebugLog(string msg)
+        {
+            if (Debug && output == null)
+                AnsiConsole.MarkupLine($"[dim]  [[{debugSw.Elapsed:mm\\:ss\\.ff}]] {Markup.Escape(msg)}[/]");
+        }
+
+        DebugLog($"Starting claude process...");
         process.Start();
+        DebugLog($"Process started (PID: {process.Id})");
 
         // Read stderr in background to prevent deadlocks
         var stderrTask = process.StandardError.ReadToEndAsync(ct);
@@ -83,8 +112,10 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         // Always pipe prompt via stdin (avoids argument length limits and escaping issues)
         try
         {
+            DebugLog($"Sending prompt ({prompt.Length:N0} chars)...");
             await process.StandardInput.WriteAsync(prompt);
             process.StandardInput.Close();
+            DebugLog("Prompt sent, waiting for response...");
         }
         catch (IOException ex)
         {
@@ -104,11 +135,32 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             };
         }
 
+        // Show spinner while waiting for Claude's first response (console mode only, not in debug)
+        var spinnerMsg = "Claude 응답 대기 중...";
+        CancellationTokenSource? spinnerCts = null;
+        Task? spinnerTask = null;
+        if (output == null && !Debug)
+        {
+            spinnerCts = new CancellationTokenSource();
+            spinnerTask = RunSpinnerAsync(spinnerCts.Token, () => spinnerMsg);
+        }
+
+        async Task StopSpinner()
+        {
+            if (spinnerCts == null) return;
+            spinnerCts.Cancel();
+            await spinnerTask!;
+            spinnerCts.Dispose();
+            spinnerCts = null;
+        }
+
         // Determine where streaming chunks go: log file or console
         var sink = output ?? Console.Out;
         var errorMessages = new StringBuilder();
         var hasStreamDeltas = false;
         var lastDisplayedLen = 0;
+        var streamSw = new Stopwatch();
+        long totalChars = 0;
 
         // Read stdout line by line — each line is a stream-json object
         var reader = process.StandardOutput;
@@ -135,16 +187,21 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                         : line;
                     errorMessages.AppendLine(errorMsg);
                     logger?.Error($"Claude stream error: {errorMsg}");
+                    DebugLog($"error: {errorMsg}");
                     if (output == null)
+                    {
+                        await StopSpinner();
                         AnsiConsole.MarkupLine($"[red]Claude error: {Markup.Escape(errorMsg ?? line)}[/]");
+                    }
                 }
                 else if (type == "stream_event" && root.TryGetProperty("event", out var evt))
                 {
                     var eventType = evt.TryGetProperty("type", out var et) ? et.GetString() : null;
+                    DebugLog($"stream_event: {eventType}");
 
                     if (eventType == "content_block_start")
                     {
-                        sink.WriteLine();
+                        if (output != null) sink.WriteLine();
                     }
                     else if (eventType == "content_block_delta"
                              && evt.TryGetProperty("delta", out var delta)
@@ -152,12 +209,20 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                     {
                         var chunk = text.GetString() ?? "";
                         hasStreamDeltas = true;
-                        sink.Write(chunk);
+                        if (!streamSw.IsRunning)
+                        {
+                            streamSw.Start();
+                            await StopSpinner();
+                            DebugLog("First content chunk received");
+                        }
+                        totalChars += chunk.Length;
                         streamedOutput.Append(chunk);
+                        sink.Write(chunk);
                     }
                 }
                 else if (type == "assistant" && root.TryGetProperty("message", out var msg))
                 {
+                    DebugLog($"assistant message (partial update)");
                     if (msg.TryGetProperty("content", out var content))
                     {
                         // Clear and rebuild to handle partial message updates
@@ -179,7 +244,16 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                             var pText = partialText.ToString();
                             if (pText.Length > lastDisplayedLen)
                             {
-                                sink.Write(pText[lastDisplayedLen..]);
+                                if (!streamSw.IsRunning)
+                                {
+                                    streamSw.Start();
+                                    await StopSpinner();
+                                    DebugLog("First content via fallback path");
+                                }
+                                var newPart = pText[lastDisplayedLen..];
+                                totalChars += newPart.Length;
+                                streamedOutput.Append(newPart);
+                                sink.Write(newPart);
                                 lastDisplayedLen = pText.Length;
                             }
                         }
@@ -187,9 +261,14 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                 }
                 else if (type == "result" && root.TryGetProperty("result", out var resultText))
                 {
+                    DebugLog("result message received");
                     var resultStr = resultText.GetString();
                     if (!string.IsNullOrWhiteSpace(resultStr) && outputBuf.Length == 0)
                         outputBuf.Append(resultStr);
+                }
+                else
+                {
+                    DebugLog($"event: {type}");
                 }
             }
             catch (JsonException)
@@ -199,11 +278,23 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             }
         }
 
+        await StopSpinner();
+        streamSw.Stop();
+        DebugLog($"Stream ended (totalChars: {totalChars:N0}, hasStreamDeltas: {hasStreamDeltas})");
+
         // Drain stderr
         var stderr = await stderrTask;
         await process.WaitForExitAsync(ct);
+        DebugLog($"Process exited (code: {process.ExitCode})");
 
-        sink.WriteLine(); // Final newline
+        // Display throughput summary and final newline
+        sink.WriteLine();
+        if (output == null && totalChars > 0 && streamSw.ElapsedMilliseconds > 0)
+        {
+            var secs = streamSw.Elapsed.TotalSeconds;
+            var cps = totalChars / secs;
+            AnsiConsole.MarkupLine($"[dim]  {totalChars:N0} chars in {secs:F1}s ({cps:F0} chars/s)[/]");
+        }
 
         if (!string.IsNullOrWhiteSpace(stderr))
         {
