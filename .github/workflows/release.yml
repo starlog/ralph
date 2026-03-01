@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish win-x64
+        run: dotnet publish Ralph/Ralph.csproj -c Release -r win-x64
+
+      - name: Publish osx-x64
+        run: dotnet publish Ralph/Ralph.csproj -c Release -r osx-x64
+
+      - name: Publish osx-arm64
+        run: dotnet publish Ralph/Ralph.csproj -c Release -r osx-arm64
+
+      - name: Publish linux-x64
+        run: dotnet publish Ralph/Ralph.csproj -c Release -r linux-x64
+
+      - name: Package archives
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+
+          cd Ralph/bin/Release/net8.0/win-x64/publish
+          zip -j "$GITHUB_WORKSPACE/ralph-${VERSION}-win-x64.zip" ralph.exe
+          cd "$GITHUB_WORKSPACE"
+
+          tar -czf "ralph-${VERSION}-osx-x64.tar.gz" -C Ralph/bin/Release/net8.0/osx-x64/publish ralph
+
+          tar -czf "ralph-${VERSION}-osx-arm64.tar.gz" -C Ralph/bin/Release/net8.0/osx-arm64/publish ralph
+
+          tar -czf "ralph-${VERSION}-linux-x64.tar.gz" -C Ralph/bin/Release/net8.0/linux-x64/publish ralph
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ralph-*.zip
+            ralph-*.tar.gz
