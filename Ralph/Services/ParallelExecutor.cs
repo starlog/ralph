@@ -11,11 +11,12 @@ public class ParallelExecutor
     private readonly WorktreeService _worktree;
     private readonly RalphLogger _logger;
     private readonly string _tasksFile;
+    private readonly string? _model;
     private readonly SemaphoreSlim _taskFileLock = new(1, 1);
 
     public ParallelExecutor(
         TaskManager taskManager, ClaudeService claude, GitService git,
-        WorktreeService worktree, RalphLogger logger, string tasksFile)
+        WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -23,6 +24,7 @@ public class ParallelExecutor
         _worktree = worktree;
         _logger = logger;
         _tasksFile = tasksFile;
+        _model = model;
     }
 
     public async Task<int> RunAsync(int maxConcurrent, CancellationToken ct)
@@ -135,7 +137,7 @@ public class ParallelExecutor
             AnsiConsole.Write(new Panel(Markup.Escape(task.Prompt)).Border(BoxBorder.Rounded));
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
-            var result = await _claude.RunWithRetryAsync(fullPrompt, logger: _logger, ct: ct);
+            var result = await _claude.RunWithRetryAsync(fullPrompt, model: _model, logger: _logger, ct: ct);
             if (!result.Success)
             {
                 AnsiConsole.MarkupLine("\n[red]Claude Code 실행 실패[/]");
@@ -232,7 +234,10 @@ public class ParallelExecutor
             {
                 AnsiConsole.MarkupLine($"\n[red]{failed.Count}개 태스크 실행 실패:[/]");
                 foreach (var f in failed)
+                {
                     AnsiConsole.MarkupLine($"  [red]✗[/] {Markup.Escape(f)}");
+                    AnsiConsole.MarkupLine($"    [dim]로그 확인: ralph --logs {Markup.Escape(f)}[/]");
+                }
 
                 // 실패한 worktree 정리
                 foreach (var f in failed)
@@ -324,7 +329,7 @@ public class ParallelExecutor
                 var fullPrompt = BuildPrompt(task);
 
                 var result = await _claude.RunWithRetryAsync(
-                    fullPrompt, workingDirectory: worktreePath, logger: _logger,
+                    fullPrompt, model: _model, workingDirectory: worktreePath, logger: _logger,
                     output: logWriter, ct: ct);
 
                 if (!result.Success)
@@ -417,7 +422,7 @@ public class ParallelExecutor
 
         AnsiConsole.MarkupLine($"[cyan]Claude Code로 충돌 해결 중 ({mergeResult.ConflictFiles.Count}개 파일)...[/]");
 
-        var result = await _claude.RunWithRetryAsync(prompt, logger: _logger, ct: ct);
+        var result = await _claude.RunWithRetryAsync(prompt, model: _model, logger: _logger, ct: ct);
         if (!result.Success)
         {
             await _worktree.AbortMergeAsync(ct);

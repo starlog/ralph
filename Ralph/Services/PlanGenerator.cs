@@ -10,30 +10,32 @@ public partial class PlanGenerator
 {
     public async Task<int> GenerateAsync(
         string prdFile, string schemaContent, string tasksFile,
-        ClaudeService claude, RalphLogger? logger = null, CancellationToken ct = default)
+        ClaudeService claude, string model = "opus", RalphLogger? logger = null, CancellationToken ct = default)
     {
-        var prdContent = await File.ReadAllTextAsync(prdFile, ct);
-
         // Header
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Rule("[green]RALPH - Plan Generator[/]").RuleStyle("blue"));
         AnsiConsole.MarkupLine($"[cyan]PRD File:[/] {Markup.Escape(prdFile)}");
+        AnsiConsole.MarkupLine($"[cyan]Model:[/]    {Markup.Escape(model)}");
         AnsiConsole.MarkupLine($"[cyan]Output:[/]   {Markup.Escape(tasksFile)}");
         AnsiConsole.Write(new Rule().RuleStyle("blue"));
         AnsiConsole.MarkupLine("\n[cyan]Generating task plan with Claude Code...[/]\n");
 
-        // Build prompt
-        var prompt = BuildPlanPrompt(prdContent, schemaContent, prdFile);
+        // Build prompt (PRD file path only — Claude reads it via Read tool)
+        var prdFullPath = Path.GetFullPath(prdFile);
+        var tasksFullPath = Path.GetFullPath(tasksFile);
+        var prompt = BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath);
 
-        // Run Claude (no tools, sonnet model)
+        // Run Claude (full tool access — Claude can explore codebase and write tasks.json directly)
         AnsiConsole.Write(new Rule("[yellow]Claude Code Output[/]").RuleStyle("yellow"));
 
         // Track if Claude writes the file directly via tools
         var preExisting = File.Exists(tasksFile);
         var preWriteTime = preExisting ? File.GetLastWriteTimeUtc(tasksFile) : DateTime.MinValue;
 
-        var result = await claude.RunStreamAsync(prompt, noTools: true, logger: logger, ct: ct);
+        var result = await claude.RunStreamAsync(prompt, model: model, logger: logger, ct: ct);
 
+        AnsiConsole.WriteLine(); // ensure newline after streamed output
         AnsiConsole.Write(new Rule().RuleStyle("yellow"));
         AnsiConsole.WriteLine();
 
@@ -144,15 +146,15 @@ public partial class PlanGenerator
         return 0;
     }
 
-    private static string BuildPlanPrompt(string prdContent, string schemaContent, string prdFile)
+    internal static string BuildPlanPrompt(string prdFilePath, string schemaContent, string tasksFilePath = "tasks.json")
     {
         var sb = new StringBuilder();
-        sb.AppendLine("""
+        sb.AppendLine($$"""
             You are a project planner that generates a tasks.json file for the Ralph task executor.
             Ralph supports **parallel execution** of independent tasks using git worktrees.
 
             ## Your Goal
-            Read the PRD (Product Requirements Document) below and produce a **single valid JSON** object that conforms to the provided JSON schema. Output ONLY the JSON — no markdown fences, no commentary.
+            Read the PRD file at `{{prdFilePath}}`, explore the codebase, and write a valid JSON task plan to `{{tasksFilePath}}`.
 
             ## Task Generation Rules
 
@@ -218,12 +220,13 @@ public partial class PlanGenerator
         sb.AppendLine(schemaContent);
         sb.AppendLine("```");
         sb.AppendLine();
-        sb.AppendLine($"## PRD Document (source: {prdFile})");
+        sb.AppendLine("## Output Instructions");
         sb.AppendLine();
-        sb.AppendLine(prdContent);
-        sb.AppendLine();
-        sb.AppendLine("## Output");
-        sb.AppendLine("Generate the complete tasks.json now. Output ONLY valid JSON, nothing else.");
+        sb.AppendLine("1. Read the PRD file.");
+        sb.AppendLine("2. Explore the existing codebase to understand the project structure (use Glob and Read as needed).");
+        sb.AppendLine("3. Generate the complete tasks.json content conforming to the schema above.");
+        sb.AppendLine("4. Write the JSON to the `tasks.json` file in the current directory using the Write tool.");
+        sb.AppendLine("5. After writing, print a brief summary: total task count, feature list, and parallel execution info. Do NOT print the full JSON to the screen.");
 
         return sb.ToString();
     }

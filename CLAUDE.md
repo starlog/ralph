@@ -15,7 +15,7 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 
 | Service | Purpose |
 |---|---|
-| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, sonnet model) to produce tasks.json |
+| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus model) to produce tasks.json |
 | `ClaudeService.cs` | Runs Claude Code process with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY) |
 | `TaskManager.cs` | Loads/saves/queries tasks.json, dependency DAG traversal, parallel batch computation, topological layer computation |
 | `ParallelExecutor.cs` | Worktree-based parallel task execution with live progress dashboard, merge handling |

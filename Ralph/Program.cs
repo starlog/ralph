@@ -46,6 +46,23 @@ if (maxParallelIdx >= 0 && maxParallelIdx + 1 < argList.Count)
     argList.RemoveRange(maxParallelIdx, 2);
 }
 
+var modelArg = "opus";
+var modelIdx = argList.IndexOf("--model");
+if (modelIdx >= 0 && modelIdx + 1 < argList.Count)
+{
+    var modelValue = argList[modelIdx + 1].ToLower();
+    if (modelValue is "sonnet" or "opus")
+    {
+        modelArg = modelValue;
+    }
+    else
+    {
+        AnsiConsole.MarkupLine($"[red]Error: Invalid model '{Markup.Escape(modelValue)}'. Allowed: sonnet, opus[/]");
+        return 1;
+    }
+    argList.RemoveRange(modelIdx, 2);
+}
+
 // ─── Resolve tasks file (used by most commands) ─────────────────────────────
 var tasksFile = "tasks.json";
 if (argList.Count > 1 && argList[0] is "--run" or "--dry-run" && !argList[1].StartsWith("--"))
@@ -59,6 +76,7 @@ try
     return await (command switch
     {
         "--plan" => HandlePlan(),
+        "--plan-prompt" => HandlePlanPrompt(),
         "--run" => HandleRun(),
         "--dry-run" => HandleDryRun(),
         "--task" => HandleSingleTask(),
@@ -118,8 +136,39 @@ async Task<int> HandlePlan()
     if (!await git.IsRepoInitializedAsync(cts.Token))
         await git.InitAsync(logger, cts.Token);
 
+    // Default to sonnet for plan generation (faster); user can override with --model opus
+    var planModel = modelArg == "opus" && !argList.Contains("--model") ? "sonnet" : modelArg;
+
     var generator = new PlanGenerator();
-    return await generator.GenerateAsync(prdFile, schemaContent, tasksFile, claude, logger, cts.Token);
+    return await generator.GenerateAsync(prdFile, schemaContent, tasksFile, claude, planModel, logger, cts.Token);
+}
+
+Task<int> HandlePlanPrompt()
+{
+    if (argList.Count < 2)
+    {
+        AnsiConsole.MarkupLine("[red]Error: PRD file required. Usage: ralph --plan-prompt <prd-file>[/]");
+        return Task.FromResult(1);
+    }
+
+    var prdFile = argList[1];
+    if (!File.Exists(prdFile))
+    {
+        AnsiConsole.MarkupLine($"[red]Error: File '{Markup.Escape(prdFile)}' not found.[/]");
+        return Task.FromResult(1);
+    }
+
+    var prdFullPath = Path.GetFullPath(prdFile);
+    var tasksFullPath = Path.GetFullPath(tasksFile);
+    var schemaContent = LoadEmbeddedSchema();
+    var prompt = PlanGenerator.BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath);
+
+    AnsiConsole.Write(new Rule("[green]RALPH - Plan Prompt Preview[/]").RuleStyle("blue"));
+    AnsiConsole.MarkupLine($"[cyan]PRD File:[/] {Markup.Escape(prdFile)}");
+    AnsiConsole.Write(new Rule().RuleStyle("blue"));
+    AnsiConsole.WriteLine(prompt);
+
+    return Task.FromResult(0);
 }
 
 async Task<int> HandleRun()
@@ -146,7 +195,7 @@ async Task<int> HandleRun()
         ShowProgress(tm, logger);
 
         var worktree = new WorktreeService(git);
-        var executor = new ParallelExecutor(tm, claude, git, worktree, logger, tasksFile);
+        var executor = new ParallelExecutor(tm, claude, git, worktree, logger, tasksFile, modelArg);
         return await executor.RunAsync(concurrency, cts.Token);
     }
     else
@@ -154,7 +203,7 @@ async Task<int> HandleRun()
         logger.Info("Exec mode: sequential");
         AnsiConsole.MarkupLine("[yellow]순차 실행 모드[/]");
 
-        return await RunAutoLoop(tm, claude, git, logger, dryRun: false, commitOnComplete: true, cts.Token);
+        return await RunAutoLoop(tm, claude, git, logger, dryRun: false, commitOnComplete: true, modelArg, cts.Token);
     }
 }
 
@@ -170,7 +219,7 @@ async Task<int> HandleDryRun()
     // Backup for restore after dry-run
     var backupJson = await File.ReadAllTextAsync(tasksFile, cts.Token);
 
-    var result = await RunAutoLoop(tm, claude, git, logger, dryRun: true, commitOnComplete: false, cts.Token);
+    var result = await RunAutoLoop(tm, claude, git, logger, dryRun: true, commitOnComplete: false, modelArg, cts.Token);
 
     // Restore original
     await File.WriteAllTextAsync(tasksFile, backupJson, cts.Token);
@@ -202,7 +251,7 @@ async Task<int> HandleSingleTask()
     using var logger = new RalphLogger();
 
     return await RunTaskAuto(tm, claude, git, logger, taskId,
-        dryRun: false, commitOnComplete: tm.CommitOnComplete, cts.Token);
+        dryRun: false, commitOnComplete: tm.CommitOnComplete, modelArg, cts.Token);
 }
 
 async Task<int> HandleInteractive()
@@ -214,7 +263,7 @@ async Task<int> HandleInteractive()
     using var logger = new RalphLogger();
     logger.Info("Exec mode: interactive");
 
-    return await RunInteractiveLoop(tm, claude, git, logger, cts.Token);
+    return await RunInteractiveLoop(tm, claude, git, logger, modelArg, cts.Token);
 }
 
 async Task<int> HandleList()
@@ -456,6 +505,7 @@ int ShowHelp()
     table.AddColumn("[bold]Command[/]");
     table.AddColumn("[bold]Description[/]");
     table.AddRow("[green]--plan[/] <file>", "Generate tasks.json from a PRD file");
+    table.AddRow("[green]--plan-prompt[/] <file>", "Show full plan prompt without executing");
     table.AddRow("[green]--run[/] [[file]]", "Run all pending tasks (parallel by default)");
     table.AddRow("[green]--dry-run[/]", "Preview execution without changes");
     table.AddRow("[green]--task[/] <id>", "Run a specific task by ID");
@@ -474,6 +524,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("\n[blue]Options:[/]");
     AnsiConsole.MarkupLine("  [green]--sequential[/]         Force sequential execution (disable parallel)");
     AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
+    AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: sonnet for --plan, opus for --run)");
     AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
     AnsiConsole.MarkupLine("\n[blue]Workflow:[/]");
@@ -568,7 +619,7 @@ void DisplayTask(TaskManager tm, string taskId)
 
 async Task<int> RunTaskAuto(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    string taskId, bool dryRun, bool commitOnComplete, CancellationToken ct)
+    string taskId, bool dryRun, bool commitOnComplete, string? model, CancellationToken ct)
 {
     var task = tm.GetTask(taskId)!;
 
@@ -614,7 +665,7 @@ async Task<int> RunTaskAuto(
             AnsiConsole.Write(new Panel(Markup.Escape(task.Prompt)).Border(BoxBorder.Rounded));
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
-            var result = await claude.RunWithRetryAsync(fullPrompt, logger: logger, ct: ct);
+            var result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
             if (!result.Success)
             {
                 AnsiConsole.MarkupLine("\n[red]Claude Code execution failed[/]");
@@ -666,7 +717,7 @@ async Task<int> RunTaskAuto(
 
 async Task<int> RunAutoLoop(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    bool dryRun, bool commitOnComplete, CancellationToken ct)
+    bool dryRun, bool commitOnComplete, string? model, CancellationToken ct)
 {
     ShowProgress(tm, logger);
 
@@ -701,7 +752,7 @@ async Task<int> RunAutoLoop(
         }
 
         var exitCode = await RunTaskAuto(tm, claude, git, logger, nextId,
-            dryRun, commitOnComplete, ct);
+            dryRun, commitOnComplete, model, ct);
 
         if (exitCode == 2) continue; // blocked, try next
         if (exitCode != 0)
@@ -717,7 +768,7 @@ async Task<int> RunAutoLoop(
 
 async Task<int> RunInteractiveLoop(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    CancellationToken ct)
+    string? model, CancellationToken ct)
 {
     ShowProgress(tm, logger);
 
@@ -783,7 +834,7 @@ async Task<int> RunInteractiveLoop(
                             $"Task ID: {nextId}\nTask: {task.Title}\n\n{task.Prompt}\n\n참고: {tasksFile} 파일에서 apiSpecs, samplePages 등 추가 정보를 확인할 수 있습니다.\n완료 후 생성된 파일 목록을 알려주세요.";
 
                         AnsiConsole.MarkupLine("[cyan]Running Claude Code...[/]\n");
-                        var result = await claude.RunWithRetryAsync(fullPrompt, logger: logger, ct: ct);
+                        var result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
 
                         if (!result.Success)
                         {

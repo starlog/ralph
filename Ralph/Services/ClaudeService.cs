@@ -10,6 +10,7 @@ public class ClaudeResult
     public bool Success { get; init; }
     public string Output { get; init; } = "";
     public string Stderr { get; init; } = "";
+    public string ErrorMessages { get; init; } = "";
     public int ExitCode { get; init; }
 }
 
@@ -44,11 +45,12 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
     public async Task<ClaudeResult> RunStreamAsync(
         string prompt,
-        bool noTools = false,
+        string? model = null,
         string? workingDirectory = null,
         RalphLogger? logger = null,
         TextWriter? output = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? allowedTools = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -73,15 +75,19 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         psi.ArgumentList.Add("--include-partial-messages");
         psi.ArgumentList.Add("--verbose");
 
-        if (noTools)
+        if (model != null)
         {
-            psi.ArgumentList.Add("--allowedTools");
-            psi.ArgumentList.Add("none");
             psi.ArgumentList.Add("--model");
-            psi.ArgumentList.Add("sonnet");
+            psi.ArgumentList.Add(model);
 
             var maxTokens = Environment.GetEnvironmentVariable("CLAUDE_CODE_MAX_OUTPUT_TOKENS") ?? "65536";
             psi.Environment["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = maxTokens;
+        }
+
+        if (allowedTools != null)
+        {
+            psi.ArgumentList.Add("--allowedTools");
+            psi.ArgumentList.Add(allowedTools);
         }
 
         // Prevent "nested session" error when ralph is invoked from within Claude Code
@@ -273,8 +279,11 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             }
             catch (JsonException)
             {
-                // Non-JSON line — log for diagnostics
+                // Non-JSON line — log and display for diagnostics
                 logger?.Warn($"Claude non-JSON output: {line}");
+                DebugLog($"non-JSON: {line}");
+                if (output == null)
+                    AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(line)}[/]");
             }
         }
 
@@ -298,8 +307,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
         if (!string.IsNullOrWhiteSpace(stderr))
         {
-            if (output == null && process.ExitCode != 0)
-                AnsiConsole.MarkupLine($"[red]Claude stderr: {Markup.Escape(stderr.Trim())}[/]");
+            if (output == null)
+                AnsiConsole.MarkupLine($"[yellow]Claude stderr: {Markup.Escape(stderr.Trim())}[/]");
             logger?.Error($"Claude stderr: {stderr.Trim()}");
         }
 
@@ -318,13 +327,14 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             Success = process.ExitCode == 0,
             Output = finalOutput,
             Stderr = stderr,
+            ErrorMessages = errorMessages.ToString(),
             ExitCode = process.ExitCode,
         };
     }
 
     public async Task<ClaudeResult> RunWithRetryAsync(
         string prompt,
-        bool noTools = false,
+        string? model = null,
         string? workingDirectory = null,
         RalphLogger? logger = null,
         TextWriter? output = null,
@@ -343,7 +353,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
             logger?.Info($"Running Claude Code (attempt {attempt})");
 
-            var result = await RunStreamAsync(prompt, noTools, workingDirectory, logger, output, ct);
+            var result = await RunStreamAsync(prompt, model, workingDirectory, logger, output, ct);
             if (result.Success)
             {
                 logger?.Info("Claude Code execution successful");
