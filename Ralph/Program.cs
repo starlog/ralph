@@ -65,8 +65,23 @@ if (modelIdx >= 0 && modelIdx + 1 < argList.Count)
 
 // ─── Resolve tasks file (used by most commands) ─────────────────────────────
 var tasksFile = "tasks.json";
-if (argList.Count > 1 && argList[0] is "--run" or "--dry-run" && !argList[1].StartsWith("--"))
+
+// Global -f / --file flag (works with any command)
+var fileIdx = argList.IndexOf("--file");
+if (fileIdx < 0) fileIdx = argList.IndexOf("-f");
+if (fileIdx >= 0 && fileIdx + 1 < argList.Count)
+{
+    tasksFile = argList[fileIdx + 1];
+    argList.RemoveRange(fileIdx, 2);
+}
+// Positional file argument for commands that support it
+else if (argList.Count > 1
+         && argList[0] is "--run" or "--dry-run" or "--list" or "-l" or "--graph" or "-g"
+             or "--prompts" or "-p" or "--status" or "-s" or "--reset" or "-r" or "--interactive"
+         && !argList[1].StartsWith("--"))
+{
     tasksFile = argList[1];
+}
 
 // ─── Parse command ───────────────────────────────────────────────────────────
 var command = argList.Count > 0 ? argList[0] : "";
@@ -140,7 +155,14 @@ async Task<int> HandlePlan()
     var planModel = modelArg == "opus" && !argList.Contains("--model") ? "sonnet" : modelArg;
 
     var generator = new PlanGenerator();
-    return await generator.GenerateAsync(prdFile, schemaContent, tasksFile, claude, planModel, logger, cts.Token);
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    var result = await generator.GenerateAsync(prdFile, schemaContent, tasksFile, claude, planModel, logger, cts.Token);
+    sw.Stop();
+
+    if (result == 0)
+        AnsiConsole.MarkupLine($"\n[green]플랜 생성 완료[/] [dim]({sw.Elapsed.Minutes}분 {sw.Elapsed.Seconds}초)[/]");
+
+    return result;
 }
 
 Task<int> HandlePlanPrompt()
@@ -507,7 +529,7 @@ int ShowHelp()
     table.AddRow("[green]--plan[/] <file>", "Generate tasks.json from a PRD file");
     table.AddRow("[green]--plan-prompt[/] <file>", "Show full plan prompt without executing");
     table.AddRow("[green]--run[/] [[file]]", "Run all pending tasks (parallel by default)");
-    table.AddRow("[green]--dry-run[/]", "Preview execution without changes");
+    table.AddRow("[green]--dry-run[/] [[file]]", "Preview execution without changes");
     table.AddRow("[green]--task[/] <id>", "Run a specific task by ID");
     table.AddRow("[green]--interactive[/]", "Run tasks interactively (confirm each)");
     table.AddRow("[green]--list[/], -l", "List all pending tasks");
@@ -522,6 +544,7 @@ int ShowHelp()
     AnsiConsole.Write(table);
 
     AnsiConsole.MarkupLine("\n[blue]Options:[/]");
+    AnsiConsole.MarkupLine("  [green]-f[/], [green]--file[/] <path>    Use custom tasks file (default: tasks.json)");
     AnsiConsole.MarkupLine("  [green]--sequential[/]         Force sequential execution (disable parallel)");
     AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
     AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: sonnet for --plan, opus for --run)");
