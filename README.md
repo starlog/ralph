@@ -28,38 +28,54 @@ payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit ─�
 | v0.6 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 병렬 실행, worktree, live log |
 | v0.7 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `--graph` 태스크 의존성 그래프 |
 
+## 필수 의존성
+
+| 도구 | 설명 |
+|---|---|
+| [Claude Code](https://claude.ai/code) | Claude Code CLI |
+| [git](https://git-scm.com/) | 버전 관리 (worktree 기반 병렬 실행에 필요) |
+
 ## 설치
 
-### .NET 8 버전 (v0.7, 권장)
+### 방법 1: 설치 스크립트 (소스에서 빌드)
 
-#### 필수 의존성
+.NET 8 SDK가 필요하다. 스크립트가 자동으로 빌드하고 PATH에 설치한다.
 
-| 도구 | 설치 |
-|---|---|
-| .NET 8 SDK | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0) (빌드 시에만 필요) |
-| claude | [Claude Code](https://claude.ai/code) 설치 |
-| git | 기본 포함 |
-
-#### 빌드 및 설치
+**macOS / Linux:**
 
 ```bash
-# 빌드 (단일 파일 바이너리 생성)
-cd Ralph
-dotnet publish -c Release -r win-x64    # Windows
-dotnet publish -c Release -r osx-x64    # macOS (Intel)
-dotnet publish -c Release -r osx-arm64  # macOS (Apple Silicon)
-dotnet publish -c Release -r linux-x64  # Linux
-
-# 생성된 바이너리를 PATH에 복사
-# Windows: Ralph/bin/Release/net8.0/win-x64/publish/ralph.exe
-# macOS/Linux: Ralph/bin/Release/net8.0/{rid}/publish/ralph
+git clone https://github.com/starlog/ralph.git
+cd ralph
+./install.sh
 ```
 
-빌드된 단일 바이너리(~14MB)에는 .NET 런타임이 포함되어 있어 별도 설치가 필요 없다.
+**Windows (PowerShell):**
 
-### ~~Bash 버전 (v0.1, macOS/Linux 전용)~~ — 레거시, 사용 불필요
+```powershell
+git clone https://github.com/starlog/ralph.git
+cd ralph
+.\install.ps1
+```
 
-> **참고:** `ralph.sh`와 `install.sh`는 v0.1 Bash 구현의 잔존 파일로, 현재 .NET 8 버전(v0.6)에서는 **사용하지 않는다.** 병렬 실행, worktree, live log 등 최신 기능은 .NET 버전에만 포함되어 있다.
+### 방법 2: 사전 빌드된 바이너리 다운로드
+
+[GitHub Releases](https://github.com/starlog/ralph/releases) 페이지에서 플랫폼에 맞는 바이너리를 다운로드한다. .NET SDK 설치가 필요 없다.
+
+| 플랫폼 | 파일 |
+|---|---|
+| Windows (x64) | `ralph-vX.X.X-win-x64.zip` |
+| macOS (Intel) | `ralph-vX.X.X-osx-x64.tar.gz` |
+| macOS (Apple Silicon) | `ralph-vX.X.X-osx-arm64.tar.gz` |
+| Linux (x64) | `ralph-vX.X.X-linux-x64.tar.gz` |
+
+```bash
+# 예: Linux
+curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v0.7.0-linux-x64.tar.gz
+tar -xzf ralph-v0.7.0-linux-x64.tar.gz
+sudo mv ralph /usr/local/bin/
+```
+
+바이너리는 자체 포함(self-contained)이므로 .NET 런타임 설치가 필요 없다.
 
 ## 사용법
 
@@ -164,9 +180,10 @@ ralph/
 │       └── RalphLogger.cs          # 파일 로깅
 ├── samples/                        # 예제 파일
 │   └── PRD.md                      # 병렬 실행 예제 PRD (CLI 계산기)
-├── ralph.sh                        # (레거시) Bash 버전 v0.1 — 사용 불필요
-├── ralph-schema.json               # (레거시) 빌드 시 바이너리에 embed됨, 별도 파일 불필요
-├── install.sh                      # (레거시) Bash 버전 설치 스크립트 — 사용 불필요
+├── install.sh                      # macOS/Linux 설치 스크립트
+├── install.ps1                     # Windows 설치 스크립트 (PowerShell)
+├── ralph.sh                        # (레거시) Bash 버전 v0.1
+├── ralph-schema.json               # JSON Schema (빌드 시 바이너리에 embed)
 ├── CLAUDE.md                       # Claude Code 가이드
 └── README.md
 ```
