@@ -47,6 +47,7 @@ if (maxParallelIdx >= 0 && maxParallelIdx + 1 < argList.Count)
 }
 
 var modelArg = "opus";
+var modelExplicit = false;
 var modelIdx = argList.IndexOf("--model");
 if (modelIdx >= 0 && modelIdx + 1 < argList.Count)
 {
@@ -54,6 +55,7 @@ if (modelIdx >= 0 && modelIdx + 1 < argList.Count)
     if (modelValue is "sonnet" or "opus")
     {
         modelArg = modelValue;
+        modelExplicit = true;
     }
     else
     {
@@ -152,7 +154,7 @@ async Task<int> HandlePlan()
         await git.InitAsync(logger, cts.Token);
 
     // Default to sonnet for plan generation (faster); user can override with --model opus
-    var planModel = modelArg == "opus" && !argList.Contains("--model") ? "sonnet" : modelArg;
+    var planModel = modelExplicit ? modelArg : "sonnet";
 
     var generator = new PlanGenerator();
     var sw = System.Diagnostics.Stopwatch.StartNew();
