@@ -153,8 +153,7 @@ async Task<int> HandlePlan()
     if (!await git.IsRepoInitializedAsync(cts.Token))
         await git.InitAsync(logger, cts.Token);
 
-    // Default to sonnet for plan generation (faster); user can override with --model opus
-    var planModel = modelExplicit ? modelArg : "sonnet";
+    var planModel = modelArg;
 
     var generator = new PlanGenerator();
     var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -549,7 +548,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  [green]-f[/], [green]--file[/] <path>    Use custom tasks file (default: tasks.json)");
     AnsiConsole.MarkupLine("  [green]--sequential[/]         Force sequential execution (disable parallel)");
     AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
-    AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: sonnet for --plan, opus for --run)");
+    AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
     AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
     AnsiConsole.MarkupLine("\n[blue]Workflow:[/]");
