@@ -47,7 +47,6 @@ if (maxParallelIdx >= 0 && maxParallelIdx + 1 < argList.Count)
 }
 
 var modelArg = "opus";
-var modelExplicit = false;
 var modelIdx = argList.IndexOf("--model");
 if (modelIdx >= 0 && modelIdx + 1 < argList.Count)
 {
@@ -55,7 +54,6 @@ if (modelIdx >= 0 && modelIdx + 1 < argList.Count)
     if (modelValue is "sonnet" or "opus")
     {
         modelArg = modelValue;
-        modelExplicit = true;
     }
     else
     {
