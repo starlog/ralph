@@ -3,7 +3,7 @@ using Ralph.Models;
 using Ralph.Services;
 using Spectre.Console;
 
-const string Version = "0.9";
+const string Version = "1.0";
 
 // ─── UTF-8 console encoding ─────────────────────────────────────────────────
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -206,9 +206,28 @@ async Task<int> HandleRun()
     // 병렬 실행 여부 결정
     var parallelConfig = tm.ParallelConfig;
     var useParallel = !sequential && !envParallelDisabled && parallelConfig.Enabled;
+
+    // 그래프 스캔: pending 태스크들의 topological layer 중 최대 폭을 계산
+    const int hardCap = 10;
+    var pendingIds = tm.GetPendingTasks().Select(t => t.Id).ToHashSet();
+    var layers = tm.ComputeTopologicalLayers();
+    var maxLayerWidth = layers
+        .Select(l => l.Count(id => pendingIds.Contains(id)))
+        .DefaultIfEmpty(0)
+        .Max();
+    var scannedConcurrency = Math.Clamp(maxLayerWidth, 1, hardCap);
+
+    // 우선순위: --max-parallel > RALPH_MAX_PARALLEL > 그래프 스캔 결과
     var concurrency = maxParallelArg > 0 ? maxParallelArg
         : envMaxParallel > 0 ? envMaxParallel
-        : parallelConfig.MaxConcurrent;
+        : scannedConcurrency;
+    if (concurrency > hardCap) concurrency = hardCap;
+
+    if (useParallel && maxParallelArg == 0 && envMaxParallel == 0)
+    {
+        AnsiConsole.MarkupLine(
+            $"[cyan]그래프 스캔:[/] 최대 동시 실행 가능 태스크 {maxLayerWidth}개 → {concurrency}개로 설정 (상한 {hardCap})");
+    }
 
     if (useParallel)
     {
