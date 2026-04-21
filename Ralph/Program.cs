@@ -206,7 +206,7 @@ async Task<int> HandleRun()
     var useParallel = !sequential && !envParallelDisabled && parallelConfig.Enabled;
 
     // 그래프 스캔: pending 태스크들의 topological layer 중 최대 폭을 계산
-    const int hardCap = 10;
+    const int hardCap = 16;
     var pendingIds = tm.GetPendingTasks().Select(t => t.Id).ToHashSet();
     var layers = tm.ComputeTopologicalLayers();
     var maxLayerWidth = layers
