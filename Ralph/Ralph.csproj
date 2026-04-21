@@ -9,10 +9,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <PublishTrimmed>true</PublishTrimmed>
+    <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
-    <!-- IL2026: Suppress trim warnings for JSON reflection-based serialization (dev builds) -->
-    <NoWarn>IL2026</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
