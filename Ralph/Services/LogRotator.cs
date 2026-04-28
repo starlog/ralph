@@ -5,7 +5,7 @@ namespace Ralph.Services;
 /// <summary>
 /// .ralph-logs/ 디렉토리에 누적된 오래된 로그 파일을 정리합니다.
 /// retention 기간보다 오래된 파일을 삭제합니다.
-/// 단, cost.jsonl(누적 비용 기록)과 validation.json은 보존.
+/// 단, cost.jsonl(누적 비용 기록)과 validation.jsonl은 보존.
 /// </summary>
 public static class LogRotator
 {
@@ -15,7 +15,7 @@ public static class LogRotator
     private static readonly HashSet<string> ProtectedFiles = new(StringComparer.OrdinalIgnoreCase)
     {
         "cost.jsonl",
-        "validation.json",
+        "validation.jsonl",
     };
 
     /// <summary>
