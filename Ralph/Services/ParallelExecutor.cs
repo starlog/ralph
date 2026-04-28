@@ -12,12 +12,14 @@ public class ParallelExecutor
     private readonly RalphLogger _logger;
     private readonly string _tasksFile;
     private readonly string? _model;
+    private readonly bool _strictFiles;
     private readonly CostTracker _cost;
     private readonly SemaphoreSlim _taskFileLock = new(1, 1);
 
     public ParallelExecutor(
         TaskManager taskManager, ClaudeService claude, GitService git,
-        WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null)
+        WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
+        bool strictFiles = false)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -26,6 +28,7 @@ public class ParallelExecutor
         _logger = logger;
         _tasksFile = tasksFile;
         _model = model;
+        _strictFiles = strictFiles;
         _cost = new CostTracker();
     }
 
@@ -273,6 +276,29 @@ public class ParallelExecutor
                     tasksFileName: Path.GetFileName(_tasksFile),
                     logger: _logger,
                     ct: ct);
+
+                // F4: declared(modifiedFiles ∪ outputFiles) vs actual(base..HEAD) 검증.
+                // F2 정규화 "이후"에 호출해야 tasks.json 정규화 결과가 actual에서 빠진다.
+                var declared = BuildDeclaredSet(_taskManager.GetTask(taskId)!);
+                var validation = await _worktree.ValidateModifiedFilesAsync(
+                    taskId, baseBranch, declared, _logger, ct: ct);
+
+                ReportValidation(taskId, validation);
+
+                if (_strictFiles && validation.HasUndeclared)
+                {
+                    var preview = string.Join(", ", validation.Undeclared.Take(3));
+                    var more = validation.Undeclared.Count > 3
+                        ? $" (외 {validation.Undeclared.Count - 3}건)" : "";
+                    AnsiConsole.MarkupLine(
+                        $"  [red]✗[/] {Markup.Escape(taskId)} undeclared 파일 {validation.Undeclared.Count}건. " +
+                        $"머지 중단 (strict-files): {Markup.Escape(preview + more)}");
+                    _logger.Error(
+                        $"[validate:files][strict] {taskId} undeclared: " +
+                        string.Join(", ", validation.Undeclared));
+                    // finally 블록이 worktree 정리. 잔여 태스크의 done 마킹은 일어나지 않음.
+                    return 1;
+                }
 
                 var mergeResult = await _worktree.MergeWorktreeAsync(
                     taskId, baseBranch, conflictStrategy, _logger, ct);
@@ -587,6 +613,59 @@ public class ParallelExecutor
         finally
         {
             _taskFileLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 태스크의 modifiedFiles ∪ outputFiles를 normalized 집합으로 만든다.
+    /// </summary>
+    private static IReadOnlyCollection<string> BuildDeclaredSet(TaskItem task)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (task.ModifiedFiles is { Count: > 0 })
+        {
+            foreach (var p in task.ModifiedFiles)
+                if (!string.IsNullOrWhiteSpace(p)) set.Add(p);
+        }
+        if (task.OutputFiles is { Count: > 0 })
+        {
+            foreach (var p in task.OutputFiles)
+                if (!string.IsNullOrWhiteSpace(p)) set.Add(p);
+        }
+        return set;
+    }
+
+    /// <summary>
+    /// F4 검증 결과를 콘솔에 표시한다. strict 차단 메시지는 별도 분기에서 출력하므로
+    /// 여기서는 warn-only/info 메시지만 다룬다.
+    /// </summary>
+    private void ReportValidation(string taskId, FileValidationResult validation)
+    {
+        if (validation.DiffFailed)
+        {
+            AnsiConsole.MarkupLine(
+                $"  [yellow]⚠[/] {Markup.Escape(taskId)} diff 실패 — 검증 스킵");
+            return;
+        }
+
+        if (validation.HasUndeclared && !_strictFiles)
+        {
+            var preview = string.Join(", ", validation.Undeclared.Take(3));
+            var more = validation.Undeclared.Count > 3
+                ? $" (외 {validation.Undeclared.Count - 3}건)" : "";
+            AnsiConsole.MarkupLine(
+                $"  [yellow]⚠[/] {Markup.Escape(taskId)} undeclared {validation.Undeclared.Count}건 (warn-only): " +
+                $"{Markup.Escape(preview + more)}");
+        }
+
+        if (validation.HasNotChanged)
+        {
+            var preview = string.Join(", ", validation.NotChanged.Take(3));
+            var more = validation.NotChanged.Count > 3
+                ? $" (외 {validation.NotChanged.Count - 3}건)" : "";
+            AnsiConsole.MarkupLine(
+                $"  [dim]ℹ {Markup.Escape(taskId)} notChanged {validation.NotChanged.Count}건: " +
+                $"{Markup.Escape(preview + more)}[/]");
         }
     }
 

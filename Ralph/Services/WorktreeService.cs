@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Spectre.Console;
 
 namespace Ralph.Services;
@@ -9,8 +10,31 @@ public class MergeResult
     public string? ErrorMessage { get; set; }
 }
 
+/// <summary>
+/// 머지 직전 declared(modifiedFiles ∪ outputFiles) vs actual(git diff base..HEAD) 비교 결과.
+/// </summary>
+public sealed record FileValidationResult(
+    string TaskId,
+    DateTimeOffset TimestampUtc,
+    IReadOnlyList<string> Declared,
+    IReadOnlyList<string> Actual,
+    IReadOnlyList<string> Undeclared,
+    IReadOnlyList<string> NotChanged,
+    bool DiffFailed,
+    string? DiffError)
+{
+    public bool HasUndeclared => Undeclared.Count > 0;
+    public bool HasNotChanged => NotChanged.Count > 0;
+}
+
 public class WorktreeService
 {
+    private static readonly JsonSerializerOptions ValidationJsonOpts = new()
+    {
+        WriteIndented = false,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
     private readonly GitService _git;
     private readonly string _worktreeBase;
 
@@ -186,6 +210,118 @@ public class WorktreeService
             return false;
         }
     }
+
+    /// <summary>
+    /// 머지 직전 worktree HEAD와 baseRef 사이의 실제 변경 파일 집합을 declared 집합과
+    /// 대조합니다. F2의 NormalizeTasksJsonAsync "이후"에 호출되어야 tasks.json
+    /// 정규화 결과가 actual에서 빠지고, 진짜 undeclared만 남습니다.
+    ///
+    /// 결과는 .ralph-logs/validation.jsonl(또는 지정 경로)에 한 줄(append) JSON으로 누적되며,
+    /// undeclared가 있으면 logger.Warn을 남깁니다. diff 자체가 실패하면 머지를 막지 않고
+    /// DiffFailed=true로 반환합니다.
+    /// </summary>
+    public async Task<FileValidationResult> ValidateModifiedFilesAsync(
+        string taskId,
+        string baseRef,
+        IReadOnlyCollection<string> declared,
+        RalphLogger? logger = null,
+        string validationLogPath = ".ralph-logs/validation.jsonl",
+        CancellationToken ct = default)
+    {
+        var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
+        var timestamp = DateTimeOffset.UtcNow;
+
+        var (diffExit, diffOut) = await _git.RunAsync(
+            ["diff", "--name-only", $"{baseRef}..HEAD"], worktreePath, ct);
+
+        if (diffExit != 0)
+        {
+            var error = diffOut.Trim();
+            logger?.Warn($"[validate:files] {taskId}: git diff 실패 — 검증 스킵. detail: {error}");
+            return new FileValidationResult(
+                taskId, timestamp,
+                Array.Empty<string>(), Array.Empty<string>(),
+                Array.Empty<string>(), Array.Empty<string>(),
+                DiffFailed: true, DiffError: error);
+        }
+
+        var actual = diffOut
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .Select(NormalizeSlash)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
+
+        var declaredNorm = declared
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(NormalizeSlash)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
+
+        var declaredSet = new HashSet<string>(declaredNorm, StringComparer.Ordinal);
+        var actualSet = new HashSet<string>(actual, StringComparer.Ordinal);
+
+        var undeclared = actual.Where(p => !declaredSet.Contains(p)).ToList();
+        var notChanged = declaredNorm.Where(p => !actualSet.Contains(p)).ToList();
+
+        if (undeclared.Count > 0)
+        {
+            var preview = string.Join(", ", undeclared.Take(3));
+            var more = undeclared.Count > 3 ? $" (외 {undeclared.Count - 3}건)" : "";
+            logger?.Warn(
+                $"[validate:files] {taskId}: undeclared {undeclared.Count}건 — {preview}{more}");
+        }
+
+        var result = new FileValidationResult(
+            taskId, timestamp,
+            declaredNorm, actual, undeclared, notChanged,
+            DiffFailed: false, DiffError: null);
+
+        await AppendValidationLogAsync(result, validationLogPath, logger, ct);
+        return result;
+    }
+
+    private static string NormalizeSlash(string path) =>
+        string.IsNullOrEmpty(path) ? path : path.Replace('\\', '/');
+
+    private static async Task AppendValidationLogAsync(
+        FileValidationResult result, string validationLogPath,
+        RalphLogger? logger, CancellationToken ct)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(validationLogPath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            var record = new ValidationLogEntry(
+                result.TaskId,
+                result.TimestampUtc.ToString("o"),
+                result.Declared,
+                result.Actual,
+                result.Undeclared,
+                result.NotChanged);
+
+            var line = JsonSerializer.Serialize(record, ValidationJsonOpts) + "\n";
+            await File.AppendAllTextAsync(validationLogPath, line, ct);
+        }
+        catch (Exception ex)
+        {
+            // best-effort: validation 기록이 머지 흐름을 깨뜨리면 안 됨
+            logger?.Warn($"[validate:files] {result.TaskId}: validation.jsonl 기록 실패 — {ex.Message}");
+        }
+    }
+
+    private sealed record ValidationLogEntry(
+        string TaskId,
+        string Timestamp,
+        IReadOnlyList<string> Declared,
+        IReadOnlyList<string> Actual,
+        IReadOnlyList<string> Undeclared,
+        IReadOnlyList<string> NotChanged);
 
     /// <summary>
     /// 충돌 파일 목록을 반환합니다.

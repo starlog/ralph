@@ -29,6 +29,7 @@ var maxRetries = int.TryParse(Environment.GetEnvironmentVariable("MAX_RETRIES"),
 var retryDelay = int.TryParse(Environment.GetEnvironmentVariable("RETRY_DELAY"), out var rd) ? rd : 5;
 var envMaxParallel = int.TryParse(Environment.GetEnvironmentVariable("RALPH_MAX_PARALLEL"), out var mp) ? mp : 0;
 var envParallelDisabled = Environment.GetEnvironmentVariable("RALPH_PARALLEL")?.ToLower() == "false";
+var envStrictFiles = Environment.GetEnvironmentVariable("RALPH_STRICT_FILES")?.ToLower() == "true";
 
 // ─── Dependency checks ──────────────────────────────────────────────────────
 CheckCommand("claude", "Claude Code CLI", "https://claude.ai/code");
@@ -39,6 +40,7 @@ var argList = args.ToList();
 var debug = argList.Remove("--debug");
 var sequential = argList.Remove("--sequential");
 var forceFlag = argList.Remove("--force");
+var strictFiles = argList.Remove("--strict-files") || envStrictFiles;
 var maxParallelArg = 0;
 var maxParallelIdx = argList.IndexOf("--max-parallel");
 if (maxParallelIdx >= 0 && maxParallelIdx + 1 < argList.Count)
@@ -271,7 +273,8 @@ async Task<int> HandleRun()
         ShowProgress(tm, logger);
 
         var worktree = new WorktreeService(git);
-        var executor = new ParallelExecutor(tm, claude, git, worktree, logger, tasksFile, modelArg);
+        var executor = new ParallelExecutor(
+            tm, claude, git, worktree, logger, tasksFile, modelArg, strictFiles: strictFiles);
         exitCode = await executor.RunAsync(concurrency, cts.Token);
     }
     else
@@ -782,6 +785,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  [green]--sequential[/]         Force sequential execution (disable parallel)");
     AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
     AnsiConsole.MarkupLine("  [green]--force[/]              Bypass dependency/validation checks (--task, --run)");
+    AnsiConsole.MarkupLine("  [green]--strict-files[/]       Validate declared vs actual files at merge; abort on undeclared");
     AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
     AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
@@ -796,6 +800,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  RETRY_DELAY                 Seconds between retries (default: 5)");
     AnsiConsole.MarkupLine("  RALPH_MAX_PARALLEL          Max concurrent worktrees (default: 3)");
     AnsiConsole.MarkupLine("  RALPH_PARALLEL              Set to 'false' to disable parallel execution");
+    AnsiConsole.MarkupLine("  RALPH_STRICT_FILES          Set to 'true' to enable --strict-files");
     AnsiConsole.MarkupLine("  RALPH_WEBHOOK_URL           Default webhook for session completion notifications");
     AnsiConsole.MarkupLine("  RALPH_LOG_RETENTION_DAYS    Auto-delete logs older than N days (default: 30)\n");
     return 0;
