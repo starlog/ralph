@@ -106,4 +106,64 @@ public class CostTrackerTests : IDisposable
         Assert.Equal("opus", CostTracker.NormalizeModel("", empty));
         Assert.Equal("foo-bar", CostTracker.NormalizeModel("foo-bar", empty));
     }
+
+    [Fact]
+    public async Task PrintSummary_separates_conflict_section_when_conflict_entries_exist()
+    {
+        var cost = new CostTracker();
+        var usage = new TokenUsage(1_000_000, 1_000_000, 0, 0); // opus: $90 per call
+        var result = new ClaudeResult { Success = true, Usage = usage, Duration = TimeSpan.FromSeconds(1) };
+
+        await cost.RecordAsync("foo", "opus", result);
+        await cost.RecordAsync("conflict:foo", "opus", result);
+        await cost.RecordAsync("conflict:foo", "opus", result);
+
+        var sw = new StringWriter();
+        await cost.PrintSummaryAsync(CancellationToken.None, sw);
+        var output = sw.ToString();
+
+        Assert.Contains("충돌 해결 비용", output);
+        Assert.Contains("호출 수", output);
+        Assert.Matches(@"호출 수\s*\D*2", output); // 2건 표기 확인
+    }
+
+    [Fact]
+    public async Task PrintSummary_excludes_conflict_rows_from_top_task_table()
+    {
+        var cost = new CostTracker();
+        var usage = new TokenUsage(1_000_000, 1_000_000, 0, 0);
+        var result = new ClaudeResult { Success = true, Usage = usage, Duration = TimeSpan.FromSeconds(1) };
+
+        await cost.RecordAsync("foo", "opus", result);
+        await cost.RecordAsync("conflict:foo", "opus", result);
+        await cost.RecordAsync("conflict:foo", "opus", result);
+
+        var sw = new StringWriter();
+        await cost.PrintSummaryAsync(CancellationToken.None, sw);
+        var output = sw.ToString();
+
+        // 상위 10개 표가 시작된 이후 영역에는 conflict:foo가 등장하면 안됨.
+        var topIdx = output.IndexOf("태스크별 상위 10개", StringComparison.Ordinal);
+        Assert.True(topIdx >= 0, "태스크별 상위 10개 섹션이 없습니다.");
+        var topSection = output[topIdx..];
+        Assert.DoesNotContain("conflict:foo", topSection);
+        Assert.Contains("foo", topSection); // 일반 태스크는 표에 포함
+    }
+
+    [Fact]
+    public async Task PrintSummary_omits_conflict_section_when_no_conflict_entries()
+    {
+        var cost = new CostTracker();
+        var usage = new TokenUsage(1_000_000, 1_000_000, 0, 0);
+        var result = new ClaudeResult { Success = true, Usage = usage, Duration = TimeSpan.FromSeconds(1) };
+
+        await cost.RecordAsync("foo", "opus", result);
+        await cost.RecordAsync("bar", "opus", result);
+
+        var sw = new StringWriter();
+        await cost.PrintSummaryAsync(CancellationToken.None, sw);
+        var output = sw.ToString();
+
+        Assert.DoesNotContain("충돌 해결 비용", output);
+    }
 }

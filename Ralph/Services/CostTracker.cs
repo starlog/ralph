@@ -312,13 +312,25 @@ public class CostTracker
     }
 
     /// <summary>
-    /// 누적 cost.jsonl을 읽어 콘솔에 요약 출력합니다.
+    /// 누적 cost.jsonl을 읽어 요약 출력합니다.
+    /// output이 null이면 Console.Out, 아니면 주입된 TextWriter로 렌더링합니다(테스트용).
     /// </summary>
-    public async Task PrintSummaryAsync(CancellationToken ct = default)
+    public async Task PrintSummaryAsync(CancellationToken ct = default, TextWriter? output = null)
     {
+        // output 주입 시에는 색상/ANSI 비활성화 — StringWriter로 캡처 가능한 평문 출력.
+        var console = output is null
+            ? AnsiConsole.Console
+            : AnsiConsole.Create(new AnsiConsoleSettings
+            {
+                Out = new AnsiConsoleOutput(output),
+                Ansi = AnsiSupport.No,
+                ColorSystem = ColorSystemSupport.NoColors,
+                Interactive = InteractionSupport.No,
+            });
+
         if (!File.Exists(LogFilePath))
         {
-            AnsiConsole.MarkupLine("[yellow]비용 기록이 없습니다 (.ralph-logs/cost.jsonl이 없습니다).[/]");
+            console.MarkupLine("[yellow]비용 기록이 없습니다 (.ralph-logs/cost.jsonl이 없습니다).[/]");
             return;
         }
 
@@ -336,9 +348,12 @@ public class CostTracker
 
         if (entries.Count == 0)
         {
-            AnsiConsole.MarkupLine("[yellow]비용 기록이 비어있습니다.[/]");
+            console.MarkupLine("[yellow]비용 기록이 비어있습니다.[/]");
             return;
         }
+
+        var conflictEntries = entries.Where(e => e.TaskId.StartsWith("conflict:")).ToList();
+        var normalEntries = entries.Where(e => !e.TaskId.StartsWith("conflict:")).ToList();
 
         var totalIn = entries.Sum(e => e.InputTokens);
         var totalOut = entries.Sum(e => e.OutputTokens);
@@ -348,13 +363,13 @@ public class CostTracker
         var totalSec = entries.Sum(e => e.DurationSec);
         var missingCount = entries.Count(e => e.UsageMissing);
 
-        AnsiConsole.Write(new Rule("[green]Ralph Cost Summary[/]").RuleStyle("blue"));
-        AnsiConsole.MarkupLine($"기록 수: [cyan]{entries.Count}[/]개 호출");
-        AnsiConsole.MarkupLine($"기간: [cyan]{entries.Min(e => e.TimestampUtc):yyyy-MM-dd HH:mm}[/] ~ [cyan]{entries.Max(e => e.TimestampUtc):yyyy-MM-dd HH:mm}[/] UTC");
+        console.Write(new Rule("[green]Ralph Cost Summary[/]").RuleStyle("blue"));
+        console.MarkupLine($"기록 수: [cyan]{entries.Count}[/]개 호출");
+        console.MarkupLine($"기간: [cyan]{entries.Min(e => e.TimestampUtc):yyyy-MM-dd HH:mm}[/] ~ [cyan]{entries.Max(e => e.TimestampUtc):yyyy-MM-dd HH:mm}[/] UTC");
         if (missingCount > 0)
-            AnsiConsole.MarkupLine(
+            console.MarkupLine(
                 $"[yellow]usage 누락 placeholder: {missingCount}개[/] (실제 토큰은 추정 비용에 반영되지 않음)");
-        AnsiConsole.WriteLine();
+        console.WriteLine();
 
         var table = new Table().Border(TableBorder.Rounded);
         table.AddColumn("항목");
@@ -365,12 +380,33 @@ public class CostTracker
         table.AddRow("Cache creation tokens", $"{totalCacheC:N0}");
         table.AddRow("총 실행 시간", $"{totalSec:N0}초 ({totalSec / 60:F1}분)");
         table.AddRow("[green]추정 비용[/]", $"[green]${totalUsd:F2}[/]");
-        AnsiConsole.Write(table);
+        console.Write(table);
 
-        AnsiConsole.WriteLine();
-        AnsiConsole.Write(new Rule("[blue]태스크별 상위 10개 (비용순)[/]").RuleStyle("blue"));
+        if (conflictEntries.Count > 0)
+        {
+            var conflictIn = conflictEntries.Sum(e => e.InputTokens);
+            var conflictOut = conflictEntries.Sum(e => e.OutputTokens);
+            var conflictUsd = conflictEntries.Sum(e => e.EstimatedUsd);
+            var conflictAvg = conflictUsd / conflictEntries.Count;
 
-        var byTask = entries
+            console.WriteLine();
+            console.Write(new Rule("[red]충돌 해결 비용[/]").RuleStyle("red"));
+
+            var conflictTable = new Table().Border(TableBorder.Rounded);
+            conflictTable.AddColumn("항목");
+            conflictTable.AddColumn(new TableColumn("값").RightAligned());
+            conflictTable.AddRow("호출 수", $"{conflictEntries.Count:N0}");
+            conflictTable.AddRow("Input tokens", $"{conflictIn:N0}");
+            conflictTable.AddRow("Output tokens", $"{conflictOut:N0}");
+            conflictTable.AddRow("USD 합계", $"${conflictUsd:F3}");
+            conflictTable.AddRow("평균 USD", $"${conflictAvg:F3}");
+            console.Write(conflictTable);
+        }
+
+        console.WriteLine();
+        console.Write(new Rule("[blue]태스크별 상위 10개 (비용순)[/]").RuleStyle("blue"));
+
+        var byTask = normalEntries
             .GroupBy(e => e.TaskId)
             .Select(g => new
             {
@@ -403,9 +439,9 @@ public class CostTracker
                 $"{row.Sec:N0}",
                 $"${row.Usd:F3}");
         }
-        AnsiConsole.Write(taskTable);
+        console.Write(taskTable);
 
-        AnsiConsole.MarkupLine($"\n[dim]전체 기록: {Markup.Escape(LogFilePath)}[/]");
-        AnsiConsole.MarkupLine("[dim]단가는 추정값. 실제 청구액은 Anthropic 콘솔을 참조하세요.[/]");
+        console.MarkupLine($"\n[dim]전체 기록: {Markup.Escape(LogFilePath)}[/]");
+        console.MarkupLine("[dim]단가는 추정값. 실제 청구액은 Anthropic 콘솔을 참조하세요.[/]");
     }
 }
