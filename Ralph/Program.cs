@@ -927,6 +927,7 @@ async Task<int> RunTaskAuto(
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
             var result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
+            await new CostTracker().RecordAsync(taskId, model ?? "opus", result, ct);
             if (!result.Success)
             {
                 AnsiConsole.MarkupLine("\n[red]Claude Code execution failed[/]");
@@ -1096,6 +1097,7 @@ async Task<int> RunInteractiveLoop(
 
                         AnsiConsole.MarkupLine("[cyan]Running Claude Code...[/]\n");
                         var result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
+                        await new CostTracker().RecordAsync(nextId, model ?? "opus", result, ct);
 
                         if (!result.Success)
                         {
