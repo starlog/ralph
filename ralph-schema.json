@@ -134,7 +134,7 @@
         },
         "smokeTest": {
           "type": "object",
-          "description": "Single command run on the base branch after each parallel batch's merges complete. Catches semantic conflicts that survived auto/claude conflict resolution. Failure stops the run with non-zero exit.",
+          "description": "Single command run on the base branch after each parallel batch's merges complete. Catches semantic conflicts that survived auto/claude conflict resolution. Failure stops the run with non-zero exit. If omitted, Ralph auto-infers a smoke test from repo-root markers (.csproj/.sln → dotnet build, package.json → npm test, Cargo.toml → cargo build, go.mod → go build). Disable entirely with --no-smoke-test (or RALPH_NO_SMOKE_TEST=true). Explicit values here always take precedence over auto-inference.",
           "properties": {
             "command": { "type": "string", "description": "Shell command to run on base branch after merges" },
             "timeoutSec": { "type": "integer", "minimum": 1, "description": "Per-call timeout (seconds). Default 120." }

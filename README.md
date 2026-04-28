@@ -272,6 +272,8 @@ What happens when a parallel batch partially fails:
 
 **Already-merged tasks are not rolled back.** Ralph's design treats merge as the commit point — undoing requires a human-driven `git revert` or `git reset`. Use `--strict-files` and `workflow.smokeTest` to catch problems before the merge becomes durable.
 
+**Smoke test is opt-out.** When `workflow.smokeTest` is not set, Ralph auto-infers a smoke test from repo-root markers (`*.csproj`/`*.sln` → `dotnet build`, `package.json` → `npm test`, `Cargo.toml` → `cargo build`, `go.mod` → `go build`). An explicit `workflow.smokeTest` always wins. Disable entirely with `--no-smoke-test` or `RALPH_NO_SMOKE_TEST=true`.
+
 ### Conflict Resolution Strategies
 
 Configured under `workflow.parallel.conflictStrategies` (chain) or the legacy `workflow.parallel.conflictStrategy` (single) in `tasks.json`. The chain is an **ordered fallback list** — the first entry decides the initial merge `-X` flag (for `auto-*`); the remaining entries are tried in order if the merge or previous step fails.

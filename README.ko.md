@@ -520,6 +520,8 @@ ralph --run ────────┤                                         
 
 **이미 머지된 task는 자동으로 되돌리지 않는다.** 머지를 commit point로 보는 설계 — 되돌리려면 사용자가 직접 `git revert` / `git reset` 해야 한다. 머지가 영구화되기 전에 잡으려면 `--strict-files`와 `workflow.smokeTest`를 활용.
 
+**Smoke test는 opt-out.** `workflow.smokeTest`를 명시하지 않으면 Ralph가 repo root marker로 자동 추론한다 (`*.csproj`/`*.sln` → `dotnet build`, `package.json` → `npm test`, `Cargo.toml` → `cargo build`, `go.mod` → `go build`). 명시 지정된 `workflow.smokeTest`는 항상 우선한다. 완전히 비활성화하려면 `--no-smoke-test` 또는 `RALPH_NO_SMOKE_TEST=true`.
+
 ### 충돌 해결 전략
 
 `workflow.parallel.conflictStrategies` (chain) 또는 legacy `workflow.parallel.conflictStrategy` (단일)에서 설정한다. chain은 **순서가 있는 fallback list** — 첫 항목이 초기 머지의 `-X` 플래그(auto-* 인 경우)를 결정하고, 머지 또는 직전 단계가 실패하면 나머지 항목을 순서대로 시도한다.

@@ -14,6 +14,7 @@ public class ParallelExecutor
     private readonly string? _model;
     private readonly bool _strictFiles;
     private readonly bool _sharedWorktrees;
+    private readonly bool _noSmokeTest;
     private readonly CostTracker _cost;
     private readonly BudgetGate _budgetGate;
     private readonly VerificationRunner _verifier = new();
@@ -36,7 +37,7 @@ public class ParallelExecutor
         WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
         bool strictFiles = false, double? budgetUsd = null,
         CostTracker? cost = null, BudgetGate? budgetGate = null,
-        bool sharedWorktrees = false)
+        bool sharedWorktrees = false, bool noSmokeTest = false)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -47,6 +48,7 @@ public class ParallelExecutor
         _model = model;
         _strictFiles = strictFiles;
         _sharedWorktrees = sharedWorktrees;
+        _noSmokeTest = noSmokeTest;
         _cost = cost ?? new CostTracker();
         _budgetGate = budgetGate ?? new BudgetGate(budgetUsd, _cost, logger);
     }
@@ -955,20 +957,44 @@ public class ParallelExecutor
     }
 
     /// <summary>
-    /// workflow.smokeTest가 설정되어 있으면 base에서 한 번 실행해 머지 결과의 semantic
-    /// 정합성을 검증한다. 실패 시 종료 코드 1(non-success)을 반환해 ParallelExecutor가
-    /// 다음 배치를 dispatch하지 않게 한다.
-    /// 미설정이면 null을 반환해 호출자가 다음 단계로 진행.
+    /// 머지 후 base 브랜치에서 smoke test를 실행해 머지 결과의 semantic 정합성을 검증한다.
+    /// 우선순위: <c>--no-smoke-test</c>(또는 env)면 즉시 skip → workflow.smokeTest 명시 지정 시 그것을
+    /// 사용 → 미지정이면 repo root marker(.csproj/package.json/Cargo.toml/go.mod 등)로 자동 추론.
+    /// 실패 시 종료 코드 1(non-success)을 반환해 호출자가 다음 배치를 dispatch하지 않게 한다.
+    /// 추론 결과도 null이면 null을 반환해 호출자가 다음 단계로 진행.
     /// </summary>
     private async Task<int?> RunPostMergeSmokeTestAsync(CancellationToken ct)
     {
-        var spec = _taskManager.Data.Workflow?.SmokeTest;
-        if (spec is null || string.IsNullOrWhiteSpace(spec.Command)) return null;
+        if (_noSmokeTest)
+        {
+            _logger.Info("[smoke-test] skipped (--no-smoke-test)");
+            return null;
+        }
 
         var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+        var configured = _taskManager.Data.Workflow?.SmokeTest;
+        VerificationSpec? spec;
+        bool inferred = false;
+
+        if (configured is not null && !string.IsNullOrWhiteSpace(configured.Command))
+        {
+            spec = configured;
+        }
+        else
+        {
+            spec = InferSmokeTestCommand(repoRoot);
+            inferred = spec is not null;
+            if (spec is null)
+            {
+                _logger.Info("[smoke-test] skipped (no workflow.smokeTest, inference matched no marker)");
+                return null;
+            }
+        }
+
+        var label = inferred ? "Smoke test 실행 (자동 추론)" : "Smoke test 실행";
         AnsiConsole.MarkupLine(
-            $"\n[cyan]Smoke test 실행:[/] [dim]{Markup.Escape(spec.Command)}[/] [dim](cwd: {Markup.Escape(repoRoot)})[/]");
-        _logger.Info($"[smoke-test] running: {spec.Command} (cwd: {repoRoot})");
+            $"\n[cyan]{label}:[/] [dim]{Markup.Escape(spec!.Command)}[/] [dim](cwd: {Markup.Escape(repoRoot)})[/]");
+        _logger.Info($"[smoke-test] running: {spec.Command} (cwd: {repoRoot}, inferred: {inferred})");
 
         var result = await _verifier.RunAsync(spec, repoRoot, _logger, output: null, ct);
         if (result.Success)
@@ -984,6 +1010,32 @@ public class ParallelExecutor
         _logger.Error(
             $"[smoke-test] failed exit={result.ExitCode} timedOut={result.TimedOut}");
         return 1;
+    }
+
+    /// <summary>
+    /// repo root에 있는 빌드 시스템 marker를 보고 smoke test 명령을 추론한다.
+    /// 우선순위: .csproj/.sln(dotnet) → package.json(npm) → Cargo.toml(cargo) → go.mod(go).
+    /// 매치 없으면 null. 깊은 재귀 탐색은 비용이 크므로 top-level만 본다 — monorepo는 root marker를 가정.
+    /// 순수 함수: 외부 상태에 의존하지 않으며 명령을 실행하지 않는다.
+    /// </summary>
+    public static VerificationSpec? InferSmokeTestCommand(string repoRoot)
+    {
+        if (string.IsNullOrWhiteSpace(repoRoot) || !Directory.Exists(repoRoot))
+            return null;
+
+        bool HasTopLevel(string pattern) =>
+            Directory.EnumerateFiles(repoRoot, pattern, SearchOption.TopDirectoryOnly).Any();
+
+        if (HasTopLevel("*.csproj") || HasTopLevel("*.sln"))
+            return new VerificationSpec { Command = "dotnet build -nologo", TimeoutSec = 180 };
+        if (HasTopLevel("package.json"))
+            return new VerificationSpec { Command = "npm test --silent", TimeoutSec = 180 };
+        if (HasTopLevel("Cargo.toml"))
+            return new VerificationSpec { Command = "cargo build --quiet", TimeoutSec = 300 };
+        if (HasTopLevel("go.mod"))
+            return new VerificationSpec { Command = "go build ./...", TimeoutSec = 180 };
+
+        return null;
     }
 
     /// <summary>

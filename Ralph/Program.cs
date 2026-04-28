@@ -31,6 +31,8 @@ int? envRetryDelay = int.TryParse(Environment.GetEnvironmentVariable("RETRY_DELA
 var envMaxParallel = int.TryParse(Environment.GetEnvironmentVariable("RALPH_MAX_PARALLEL"), out var mp) ? mp : 0;
 var envParallelDisabled = Environment.GetEnvironmentVariable("RALPH_PARALLEL")?.ToLower() == "false";
 var envStrictFiles = Environment.GetEnvironmentVariable("RALPH_STRICT_FILES")?.ToLower() == "true";
+var envNoSmokeTestRaw = Environment.GetEnvironmentVariable("RALPH_NO_SMOKE_TEST")?.ToLower();
+var envNoSmokeTest = envNoSmokeTestRaw is "true" or "1";
 var envSharedWorktreesRaw = Environment.GetEnvironmentVariable("RALPH_SHARED_WORKTREES")?.ToLower();
 bool? envSharedWorktrees = envSharedWorktreesRaw switch
 {
@@ -61,6 +63,7 @@ var sequential = argList.Remove("--sequential");
 var forceFlag = argList.Remove("--force");
 var strictFiles = argList.Remove("--strict-files") || envStrictFiles;
 var cliSharedWorktrees = argList.Remove("--shared-worktrees");
+var noSmokeTest = argList.Remove("--no-smoke-test") || envNoSmokeTest;
 var maxParallelArg = 0;
 var maxParallelIdx = argList.IndexOf("--max-parallel");
 if (maxParallelIdx >= 0)
@@ -414,7 +417,7 @@ async Task<int> HandleRun()
         var executor = new ParallelExecutor(
             tm, claude, git, worktree, logger, tasksFile, modelArg,
             strictFiles: strictFiles, budgetUsd: EffectiveBudgetUsd(tm), cost: costTracker,
-            sharedWorktrees: sharedWorktrees);
+            sharedWorktrees: sharedWorktrees, noSmokeTest: noSmokeTest);
         exitCode = await executor.RunAsync(concurrency, cts.Token);
         if (exitCode == 0 && executor.BudgetReached) exitCode = 2;
     }
@@ -961,6 +964,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  [green]--force[/]              Bypass dependency/validation checks (--task, --run)");
     AnsiConsole.MarkupLine("  [green]--strict-files[/]       Validate declared vs actual files at merge; abort on undeclared");
     AnsiConsole.MarkupLine("  [green]--shared-worktrees[/]   Use 'git worktree add --shared' to share .git objects across worktrees");
+    AnsiConsole.MarkupLine("  [green]--no-smoke-test[/]      Disable post-merge smoke test (auto-inferred or explicit)");
     AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
     AnsiConsole.MarkupLine("  [green]--task-timeout[/] <dur> Per-Claude-call timeout (예: 30m, 1h, 90s, 1800). hang 방지");
     AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
@@ -979,6 +983,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  RALPH_PARALLEL              Set to 'false' to disable parallel execution");
     AnsiConsole.MarkupLine("  RALPH_STRICT_FILES          Set to 'true' to enable --strict-files");
     AnsiConsole.MarkupLine("  RALPH_SHARED_WORKTREES      Set to 'true' to enable --shared-worktrees");
+    AnsiConsole.MarkupLine("  RALPH_NO_SMOKE_TEST         Set to 'true' or '1' to disable post-merge smoke test");
     AnsiConsole.MarkupLine("  RALPH_BUDGET_USD            누적 비용 임계값(USD). CLI --budget-usd가 우선");
     AnsiConsole.MarkupLine("  RALPH_TASK_TIMEOUT_SEC      Per-Claude-call timeout(seconds). CLI --task-timeout이 우선");
     AnsiConsole.MarkupLine("  RALPH_WEBHOOK_URL           Default webhook for session completion notifications");
