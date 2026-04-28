@@ -14,6 +14,11 @@ public class ClaudeResult
     public int ExitCode { get; init; }
     public TokenUsage? Usage { get; init; }
     public TimeSpan Duration { get; init; }
+    /// <summary>
+    /// true이면 ClaudeService.TaskTimeoutSec를 초과해 process tree가 강제 종료된 결과.
+    /// RunWithRetryAsync는 이 플래그가 true이면 retry를 건너뜁니다 (hang은 재시도로 잘 안 풀림).
+    /// </summary>
+    public bool TimedOut { get; init; }
 }
 
 public record TokenUsage(
@@ -28,6 +33,13 @@ public record TokenUsage(
 public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 {
     public bool Debug { get; set; }
+
+    /// <summary>
+    /// Claude 호출 한 번(per attempt)의 wall-clock timeout. null/0/음수면 timeout 미적용.
+    /// 초과 시 process tree kill + TimedOut=true 결과 반환. 외부 ct로 인한 정상 cancel은
+    /// 그대로 propagate하므로 사용자 Ctrl+C와 timeout이 구분됩니다.
+    /// </summary>
+    public int? TaskTimeoutSec { get; set; }
     private static string BuildArgsSummary(ProcessStartInfo psi)
     {
         var args = string.Join(" ", psi.ArgumentList.Select(a =>
@@ -63,6 +75,14 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         CancellationToken ct = default,
         string? allowedTools = null)
     {
+        // Per-attempt timeout: 외부 ct에 추가로 CancelAfter를 적용한 linked CTS 생성.
+        // 외부 ct가 fire하면 사용자 cancel(Ctrl+C) — 그대로 propagate.
+        // localCts만 fire하면 timeout — process kill + TimedOut=true 결과로 graceful 반환.
+        using var localCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (TaskTimeoutSec is { } sec && sec > 0)
+            localCts.CancelAfter(TimeSpan.FromSeconds(sec));
+        var effectiveCt = localCts.Token;
+
         var psi = new ProcessStartInfo
         {
             FileName = "claude",
@@ -126,7 +146,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         DebugLog($"Process started (PID: {process.Id})");
 
         // Read stderr in background to prevent deadlocks
-        var stderrTask = process.StandardError.ReadToEndAsync(ct);
+        var stderrTask = process.StandardError.ReadToEndAsync(effectiveCt);
 
         // Always pipe prompt via stdin (avoids argument length limits and escaping issues)
         try
@@ -140,7 +160,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         {
             // Process exited before we finished writing — read stderr for diagnostics
             var earlyStderr = await stderrTask;
-            await process.WaitForExitAsync(ct);
+            await process.WaitForExitAsync(effectiveCt);
             var errMsg = !string.IsNullOrWhiteSpace(earlyStderr) ? earlyStderr : ex.Message;
             if (output == null)
                 AnsiConsole.MarkupLine($"[red]Claude process failed to start: {Markup.Escape(errMsg.Trim())}[/]");
@@ -181,9 +201,14 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         var streamSw = new Stopwatch();
         long totalChars = 0;
 
+        // stderr/exit는 try 바깥에서 catch가 접근할 수 있도록 미리 선언.
+        string stderr = "";
+
         // Read stdout line by line — each line is a stream-json object
         var reader = process.StandardOutput;
-        while (await reader.ReadLineAsync(ct) is { } line)
+        try
+        {
+        while (await reader.ReadLineAsync(effectiveCt) is { } line)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
 
@@ -324,9 +349,43 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         DebugLog($"Stream ended (totalChars: {totalChars:N0}, hasStreamDeltas: {hasStreamDeltas})");
 
         // Drain stderr
-        var stderr = await stderrTask;
-        await process.WaitForExitAsync(ct);
+        stderr = await stderrTask;
+        await process.WaitForExitAsync(effectiveCt);
         DebugLog($"Process exited (code: {process.ExitCode})");
+        }
+        catch (OperationCanceledException)
+        {
+            // 외부 ct가 fired면 사용자 cancel — propagate. localCts만 fired면 timeout.
+            await StopSpinner();
+            var timedOut = !ct.IsCancellationRequested && localCts.IsCancellationRequested;
+
+            // process tree 강제 종료 (claude 자식 프로세스까지)
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+            try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+
+            if (!timedOut) throw;
+
+            var elapsed = totalSw.Elapsed;
+            totalSw.Stop();
+            logger?.Error($"Claude Code timed out after {TaskTimeoutSec}s (elapsed: {elapsed.TotalSeconds:F1}s) — process killed");
+            if (output == null)
+                AnsiConsole.MarkupLine(
+                    $"[red]Claude Code timed out after {TaskTimeoutSec}s — process tree killed.[/]");
+            else
+                output.WriteLine($"\n=== TIMEOUT after {TaskTimeoutSec}s — process killed ===");
+
+            return new ClaudeResult
+            {
+                Success = false,
+                Output = outputBuf.Length > 0 ? outputBuf.ToString() : streamedOutput.ToString(),
+                Stderr = "",
+                ErrorMessages = $"Claude Code timed out after {TaskTimeoutSec}s",
+                ExitCode = -1,
+                Usage = capturedUsage,
+                Duration = elapsed,
+                TimedOut = true,
+            };
+        }
 
         // Display throughput summary and final newline
         sink.WriteLine();
@@ -418,6 +477,15 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             logger?.Error($"Claude Code failed with exit code {result.ExitCode} (attempt {attempt})");
             if (output == null)
                 AnsiConsole.MarkupLine($"[red]Claude Code failed (exit code: {result.ExitCode})[/]");
+
+            // Timeout은 retry로 잘 풀리지 않고 cost만 증가 — 즉시 종료.
+            if (result.TimedOut)
+            {
+                logger?.Warn("Claude Code timed out — skipping further retry attempts");
+                if (output == null)
+                    AnsiConsole.MarkupLine("[yellow]Timeout 발생 — retry 건너뜀[/]");
+                break;
+            }
         }
 
         logger?.Error($"Claude Code failed after {maxRetries} attempts");

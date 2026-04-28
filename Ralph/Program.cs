@@ -37,6 +37,11 @@ double? envBudgetUsd = double.TryParse(envBudgetRaw,
     ? ebu
     : (double?)null;
 
+// Per-attempt timeout for one Claude invocation. CLI > env. null = 미적용.
+int? envTaskTimeoutSec = int.TryParse(Environment.GetEnvironmentVariable("RALPH_TASK_TIMEOUT_SEC"), out var ets) && ets > 0
+    ? ets
+    : (int?)null;
+
 // ─── Dependency checks ──────────────────────────────────────────────────────
 CheckCommand("claude", "Claude Code CLI", "https://claude.ai/code");
 CheckCommand("git", "Git", "https://git-scm.com");
@@ -75,6 +80,26 @@ if (budgetIdx >= 0 && budgetIdx + 1 < argList.Count)
     argList.RemoveRange(budgetIdx, 2);
 }
 double? budgetUsd = cliBudgetUsd ?? envBudgetUsd;
+
+// --task-timeout: "30m", "1h", "90s", 또는 plain integer(seconds).
+int? cliTaskTimeoutSec = null;
+var ttIdx = argList.IndexOf("--task-timeout");
+if (ttIdx >= 0 && ttIdx + 1 < argList.Count)
+{
+    var raw = argList[ttIdx + 1];
+    if (DurationParser.TryParseSeconds(raw, out var parsed) && parsed > 0)
+    {
+        cliTaskTimeoutSec = parsed;
+    }
+    else
+    {
+        AnsiConsole.MarkupLine(
+            $"[red]Error: --task-timeout 값을 파싱할 수 없습니다: '{Markup.Escape(raw)}' (예: 30m, 1h, 90s, 1800)[/]");
+        return 1;
+    }
+    argList.RemoveRange(ttIdx, 2);
+}
+int? taskTimeoutSec = cliTaskTimeoutSec ?? envTaskTimeoutSec;
 
 var modelArg = "opus";
 var modelIdx = argList.IndexOf("--model");
@@ -176,7 +201,7 @@ async Task<int> HandlePlan()
     }
 
     var schemaContent = LoadEmbeddedSchema();
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
     var git = new GitService();
     using var logger = new RalphLogger();
 
@@ -229,7 +254,7 @@ async Task<int> HandleRun()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info($"Tasks file: {tasksFile}");
@@ -359,7 +384,7 @@ async Task<int> HandleDryRun()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info("Exec mode: dry-run");
@@ -434,7 +459,7 @@ async Task<int> HandleSingleTask()
         }
     }
 
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
     var git = new GitService();
     using var logger = new RalphLogger();
 
@@ -448,7 +473,7 @@ async Task<int> HandleInteractive()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
+    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info("Exec mode: interactive");
@@ -844,6 +869,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  [green]--force[/]              Bypass dependency/validation checks (--task, --run)");
     AnsiConsole.MarkupLine("  [green]--strict-files[/]       Validate declared vs actual files at merge; abort on undeclared");
     AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
+    AnsiConsole.MarkupLine("  [green]--task-timeout[/] <dur> Per-Claude-call timeout (예: 30m, 1h, 90s, 1800). hang 방지");
     AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
     AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
@@ -860,6 +886,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  RALPH_PARALLEL              Set to 'false' to disable parallel execution");
     AnsiConsole.MarkupLine("  RALPH_STRICT_FILES          Set to 'true' to enable --strict-files");
     AnsiConsole.MarkupLine("  RALPH_BUDGET_USD            누적 비용 임계값(USD). CLI --budget-usd가 우선");
+    AnsiConsole.MarkupLine("  RALPH_TASK_TIMEOUT_SEC      Per-Claude-call timeout(seconds). CLI --task-timeout이 우선");
     AnsiConsole.MarkupLine("  RALPH_WEBHOOK_URL           Default webhook for session completion notifications");
     AnsiConsole.MarkupLine("  RALPH_LOG_RETENTION_DAYS    Auto-delete logs older than N days (default: 30)\n");
     return 0;
