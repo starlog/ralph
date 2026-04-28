@@ -399,9 +399,21 @@ async Task<int> HandleSingleTask()
         }
         else
         {
-            AnsiConsole.MarkupLine("\n계속하려면 [green]--force[/] 플래그를 추가하거나 의존성을 먼저 완료하세요.");
-            AnsiConsole.MarkupLine($"  예: [cyan]ralph --task {Markup.Escape(taskId)} --force[/]");
-            return 1;
+            var nonInteractive = Console.IsInputRedirected || Console.IsOutputRedirected;
+            if (nonInteractive)
+            {
+                AnsiConsole.MarkupLine("\n[red]비대화형 환경에서는 --force 없이 의존성을 우회할 수 없습니다.[/]");
+                AnsiConsole.MarkupLine($"  예: [cyan]ralph --task {Markup.Escape(taskId)} --force[/]");
+                return 1;
+            }
+
+            var proceed = AnsiConsole.Confirm("\n[yellow]그래도 진행하시겠습니까?[/]", defaultValue: false);
+            if (!proceed)
+            {
+                AnsiConsole.MarkupLine("[dim]사용자 취소.[/]");
+                return 1;
+            }
+            AnsiConsole.MarkupLine("[yellow]사용자 확인 — 의존성 무시하고 진행합니다.[/]\n");
         }
     }
 
