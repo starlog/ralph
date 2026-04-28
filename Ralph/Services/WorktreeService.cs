@@ -114,6 +114,66 @@ public class WorktreeService
     }
 
     /// <summary>
+    /// 머지 직전 worktree에서 baseRef와 다른 tasks.json을 강제로 base 버전으로 되돌립니다.
+    /// Claude가 worktree 안에서 tasks.json을 수정·커밋했을 때 발생하는 머지 충돌의
+    /// 가장 흔한 케이스를 사전 차단합니다. 1차 방어(GuardTasksFileAsync)와 직교하며,
+    /// 1차가 working-tree 변경을 막는 반면 본 메서드는 commit-tree 변경까지 본다.
+    /// </summary>
+    /// <returns>변경이 감지되었는지 여부 (true=정규화 시도, false=no-op 또는 사전 실패)</returns>
+    public async Task<bool> NormalizeTasksJsonAsync(
+        string taskId, string baseRef,
+        string tasksFileName = "tasks.json",
+        RalphLogger? logger = null,
+        CancellationToken ct = default)
+    {
+        var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
+
+        try
+        {
+            // worktree의 HEAD와 baseRef 사이에 tasksFileName 변경이 있는지 검사
+            var (diffExit, diffOut) = await _git.RunAsync(
+                ["diff", "--name-only", $"{baseRef}..HEAD", "--", tasksFileName],
+                worktreePath, ct);
+
+            if (diffExit != 0)
+            {
+                // diff 자체가 실패한 경우: 머지를 막지 않고 경고만 남긴다
+                logger?.Warn(
+                    $"[guard:pre-merge] NormalizeTasksJson({taskId}): git diff 실패. " +
+                    $"머지는 계속 진행됩니다. detail: {diffOut.Trim()}");
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(diffOut))
+                return false; // baseRef와 동일 → no-op
+
+            logger?.Warn(
+                $"[guard:pre-merge] worktree '{taskId}'의 {tasksFileName}이 {baseRef}와 다릅니다. " +
+                $"강제로 {baseRef} 버전으로 되돌립니다.");
+
+            var (checkoutExit, checkoutOut) = await _git.RunAsync(
+                ["checkout", baseRef, "--", tasksFileName],
+                worktreePath, ct);
+
+            if (checkoutExit != 0)
+            {
+                logger?.Warn(
+                    $"[guard:pre-merge] NormalizeTasksJson({taskId}): " +
+                    $"git checkout 실패. 머지는 계속 진행됩니다. detail: {checkoutOut.Trim()}");
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            logger?.Warn(
+                $"[guard:pre-merge] NormalizeTasksJson({taskId}): 예외 발생. " +
+                $"머지는 계속 진행됩니다. detail: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 충돌 파일 목록을 반환합니다.
     /// </summary>
     private async Task<List<string>> GetConflictFilesAsync(CancellationToken ct)
