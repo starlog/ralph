@@ -113,15 +113,16 @@ public class WorktreeService
         }
 
         // merge 실행
-        var mergeArgs = new List<string> { "merge", branchName, "--no-ff", "-m", $"merge: {taskId} 태스크 병합" };
+        var mergeArgs = new List<string> { "merge", "--no-ff", "-m", $"merge: {taskId} 태스크 병합" };
         if (mergeStrategy is "auto-theirs")
         {
-            mergeArgs.InsertRange(2, ["-X", "theirs"]);
+            mergeArgs.InsertRange(1, ["-X", "theirs"]);
         }
         else if (mergeStrategy is "auto-ours")
         {
-            mergeArgs.InsertRange(2, ["-X", "ours"]);
+            mergeArgs.InsertRange(1, ["-X", "ours"]);
         }
+        mergeArgs.Add(branchName);
 
         var (exitCode, output) = await _git.RunAsync(mergeArgs.ToArray(), ct: ct);
 
