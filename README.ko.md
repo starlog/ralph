@@ -175,6 +175,7 @@ ralph --run
 | `--shared-worktrees` | `git worktree add --shared`로 `.git` objects를 공유해 디스크/IO 절약 (미지원 시 자동 fallback) |
 | `--budget-usd <amt>` | 누적 비용이 amt(USD) 도달 시 새 태스크 dispatch 중단 |
 | `--task-timeout <기간>` | Claude 호출당 timeout (예: `30m`, `1h`, `90s`, `1800`) — hang 방지 |
+| `--llm-critique` | `--plan` 직후 LLM 기반 PRD/plan 비평 1회 추가 실행 (기본 off, 추가 LLM 호출 비용) |
 | `--model <name>` | 모델 선택 (`sonnet`, `opus`; 기본: `opus`) |
 | `--debug` | Claude stream 이벤트 출력 |
 

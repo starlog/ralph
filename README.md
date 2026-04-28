@@ -184,6 +184,7 @@ ralph --run
 | `--shared-worktrees` | Use `git worktree add --shared` to share `.git` objects across worktrees (saves disk/IO; falls back if unsupported) |
 | `--budget-usd <amt>` | Stop dispatching new tasks once cumulative cost reaches `<amt>` USD |
 | `--task-timeout <dur>` | Per-Claude-call timeout (e.g. `30m`, `1h`, `90s`, `1800`) — kills hung calls |
+| `--llm-critique` | After `--plan`, run an extra LLM-driven critique of the PRD + generated plan (off by default; adds one LLM call) |
 | `--model <name>` | Model: `sonnet` or `opus` (default: `opus`) |
 | `--debug` | Print Claude stream events for diagnostics |
 
