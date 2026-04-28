@@ -75,6 +75,11 @@
               "type": "string",
               "format": "uri",
               "description": "Webhook URL to POST a JSON payload when a session fails. Falls back to onComplete if omitted."
+            },
+            "format": {
+              "type": "string",
+              "enum": ["generic", "slack", "discord"],
+              "description": "Webhook payload format. Omit/null → auto-detect by hostname (hooks.slack.com → slack, discord(app)?.com → discord, else → generic). Slack uses {text, blocks}; Discord uses {content, embeds}; generic uses Ralph's structured JSON."
             }
           },
           "additionalProperties": false

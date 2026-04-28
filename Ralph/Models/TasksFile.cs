@@ -125,6 +125,13 @@ public class NotificationSettings
     [JsonPropertyName("onFailure")]
     public string? OnFailure { get; set; }
 
+    /// <summary>
+    /// "generic" | "slack" | "discord". null/누락이면 URL hostname으로 자동 감지
+    /// (hooks.slack.com → slack, discord(app)?.com → discord, 그 외 → generic).
+    /// </summary>
+    [JsonPropertyName("format")]
+    public string? Format { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
