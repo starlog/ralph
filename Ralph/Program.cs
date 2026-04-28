@@ -342,6 +342,11 @@ async Task<int> HandleRun()
             logger: logger,
             ct: cts.Token);
     }
+    catch (OperationCanceledException)
+    {
+        // Ctrl+C는 outer try가 잡아 130을 반환해야 하므로 propagate.
+        throw;
+    }
     catch (Exception ex)
     {
         logger.Warn($"Notification post-processing failed: {ex.Message}");

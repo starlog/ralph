@@ -474,6 +474,14 @@ public class ParallelExecutor
             _logger.TaskEnd(taskId, "completed-in-worktree");
             return true;
         }
+        catch (OperationCanceledException)
+        {
+            // Ctrl+C/취소를 task 실패로 변환하면 outer Task.WhenAll이 정상 완료처럼 보여
+            // 후속 merge/cleanup 단계가 cancel을 무시한 채 계속 진행됨. 반드시 propagate.
+            tracker.UpdateStatus(taskId, TaskProgressStatus.Failed);
+            _logger.Warn($"Task {taskId} canceled in worktree");
+            throw;
+        }
         catch (Exception ex)
         {
             tracker.UpdateStatus(taskId, TaskProgressStatus.Failed);

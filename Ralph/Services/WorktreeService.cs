@@ -216,6 +216,11 @@ public class WorktreeService
 
             return true;
         }
+        catch (OperationCanceledException)
+        {
+            // Ctrl+C 시 graceful shutdown — 머지로 진행하지 말고 호출자에게 propagate.
+            throw;
+        }
         catch (Exception ex)
         {
             logger?.Warn(
