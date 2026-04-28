@@ -144,11 +144,35 @@ public class ParallelSettings
     [JsonPropertyName("maxConcurrent")]
     public int MaxConcurrent { get; set; } = 5;
 
+    /// <summary>
+    /// 단일 전략(legacy). conflictStrategies가 없을 때만 사용.
+    /// 호환 위해 유지 — 기존 tasks.json은 그대로 동작.
+    /// </summary>
     [JsonPropertyName("conflictStrategy")]
     public string ConflictStrategy { get; set; } = "claude";
 
+    /// <summary>
+    /// 머지 충돌 시 순차 시도할 전략 체인. 첫 항목은 merge -X 결정, 나머지는 fallback.
+    /// 예: ["auto-theirs", "claude"] — auto-theirs로도 못 푸는 충돌(add/add, rename/delete)을 claude로.
+    /// 비어있거나 null이면 ConflictStrategy 단일 값을 1-element chain으로 사용.
+    /// </summary>
+    [JsonPropertyName("conflictStrategies")]
+    public List<string>? ConflictStrategies { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+
+    /// <summary>
+    /// 실제 사용할 전략 chain. ConflictStrategies 우선, 없으면 [ConflictStrategy] 1개.
+    /// </summary>
+    public IReadOnlyList<string> GetStrategyChain()
+    {
+        if (ConflictStrategies is { Count: > 0 })
+            return ConflictStrategies;
+        if (!string.IsNullOrWhiteSpace(ConflictStrategy))
+            return [ConflictStrategy];
+        return ["claude"];
+    }
 }
 
 public class OnTaskComplete

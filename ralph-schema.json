@@ -56,7 +56,16 @@
               "type": "string",
               "enum": ["claude", "abort", "auto-theirs", "auto-ours"],
               "default": "claude",
-              "description": "How to handle merge conflicts: 'claude' asks Claude to resolve, 'abort' stops and falls back to sequential, 'auto-theirs'/'auto-ours' uses git merge strategies"
+              "description": "Single conflict strategy (legacy). Used only when conflictStrategies is not set. 'claude' asks Claude to resolve, 'abort' falls back to sequential, 'auto-theirs'/'auto-ours' uses git merge strategies."
+            },
+            "conflictStrategies": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["claude", "abort", "auto-theirs", "auto-ours"]
+              },
+              "minItems": 1,
+              "description": "Ordered fallback chain for merge conflicts. The first entry decides the initial merge -X flag (for auto-*); the remaining entries are tried in order if the merge or previous step fails. Example: ['auto-theirs', 'claude'] auto-merges trivial conflicts and asks Claude only for the cases -X theirs cannot resolve (add/add, rename/delete). Takes precedence over conflictStrategy when present."
             }
           },
           "additionalProperties": false

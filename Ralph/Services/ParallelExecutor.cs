@@ -186,7 +186,8 @@ public class ParallelExecutor
     private async Task<int> RunParallelBatchAsync(
         List<string> taskIds, string baseBranch, CancellationToken ct)
     {
-        var conflictStrategy = _taskManager.ParallelConfig.ConflictStrategy;
+        var strategyChain = _taskManager.ParallelConfig.GetStrategyChain();
+        var primaryStrategy = strategyChain[0]; // 첫 항목으로 merge -X 결정
         var worktrees = new Dictionary<string, string>(); // taskId → worktreePath
         var tracker = new TaskProgressTracker();
 
@@ -331,7 +332,7 @@ public class ParallelExecutor
                 await _worktree.AdvanceWorktreeOntoBaseAsync(taskId, baseBranch, _logger, ct);
 
                 var mergeResult = await _worktree.MergeWorktreeAsync(
-                    taskId, baseBranch, conflictStrategy, _logger, ct);
+                    taskId, baseBranch, primaryStrategy, _logger, ct);
 
                 if (mergeResult.Success)
                 {
@@ -342,7 +343,7 @@ public class ParallelExecutor
                     AnsiConsole.MarkupLine($"  [red]✗[/] {Markup.Escape(taskId)} 병합 충돌!");
 
                     var resolved = await HandleMergeConflictAsync(
-                        taskId, baseBranch, mergeResult, conflictStrategy, ct);
+                        taskId, baseBranch, mergeResult, strategyChain, ct);
 
                     if (!resolved)
                     {
@@ -634,36 +635,83 @@ public class ParallelExecutor
     }
 
     /// <summary>
-    /// Merge 충돌을 처리합니다.
+    /// Merge 충돌을 strategy chain으로 순차 시도하여 처리합니다.
+    /// chain[0]은 이미 merge 명령에 -X로 적용되어 시도된 상태이며 충돌이 남았다는 뜻이므로
+    /// 첫 항목이 auto-*인 경우는 다음 fallback으로 즉시 진행합니다.
+    /// claude 항목이 실패하면 다음 fallback으로 계속 진행, abort 항목을 만나면 즉시 sequential 재실행.
     /// </summary>
     private async Task<bool> HandleMergeConflictAsync(
         string taskId, string baseBranch, MergeResult mergeResult,
-        string strategy, CancellationToken ct)
+        IReadOnlyList<string> chain, CancellationToken ct)
     {
-        switch (strategy)
+        var currentMergeResult = mergeResult;
+
+        for (var i = 0; i < chain.Count; i++)
         {
-            case "claude":
-                return await ResolveConflictsWithClaudeAsync(taskId, mergeResult, ct);
+            var strategy = chain[i];
+            var isFirst = i == 0;
 
-            case "abort":
-                await _worktree.AbortMergeAsync(ct);
-                AnsiConsole.MarkupLine($"[yellow]병합 중단. {Markup.Escape(taskId)}를 순차 모드로 재실행합니다...[/]");
-                _logger.Warn($"Merge aborted for {taskId}, falling back to sequential");
+            switch (strategy)
+            {
+                case "claude":
+                    AnsiConsole.MarkupLine(
+                        $"  [cyan]충돌 해결 시도: claude (전략 {i + 1}/{chain.Count})[/]");
+                    if (await ResolveConflictsWithClaudeAsync(taskId, currentMergeResult, ct))
+                        return true;
+                    AnsiConsole.MarkupLine("  [yellow]claude 해결 실패 — 다음 전략 시도[/]");
+                    _logger.Warn($"[merge:chain] {taskId} claude failed at step {i + 1}/{chain.Count}");
+                    break;
 
-                // 순차 모드로 재실행
-                return await RunSingleTaskAsync(taskId, ct) == 0;
+                case "abort":
+                    await _worktree.AbortMergeAsync(ct);
+                    AnsiConsole.MarkupLine(
+                        $"[yellow]전략 abort (전략 {i + 1}/{chain.Count}): " +
+                        $"{Markup.Escape(taskId)}를 순차 모드로 재실행합니다...[/]");
+                    _logger.Warn($"[merge:chain] {taskId} abort -> sequential rerun at step {i + 1}");
+                    return await RunSingleTaskAsync(taskId, ct) == 0;
 
-            case "auto-theirs":
-            case "auto-ours":
-                // 이미 merge 명령에 전략이 포함되어 있으므로 여기에 올 경우 실패
-                await _worktree.AbortMergeAsync(ct);
-                _logger.Error($"Merge with strategy {strategy} failed for {taskId}");
-                return false;
+                case "auto-theirs":
+                case "auto-ours":
+                    if (isFirst)
+                    {
+                        // chain[0]의 -X로 이미 시도되었지만 풀리지 않은 충돌(add/add, rename/delete 등).
+                        // 같은 -X를 재시도해도 결과 동일이므로 다음 fallback으로 진행.
+                        AnsiConsole.MarkupLine(
+                            $"  [yellow]{strategy}로 풀 수 없는 충돌 (add/add, rename/delete 등). 다음 전략 시도[/]");
+                        _logger.Warn($"[merge:chain] {taskId} {strategy} (-X) 첫 시도에서 미해결 충돌");
+                    }
+                    else
+                    {
+                        // fallback에 등장한 auto-*: abort 후 다른 -X로 재머지 시도
+                        await _worktree.AbortMergeAsync(ct);
+                        AnsiConsole.MarkupLine(
+                            $"  [cyan]전략 {strategy}로 재머지 시도 (전략 {i + 1}/{chain.Count})[/]");
+                        var retry = await _worktree.MergeWorktreeAsync(
+                            taskId, baseBranch, strategy, _logger, ct);
+                        if (retry.Success)
+                        {
+                            AnsiConsole.MarkupLine($"  [green]✓[/] {Markup.Escape(taskId)} {strategy} 재머지 성공");
+                            return true;
+                        }
+                        currentMergeResult = retry; // 후속 claude 시도가 최신 충돌 파일 보도록
+                        AnsiConsole.MarkupLine($"  [yellow]{strategy} 재머지 실패 — 다음 전략 시도[/]");
+                        _logger.Warn($"[merge:chain] {taskId} {strategy} retry failed at step {i + 1}");
+                    }
+                    break;
 
-            default:
-                await _worktree.AbortMergeAsync(ct);
-                return false;
+                default:
+                    AnsiConsole.MarkupLine(
+                        $"  [yellow]알 수 없는 전략 무시: {Markup.Escape(strategy)}[/]");
+                    _logger.Warn($"[merge:chain] {taskId} unknown strategy: {strategy}");
+                    break;
+            }
         }
+
+        AnsiConsole.MarkupLine(
+            $"  [red]✗[/] {Markup.Escape(taskId)} 모든 conflict 전략 실패 ({chain.Count}개 시도)");
+        _logger.Error($"[merge:chain] {taskId} all {chain.Count} strategies exhausted");
+        await _worktree.AbortMergeAsync(ct);
+        return false;
     }
 
     /// <summary>
