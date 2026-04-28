@@ -292,6 +292,9 @@ async Task<int> HandleRun()
     var totalAtStart = tm.GetPendingTasks().Count;
     int exitCode;
 
+    // P1-3: 단일 CostTracker 인스턴스를 ParallelExecutor / RunAutoLoop / Notification 모두 공유.
+    var costTracker = new CostTracker();
+
     if (useParallel)
     {
         logger.Info($"Exec mode: parallel (max concurrent: {concurrency})");
@@ -302,7 +305,7 @@ async Task<int> HandleRun()
         var worktree = new WorktreeService(git);
         var executor = new ParallelExecutor(
             tm, claude, git, worktree, logger, tasksFile, modelArg,
-            strictFiles: strictFiles, budgetUsd: budgetUsd);
+            strictFiles: strictFiles, budgetUsd: budgetUsd, cost: costTracker);
         exitCode = await executor.RunAsync(concurrency, cts.Token);
         if (exitCode == 0 && executor.BudgetReached) exitCode = 2;
     }
@@ -312,7 +315,7 @@ async Task<int> HandleRun()
         AnsiConsole.MarkupLine("[yellow]순차 실행 모드[/]");
 
         exitCode = await RunAutoLoop(tm, claude, git, logger,
-            dryRun: false, commitOnComplete: true, modelArg, budgetUsd, cts.Token);
+            dryRun: false, commitOnComplete: true, modelArg, budgetUsd, costTracker, cts.Token);
     }
 
     sessionStopwatch.Stop();
@@ -324,7 +327,7 @@ async Task<int> HandleRun()
         var stillPending = tm.GetPendingTasks().Count;
         var completedNow = Math.Max(0, totalAtStart - stillPending);
         var success = exitCode == 0;
-        var costSummary = await new CostTracker().GetTotalUsdAsync(cts.Token);
+        var costSummary = await costTracker.GetTotalUsdAsync(cts.Token);
 
         var notifier = new NotificationService();
         await notifier.NotifyAsync(
@@ -360,7 +363,8 @@ async Task<int> HandleDryRun()
     var backupJson = await File.ReadAllTextAsync(tasksFile, cts.Token);
 
     var result = await RunAutoLoop(tm, claude, git, logger,
-        dryRun: true, commitOnComplete: false, modelArg, budgetUsd: null, cts.Token);
+        dryRun: true, commitOnComplete: false, modelArg, budgetUsd: null,
+        cost: new CostTracker(), cts.Token);
 
     // Restore original
     await File.WriteAllTextAsync(tasksFile, backupJson, cts.Token);
@@ -430,7 +434,8 @@ async Task<int> HandleSingleTask()
     using var logger = new RalphLogger();
 
     return await RunTaskAuto(tm, claude, git, logger, taskId,
-        dryRun: false, commitOnComplete: tm.CommitOnComplete, modelArg, cts.Token,
+        dryRun: false, commitOnComplete: tm.CommitOnComplete, modelArg,
+        cost: new CostTracker(), cts.Token,
         force: true);
 }
 
@@ -443,7 +448,7 @@ async Task<int> HandleInteractive()
     using var logger = new RalphLogger();
     logger.Info("Exec mode: interactive");
 
-    return await RunInteractiveLoop(tm, claude, git, logger, modelArg, cts.Token);
+    return await RunInteractiveLoop(tm, claude, git, logger, modelArg, new CostTracker(), cts.Token);
 }
 
 async Task<int> HandleList()
@@ -514,7 +519,8 @@ async Task<int> HandleStatus()
         }
     }
 
-    // P3-1: 현재 실행 중인 worktree를 fs로 검출 (다른 터미널의 ralph --run 가시성 확보)
+    // P3-1/P2-4: 현재 worktree를 fs로 검출 (다른 터미널의 ralph --run 가시성 확보)
+    // 모두 idle인 경우 stale 잔존 가능성 → cleanup 안내를 강조한다.
     const string worktreeBase = ".ralph-worktrees";
     const string logDir = ".ralph-logs";
     if (Directory.Exists(worktreeBase))
@@ -533,7 +539,12 @@ async Task<int> HandleStatus()
 
         if (active.Count > 0)
         {
-            AnsiConsole.MarkupLine($"\n[yellow]현재 worktree: {active.Count}개[/]");
+            var liveCount = active.Count(w => w.LogMtime is { } m && m >= threshold);
+            var allIdle = liveCount == 0;
+            var header = allIdle
+                ? $"[dim]잔존 worktree {active.Count}개 (모두 idle — stale 가능성)[/]"
+                : $"[yellow]현재 worktree: {active.Count}개 (live {liveCount}개)[/]";
+            AnsiConsole.MarkupLine($"\n{header}");
             foreach (var w in active)
             {
                 var fresh = w.LogMtime is { } m && m >= threshold ? "[green]live[/]" : "[dim]idle[/]";
@@ -541,8 +552,12 @@ async Task<int> HandleStatus()
                 AnsiConsole.MarkupLine(
                     $"  {fresh} {Markup.Escape(w.TaskId)} [dim](last log: {lastLog})[/]");
             }
-            AnsiConsole.MarkupLine(
-                "[dim]idle 상태가 오래 지속되면 [cyan]ralph --worktree-cleanup[/]로 정리 가능[/]");
+            if (allIdle)
+                AnsiConsole.MarkupLine(
+                    "[yellow]→ 다른 ralph 프로세스가 동작 중이 아니라면 [cyan]ralph --worktree-cleanup[/]으로 정리하세요.[/]");
+            else
+                AnsiConsole.MarkupLine(
+                    "[dim]idle 상태의 worktree는 종료 후 cleanup이 누락된 잔존본일 수 있습니다.[/]");
         }
     }
 
@@ -923,7 +938,8 @@ void DisplayTask(TaskManager tm, string taskId)
 
 async Task<int> RunTaskAuto(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    string taskId, bool dryRun, bool commitOnComplete, string? model, CancellationToken ct,
+    string taskId, bool dryRun, bool commitOnComplete, string? model,
+    CostTracker cost, CancellationToken ct,
     bool force = false)
 {
     var task = tm.GetTask(taskId)!;
@@ -978,7 +994,7 @@ async Task<int> RunTaskAuto(
             }
             finally
             {
-                await new CostTracker().RecordAsync(taskId, model ?? "opus", result, CancellationToken.None);
+                await cost.RecordAsync(taskId, model ?? "opus", result, CancellationToken.None);
             }
             if (result == null || !result.Success)
             {
@@ -1031,13 +1047,13 @@ async Task<int> RunTaskAuto(
 
 async Task<int> RunAutoLoop(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    bool dryRun, bool commitOnComplete, string? model, double? budgetUsd, CancellationToken ct)
+    bool dryRun, bool commitOnComplete, string? model, double? budgetUsd,
+    CostTracker cost, CancellationToken ct)
 {
     ShowProgress(tm, logger);
 
     // P1-1: 단일 BudgetGate가 80%/100% 분기와 메시지를 통합 관리.
-    var costTracker = new CostTracker();
-    var budgetGate = new BudgetGate(budgetUsd, costTracker, logger);
+    var budgetGate = new BudgetGate(budgetUsd, cost, logger);
 
     while (true)
     {
@@ -1073,7 +1089,7 @@ async Task<int> RunAutoLoop(
         }
 
         var exitCode = await RunTaskAuto(tm, claude, git, logger, nextId,
-            dryRun, commitOnComplete, model, ct);
+            dryRun, commitOnComplete, model, cost, ct);
 
         if (exitCode == 2) continue; // blocked, try next
         if (exitCode != 0)
@@ -1089,7 +1105,7 @@ async Task<int> RunAutoLoop(
 
 async Task<int> RunInteractiveLoop(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    string? model, CancellationToken ct)
+    string? model, CostTracker cost, CancellationToken ct)
 {
     ShowProgress(tm, logger);
 
@@ -1163,7 +1179,7 @@ async Task<int> RunInteractiveLoop(
                         }
                         finally
                         {
-                            await new CostTracker().RecordAsync(nextId, model ?? "opus", result, CancellationToken.None);
+                            await cost.RecordAsync(nextId, model ?? "opus", result, CancellationToken.None);
                         }
 
                         if (result == null || !result.Success)

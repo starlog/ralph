@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using Ralph.Models;
 using Spectre.Console;
 
 namespace Ralph.Services;
@@ -19,7 +20,7 @@ public class CostEntry
     public bool UsageMissing { get; set; }
 }
 
-internal sealed class PricingEntry
+public sealed class PricingEntry
 {
     public double Input { get; set; }
     public double Output { get; set; }
@@ -27,7 +28,7 @@ internal sealed class PricingEntry
     public double CacheCreate { get; set; }
 }
 
-internal sealed class PricingFile
+public sealed class PricingFile
 {
     public Dictionary<string, PricingEntry> Models { get; set; }
         = new(StringComparer.OrdinalIgnoreCase);
@@ -41,32 +42,86 @@ internal sealed class PricingFile
 /// </summary>
 public class CostTracker
 {
-    private const string LogDir = ".ralph-logs";
+    private const string DefaultLogDir = ".ralph-logs";
     private const string LogFileName = "cost.jsonl";
+    private static string? _logDirOverride;
+    private static string LogDir => _logDirOverride ?? DefaultLogDir;
 
     // 단가는 EmbeddedResource pricing.json에서 1회 로드. ~/.ralph/pricing.json이 있으면 override.
     private static readonly Dictionary<string, PricingEntry> Pricing = LoadPricing();
 
+    // RalphJsonContext.Default를 chain해 trimming/AOT에서도 reflection fallback 없이 동작.
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = false,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        TypeInfoResolver = RalphJsonContext.Default,
     };
 
     // 프로세스 단일 누적 캐시. 첫 호출 시 cost.jsonl로부터 hydrate.
     private static readonly SemaphoreSlim HydrateLock = new(1, 1);
     private static readonly object IncrementLock = new();
+    // P-CONCURRENCY: 병렬 task가 동시에 RecordAsync를 호출할 때 jsonl 데이터 손실 방지.
+    // File.AppendAllTextAsync는 plat별로 동시 open이 sharing violation을 일으킬 수 있고,
+    // .NET의 FileStream(FileMode.Append, ..., FileShare.Read)은 다른 writer를 허용하지 않는다.
+    // 단일 writer로 직렬화하지 않으면 일부 RecordAsync 호출이 silent fail로 손실됨(검증됨).
+    private static readonly SemaphoreSlim WriteLock = new(1, 1);
     private static double _cumulativeUsd;
     private static bool _hydrated;
 
     public string LogFilePath => Path.Combine(LogDir, LogFileName);
 
     /// <summary>
+    /// 테스트 격리용 — 누적 캐시와 hydrate 플래그를 0으로 리셋합니다.
+    /// 프로덕션 코드에서는 호출하지 마세요. 다음 GetTotalUsdAsync/RecordAsync 시 다시 hydrate됩니다.
+    /// </summary>
+    internal static void ResetForTesting()
+    {
+        lock (IncrementLock)
+        {
+            _cumulativeUsd = 0.0;
+            _hydrated = false;
+        }
+    }
+
+    /// <summary>
+    /// 테스트 격리용 — cost.jsonl 위치를 임시 디렉터리로 override합니다. null 전달 시 기본값으로 복귀.
+    /// </summary>
+    internal static void SetLogDirForTesting(string? path) => _logDirOverride = path;
+
+    // P1-2: hung 디스크에서 finally 블록이 무한정 막히지 않도록 timeout 가드.
+    private static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// 호출 결과를 jsonl에 1줄 기록하고 누적 캐시를 갱신합니다. result가 null이거나
     /// usage 정보가 없으면 placeholder(estimatedUsd=0, usageMissing=true)로 기록 + 경고합니다.
+    /// 디스크 IO가 5초 안에 끝나지 않으면 기록을 포기하고 경고만 남깁니다(graceful shutdown 보장).
+    /// 동시 호출은 WriteLock으로 직렬화되어 jsonl 라인 손실/손상이 발생하지 않습니다.
     /// </summary>
     public async Task RecordAsync(
         string taskId, string model, ClaudeResult? result, CancellationToken ct = default)
+    {
+        // timeout만 적용 (호출자 ct는 보통 None — finally에서 호출). 예외는 아래 catch로.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(WriteTimeout);
+        try
+        {
+            await RecordInnerAsync(taskId, model, result, cts.Token);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            AnsiConsole.MarkupLine(
+                $"[yellow]⚠ cost 기록 timeout (taskId={Markup.Escape(taskId)}, >{WriteTimeout.TotalSeconds:F0}s). 누적 비용 추적이 부정확할 수 있습니다.[/]");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AnsiConsole.MarkupLine(
+                $"[yellow]⚠ cost 기록 실패 (taskId={Markup.Escape(taskId)}): {Markup.Escape(ex.Message)}[/]");
+        }
+    }
+
+    private async Task RecordInnerAsync(
+        string taskId, string model, ClaudeResult? result, CancellationToken ct)
     {
         await EnsureHydratedAsync(ct);
         Directory.CreateDirectory(LogDir);
@@ -84,7 +139,9 @@ public class CostTracker
                 UsageMissing = true,
             };
             var ph = JsonSerializer.Serialize(placeholder, JsonOpts) + "\n";
-            await File.AppendAllTextAsync(LogFilePath, ph, ct);
+            await WriteLock.WaitAsync(ct);
+            try { await File.AppendAllTextAsync(LogFilePath, ph, ct); }
+            finally { WriteLock.Release(); }
             AnsiConsole.MarkupLine(
                 $"[yellow]⚠ usage 누락 (taskId={Markup.Escape(taskId)}, " +
                 $"exit={result?.ExitCode.ToString() ?? "?"}). 비용 추정 0 처리.[/]");
@@ -107,9 +164,19 @@ public class CostTracker
         };
 
         var line = JsonSerializer.Serialize(entry, JsonOpts) + "\n";
-        await File.AppendAllTextAsync(LogFilePath, line, ct);
 
-        lock (IncrementLock) _cumulativeUsd += estimated;
+        // file write와 누적 캐시 갱신을 한 critical section으로 묶어 직렬화.
+        // 동시 file open(FileMode.Append)에서 발생하는 sharing violation/데이터 손실 방지.
+        await WriteLock.WaitAsync(ct);
+        try
+        {
+            await File.AppendAllTextAsync(LogFilePath, line, ct);
+            lock (IncrementLock) _cumulativeUsd += estimated;
+        }
+        finally
+        {
+            WriteLock.Release();
+        }
     }
 
     public static double EstimateUsd(string model, TokenUsage u)
@@ -135,7 +202,11 @@ public class CostTracker
 
     private static Dictionary<string, PricingEntry> LoadPricing()
     {
-        var caseInsensitive = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var caseInsensitive = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            TypeInfoResolver = RalphJsonContext.Default,
+        };
 
         // 1) 사용자 override (~/.ralph/pricing.json)
         try

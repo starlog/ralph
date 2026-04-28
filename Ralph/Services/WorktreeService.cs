@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Ralph.Models;
 using Spectre.Console;
 
 namespace Ralph.Services;
@@ -9,6 +10,17 @@ public class MergeResult
     public List<string>? ConflictFiles { get; set; }
     public string? ErrorMessage { get; set; }
 }
+
+/// <summary>
+/// .ralph-logs/validation.jsonl에 기록되는 한 줄 형식. RalphJsonContext source-gen 대상.
+/// </summary>
+public sealed record ValidationLogEntry(
+    string TaskId,
+    string Timestamp,
+    IReadOnlyList<string> Declared,
+    IReadOnlyList<string> Actual,
+    IReadOnlyList<string> Undeclared,
+    IReadOnlyList<string> NotChanged);
 
 /// <summary>
 /// 머지 직전 declared(modifiedFiles ∪ outputFiles) vs actual(git diff base..HEAD) 비교 결과.
@@ -29,10 +41,12 @@ public sealed record FileValidationResult(
 
 public class WorktreeService
 {
+    // RalphJsonContext.Default를 chain해 trimming/AOT에서도 reflection fallback 없이 동작.
     private static readonly JsonSerializerOptions ValidationJsonOpts = new()
     {
         WriteIndented = false,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        TypeInfoResolver = RalphJsonContext.Default,
     };
 
     private readonly GitService _git;
@@ -315,13 +329,7 @@ public class WorktreeService
         }
     }
 
-    private sealed record ValidationLogEntry(
-        string TaskId,
-        string Timestamp,
-        IReadOnlyList<string> Declared,
-        IReadOnlyList<string> Actual,
-        IReadOnlyList<string> Undeclared,
-        IReadOnlyList<string> NotChanged);
+    // ValidationLogEntry는 namespace 레벨로 분리됨 (RalphJsonContext source-gen 등록용).
 
     /// <summary>
     /// 충돌 파일 목록을 반환합니다.

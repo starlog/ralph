@@ -25,8 +25,8 @@
           "properties": {
             "commitChanges": {
               "type": "boolean",
-              "default": false,
-              "description": "If true, automatically run git add -A && git commit after each task completes"
+              "default": true,
+              "description": "If true, automatically run git add -A && git commit after each task completes. Defaults to true when workflow is omitted."
             },
             "commitMessageTemplate": {
               "type": "string",
@@ -60,6 +60,30 @@
             }
           },
           "additionalProperties": false
+        },
+        "notifications": {
+          "type": "object",
+          "description": "Webhook notifications dispatched once per session at completion. URLs may also come from RALPH_WEBHOOK_URL.",
+          "properties": {
+            "onComplete": {
+              "type": "string",
+              "format": "uri",
+              "description": "Webhook URL to POST a JSON payload when a session completes successfully",
+              "examples": ["https://hooks.slack.com/services/XXX"]
+            },
+            "onFailure": {
+              "type": "string",
+              "format": "uri",
+              "description": "Webhook URL to POST a JSON payload when a session fails. Falls back to onComplete if omitted."
+            }
+          },
+          "additionalProperties": false
+        },
+        "logRetentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30,
+          "description": "Auto-delete logs in .ralph-logs older than N days at the start of each --run session. Overridden by RALPH_LOG_RETENTION_DAYS env."
         }
       },
       "additionalProperties": false

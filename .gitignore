@@ -1,6 +1,8 @@
 # .NET build output
 Ralph/bin/
 Ralph/obj/
+Ralph.Tests/bin/
+Ralph.Tests/obj/
 
 # Tasks and logs (runtime artifacts)
 tasks.json

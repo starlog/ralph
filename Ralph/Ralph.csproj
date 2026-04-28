@@ -22,4 +22,8 @@
     <EmbeddedResource Include="..\pricing.json" LogicalName="pricing.json" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ralph.Tests" />
+  </ItemGroup>
+
 </Project>
