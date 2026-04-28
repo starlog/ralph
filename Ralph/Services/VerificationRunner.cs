@@ -50,6 +50,13 @@ public class VerificationRunner
         var winner = await Task.WhenAny(exitTask, Task.Delay(TimeSpan.FromSeconds(timeoutSec), ct));
         if (winner != exitTask)
         {
+            // 외부 ct fired면 사용자 cancel — OCE로 propagate. 그 외에만 timeout으로 판정.
+            if (ct.IsCancellationRequested)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+                try { await process.WaitForExitAsync(CancellationToken.None); } catch { /* swallow */ }
+                ct.ThrowIfCancellationRequested();
+            }
             timedOut = true;
             try { process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
             try { await exitTask; } catch { /* swallow */ }
