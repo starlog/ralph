@@ -30,6 +30,12 @@ var retryDelay = int.TryParse(Environment.GetEnvironmentVariable("RETRY_DELAY"),
 var envMaxParallel = int.TryParse(Environment.GetEnvironmentVariable("RALPH_MAX_PARALLEL"), out var mp) ? mp : 0;
 var envParallelDisabled = Environment.GetEnvironmentVariable("RALPH_PARALLEL")?.ToLower() == "false";
 var envStrictFiles = Environment.GetEnvironmentVariable("RALPH_STRICT_FILES")?.ToLower() == "true";
+var envBudgetRaw = Environment.GetEnvironmentVariable("RALPH_BUDGET_USD");
+double? envBudgetUsd = double.TryParse(envBudgetRaw,
+        System.Globalization.NumberStyles.Float,
+        System.Globalization.CultureInfo.InvariantCulture, out var ebu)
+    ? ebu
+    : (double?)null;
 
 // ─── Dependency checks ──────────────────────────────────────────────────────
 CheckCommand("claude", "Claude Code CLI", "https://claude.ai/code");
@@ -48,6 +54,27 @@ if (maxParallelIdx >= 0 && maxParallelIdx + 1 < argList.Count)
     int.TryParse(argList[maxParallelIdx + 1], out maxParallelArg);
     argList.RemoveRange(maxParallelIdx, 2);
 }
+
+double? cliBudgetUsd = null;
+var budgetIdx = argList.IndexOf("--budget-usd");
+if (budgetIdx >= 0 && budgetIdx + 1 < argList.Count)
+{
+    var raw = argList[budgetIdx + 1];
+    if (double.TryParse(raw,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var bv))
+    {
+        cliBudgetUsd = bv;
+    }
+    else
+    {
+        AnsiConsole.MarkupLine(
+            $"[red]Error: --budget-usd 값을 파싱할 수 없습니다: '{Markup.Escape(raw)}'[/]");
+        return 1;
+    }
+    argList.RemoveRange(budgetIdx, 2);
+}
+double? budgetUsd = cliBudgetUsd ?? envBudgetUsd;
 
 var modelArg = "opus";
 var modelIdx = argList.IndexOf("--model");
@@ -274,15 +301,18 @@ async Task<int> HandleRun()
 
         var worktree = new WorktreeService(git);
         var executor = new ParallelExecutor(
-            tm, claude, git, worktree, logger, tasksFile, modelArg, strictFiles: strictFiles);
+            tm, claude, git, worktree, logger, tasksFile, modelArg,
+            strictFiles: strictFiles, budgetUsd: budgetUsd);
         exitCode = await executor.RunAsync(concurrency, cts.Token);
+        if (exitCode == 0 && executor.BudgetReached) exitCode = 2;
     }
     else
     {
         logger.Info("Exec mode: sequential");
         AnsiConsole.MarkupLine("[yellow]순차 실행 모드[/]");
 
-        exitCode = await RunAutoLoop(tm, claude, git, logger, dryRun: false, commitOnComplete: true, modelArg, cts.Token);
+        exitCode = await RunAutoLoop(tm, claude, git, logger,
+            dryRun: false, commitOnComplete: true, modelArg, budgetUsd, cts.Token);
     }
 
     sessionStopwatch.Stop();
@@ -294,7 +324,7 @@ async Task<int> HandleRun()
         var stillPending = tm.GetPendingTasks().Count;
         var completedNow = Math.Max(0, totalAtStart - stillPending);
         var success = exitCode == 0;
-        var costSummary = await ReadCostSummaryAsync();
+        var costSummary = await new CostTracker().GetTotalUsdAsync(cts.Token);
 
         var notifier = new NotificationService();
         await notifier.NotifyAsync(
@@ -317,32 +347,6 @@ async Task<int> HandleRun()
     return exitCode;
 }
 
-async Task<double> ReadCostSummaryAsync()
-{
-    var path = Path.Combine(".ralph-logs", "cost.jsonl");
-    if (!File.Exists(path)) return 0.0;
-    var total = 0.0;
-    try
-    {
-        await foreach (var line in File.ReadLinesAsync(path, cts.Token))
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            try
-            {
-                using var doc = System.Text.Json.JsonDocument.Parse(line);
-                if (doc.RootElement.TryGetProperty("estimatedUsd", out var usd)
-                    && usd.ValueKind == System.Text.Json.JsonValueKind.Number)
-                {
-                    total += usd.GetDouble();
-                }
-            }
-            catch (System.Text.Json.JsonException) { }
-        }
-    }
-    catch { /* best effort */ }
-    return total;
-}
-
 async Task<int> HandleDryRun()
 {
     RequireFile(tasksFile);
@@ -355,7 +359,8 @@ async Task<int> HandleDryRun()
     // Backup for restore after dry-run
     var backupJson = await File.ReadAllTextAsync(tasksFile, cts.Token);
 
-    var result = await RunAutoLoop(tm, claude, git, logger, dryRun: true, commitOnComplete: false, modelArg, cts.Token);
+    var result = await RunAutoLoop(tm, claude, git, logger,
+        dryRun: true, commitOnComplete: false, modelArg, budgetUsd: null, cts.Token);
 
     // Restore original
     await File.WriteAllTextAsync(tasksFile, backupJson, cts.Token);
@@ -786,6 +791,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
     AnsiConsole.MarkupLine("  [green]--force[/]              Bypass dependency/validation checks (--task, --run)");
     AnsiConsole.MarkupLine("  [green]--strict-files[/]       Validate declared vs actual files at merge; abort on undeclared");
+    AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
     AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
     AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
@@ -801,6 +807,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  RALPH_MAX_PARALLEL          Max concurrent worktrees (default: 3)");
     AnsiConsole.MarkupLine("  RALPH_PARALLEL              Set to 'false' to disable parallel execution");
     AnsiConsole.MarkupLine("  RALPH_STRICT_FILES          Set to 'true' to enable --strict-files");
+    AnsiConsole.MarkupLine("  RALPH_BUDGET_USD            누적 비용 임계값(USD). CLI --budget-usd가 우선");
     AnsiConsole.MarkupLine("  RALPH_WEBHOOK_URL           Default webhook for session completion notifications");
     AnsiConsole.MarkupLine("  RALPH_LOG_RETENTION_DAYS    Auto-delete logs older than N days (default: 30)\n");
     return 0;
@@ -984,13 +991,40 @@ async Task<int> RunTaskAuto(
 
 async Task<int> RunAutoLoop(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    bool dryRun, bool commitOnComplete, string? model, CancellationToken ct)
+    bool dryRun, bool commitOnComplete, string? model, double? budgetUsd, CancellationToken ct)
 {
     ShowProgress(tm, logger);
+
+    var costTracker = new CostTracker();
+    var budgetWarned = false;
 
     while (true)
     {
         ct.ThrowIfCancellationRequested();
+
+        // F5: budget 게이트 — 새 task 시작 직전 검사. 차단 시 종료 코드 2 반환.
+        // 미설정/0/음수는 미설정과 동일 처리(기존 동작 보존).
+        if (budgetUsd is { } b && b > 0.0)
+        {
+            var total = await costTracker.GetTotalUsdAsync(ct);
+            if (!budgetWarned && total >= b * 0.8)
+            {
+                budgetWarned = true;
+                AnsiConsole.MarkupLine(
+                    $"[yellow]⚠ 예산 80% 도달[/] (${total:F2} / ${b:F2}, " +
+                    $"{(total / b * 100):F0}%)");
+                logger.Warn($"[budget] 80% threshold hit: ${total:F4} / ${b:F4}");
+            }
+            if (total >= b)
+            {
+                AnsiConsole.MarkupLine(
+                    $"[red]✗ budget reached[/] (${total:F2} / ${b:F2}). 새 태스크 시작을 중단합니다.");
+                AnsiConsole.MarkupLine(
+                    "[dim]다음 실행: 예산을 늘리거나 예산 없이 재개 가능합니다.[/]");
+                logger.Error($"[budget] reached: ${total:F4} / ${b:F4}");
+                return 2;
+            }
+        }
 
         var nextId = tm.GetNextReadyTask();
         if (nextId == null)

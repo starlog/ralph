@@ -89,6 +89,28 @@ public class CostTracker
     }
 
     /// <summary>
+    /// cost.jsonl의 모든 entry usd를 합산해 누적 비용(USD)을 반환합니다.
+    /// 파일이 없거나 비었으면 0.0. 손상된 라인은 skip.
+    /// </summary>
+    public async Task<double> GetTotalUsdAsync(CancellationToken ct = default)
+    {
+        if (!File.Exists(LogFilePath)) return 0.0;
+
+        var total = 0.0;
+        await foreach (var line in File.ReadLinesAsync(LogFilePath, ct))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
+            {
+                var entry = JsonSerializer.Deserialize<CostEntry>(line, JsonOpts);
+                if (entry != null) total += entry.EstimatedUsd;
+            }
+            catch (JsonException) { /* skip malformed line */ }
+        }
+        return total;
+    }
+
+    /// <summary>
     /// 누적 cost.jsonl을 읽어 콘솔에 요약 출력합니다.
     /// </summary>
     public async Task PrintSummaryAsync(CancellationToken ct = default)

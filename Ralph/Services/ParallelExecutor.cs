@@ -13,13 +13,22 @@ public class ParallelExecutor
     private readonly string _tasksFile;
     private readonly string? _model;
     private readonly bool _strictFiles;
+    private readonly double? _budgetUsd;
     private readonly CostTracker _cost;
     private readonly SemaphoreSlim _taskFileLock = new(1, 1);
+    private bool _budgetWarningEmitted;
+    private bool _budgetReached;
+
+    /// <summary>
+    /// budget(USD) 임계값 도달로 새 dispatch를 차단했는지 여부.
+    /// 호출자가 확인해 종료 코드 2를 결정할 수 있다.
+    /// </summary>
+    public bool BudgetReached => _budgetReached;
 
     public ParallelExecutor(
         TaskManager taskManager, ClaudeService claude, GitService git,
         WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
-        bool strictFiles = false)
+        bool strictFiles = false, double? budgetUsd = null)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -29,6 +38,7 @@ public class ParallelExecutor
         _tasksFile = tasksFile;
         _model = model;
         _strictFiles = strictFiles;
+        _budgetUsd = budgetUsd;
         _cost = new CostTracker();
     }
 
@@ -60,6 +70,9 @@ public class ParallelExecutor
         while (true)
         {
             ct.ThrowIfCancellationRequested();
+
+            // F5: budget 게이트 — 새 dispatch 직전에 검사. 차단 시 break (호출자가 종료 코드 2로 변환).
+            if (!await CheckBudgetAsync(ct)) break;
 
             var readyTasks = _taskManager.GetAllReadyTasks();
 
@@ -121,6 +134,40 @@ public class ParallelExecutor
         // 최종 정리
         await _worktree.CleanupAllAsync(_logger, ct);
         return 0;
+    }
+
+    /// <summary>
+    /// 새 task/batch dispatch 직전 호출. budget 미설정/0/음수면 통과.
+    /// 80% 도달 시 1회 경고. 100% 도달 시 _budgetReached=true 설정 후 false 반환 — 호출자가 break.
+    /// </summary>
+    private async Task<bool> CheckBudgetAsync(CancellationToken ct)
+    {
+        if (_budgetUsd is not { } budget || budget <= 0.0) return true;
+
+        var total = await _cost.GetTotalUsdAsync(ct);
+
+        if (!_budgetWarningEmitted && total >= budget * 0.8)
+        {
+            _budgetWarningEmitted = true;
+            var pct = total / budget * 100.0;
+            AnsiConsole.MarkupLine(
+                $"[yellow]⚠ 예산 80% 도달[/] (${total:F2} / ${budget:F2}, {pct:F0}%)");
+            _logger.Warn($"[budget] 80% threshold hit: ${total:F4} / ${budget:F4}");
+        }
+
+        if (total >= budget)
+        {
+            _budgetReached = true;
+            AnsiConsole.MarkupLine(
+                $"[red]✗ budget reached[/] (${total:F2} / ${budget:F2}). " +
+                "새 태스크 시작을 중단합니다. 진행 중 태스크는 완료까지 대기합니다.");
+            AnsiConsole.MarkupLine(
+                "[dim]다음 실행: 예산을 늘리거나(--budget-usd <larger>) 예산 없이(`ralph --run`) 재개 가능합니다.[/]");
+            _logger.Error($"[budget] reached: ${total:F4} / ${budget:F4}");
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>
