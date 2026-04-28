@@ -173,6 +173,7 @@ try
         "--cost" => HandleCost(),
         "--show-prompt" => HandleShowPrompt(),
         "--validate" => HandleValidate(),
+        "--critique" => HandleCritique(),
         "--worktree-cleanup" => HandleWorktreeCleanup(),
         "--help" or "-h" => Task.FromResult(ShowHelp()),
         "" => Task.FromResult(ShowHelp()),
@@ -225,43 +226,99 @@ async Task<int> HandlePlan()
 
     var planModel = modelArg;
 
+    // 기존 tasks.json이 있으면 거기서 workflow.categories를 읽어 plan generator에 전달.
+    // 없으면 PlanGenerator.DefaultCategories(4-stage)로 진행. backup된 파일은 LoadAsync 전에 이미 만들어졌음.
+    IReadOnlyList<string>? configuredCategories = null;
+    if (File.Exists(tasksFile))
+    {
+        try
+        {
+            var existingTm = await TaskManager.LoadAsync(tasksFile);
+            var cats = existingTm.Data.Workflow?.Categories;
+            if (cats is { Count: > 0 })
+                configuredCategories = cats.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+        }
+        catch { /* best-effort: 깨진 기존 파일은 무시하고 default로 */ }
+    }
+
     var generator = new PlanGenerator();
     var sw = System.Diagnostics.Stopwatch.StartNew();
-    var result = await generator.GenerateAsync(prdFile, schemaContent, tasksFile, claude, planModel, logger, cts.Token);
+    var result = await generator.GenerateAsync(
+        prdFile, schemaContent, tasksFile, claude, planModel, logger,
+        categories: configuredCategories, ct: cts.Token);
     sw.Stop();
 
     if (result == 0)
+    {
         AnsiConsole.MarkupLine($"\n[green]플랜 생성 완료[/] [dim]({sw.Elapsed.Minutes}분 {sw.Elapsed.Seconds}초)[/]");
+
+        // PRD critique: 생성된 plan에 대한 정성 권고 (병렬화 기회, 누락된 verification 등)
+        try
+        {
+            var critiqueTm = await TaskManager.LoadAsync(tasksFile);
+            var suggestions = PrdCritic.Analyze(critiqueTm);
+            PrdCritic.PrintReport(suggestions);
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"PRD critique skipped: {ex.Message}");
+        }
+    }
 
     return result;
 }
 
-Task<int> HandlePlanPrompt()
+async Task<int> HandleCritique()
+{
+    RequireFile(tasksFile);
+    var tm = await TaskManager.LoadAsync(tasksFile);
+    AnsiConsole.Write(new Rule($"[green]PRD Critique - {Markup.Escape(tasksFile)}[/]").RuleStyle("blue"));
+    AnsiConsole.MarkupLine($"태스크 수: [cyan]{tm.Data.Tasks.Count}[/]");
+    var suggestions = PrdCritic.Analyze(tm);
+    PrdCritic.PrintReport(suggestions);
+    return suggestions.Any(s => s.Severity == "warn") ? 1 : 0;
+}
+
+async Task<int> HandlePlanPrompt()
 {
     if (argList.Count < 2)
     {
         AnsiConsole.MarkupLine("[red]Error: PRD file required. Usage: ralph --plan-prompt <prd-file>[/]");
-        return Task.FromResult(1);
+        return 1;
     }
 
     var prdFile = argList[1];
     if (!File.Exists(prdFile))
     {
         AnsiConsole.MarkupLine($"[red]Error: File '{Markup.Escape(prdFile)}' not found.[/]");
-        return Task.FromResult(1);
+        return 1;
     }
 
     var prdFullPath = Path.GetFullPath(prdFile);
     var tasksFullPath = Path.GetFullPath(tasksFile);
     var schemaContent = LoadEmbeddedSchema();
-    var prompt = PlanGenerator.BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath);
+
+    IReadOnlyList<string>? configuredCategories = null;
+    if (File.Exists(tasksFile))
+    {
+        try
+        {
+            var existingTm = await TaskManager.LoadAsync(tasksFile);
+            var cats = existingTm.Data.Workflow?.Categories;
+            if (cats is { Count: > 0 })
+                configuredCategories = cats.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+        }
+        catch { }
+    }
+
+    var prompt = PlanGenerator.BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath, configuredCategories);
 
     AnsiConsole.Write(new Rule("[green]RALPH - Plan Prompt Preview[/]").RuleStyle("blue"));
     AnsiConsole.MarkupLine($"[cyan]PRD File:[/] {Markup.Escape(prdFile)}");
     AnsiConsole.Write(new Rule().RuleStyle("blue"));
     AnsiConsole.WriteLine(prompt);
 
-    return Task.FromResult(0);
+    return 0;
 }
 
 async Task<int> HandleRun()
@@ -873,6 +930,7 @@ int ShowHelp()
     table.AddRow("[green]--prompts[/], -p", "Show all task prompts");
     table.AddRow("[green]--show-prompt[/] <id>", "Show the full prompt sent to Claude for a task");
     table.AddRow("[green]--validate[/]", "Validate tasks.json (cycles, deps, file overlaps, etc.)");
+    table.AddRow("[green]--critique[/]", "Analyze tasks.json for parallelism / verification gaps");
     table.AddRow("[green]--status[/], -s", "Show progress status (with parallel batch info)");
     table.AddRow("[green]--reset[/], -r", "Reset all tasks to pending");
     table.AddRow("[green]--logs[/] [[task-id]]", "Show logs (task log or session log list)");
@@ -1037,7 +1095,8 @@ async Task<int> RunTaskAuto(
 
             var ok = await RunClaudeWithVerification(
                 claude, cost, new VerificationRunner(), task, basePrompt,
-                Directory.GetCurrentDirectory(), model, logger, ct);
+                Directory.GetCurrentDirectory(), model, logger, ct,
+                maxVerifyRetries: tm.Data.Workflow?.VerifyRetries ?? 1);
             if (!ok)
             {
                 logger.TaskEnd(taskId, "failed");
@@ -1213,7 +1272,8 @@ async Task<int> RunInteractiveLoop(
                         AnsiConsole.MarkupLine("[cyan]Running Claude Code...[/]\n");
                         var ok = await RunClaudeWithVerification(
                             claude, cost, new VerificationRunner(), task, basePrompt,
-                            Directory.GetCurrentDirectory(), model, logger, ct);
+                            Directory.GetCurrentDirectory(), model, logger, ct,
+                            maxVerifyRetries: tm.Data.Workflow?.VerifyRetries ?? 1);
                         if (!ok)
                         {
                             AnsiConsole.MarkupLine("\n[red]Claude Code 실행 또는 verification 실패[/]");
@@ -1312,9 +1372,10 @@ double? EffectiveBudgetUsd(TaskManager tm) =>
 async Task<bool> RunClaudeWithVerification(
     ClaudeService claude, CostTracker cost, VerificationRunner verifier,
     TaskItem task, string basePrompt, string workingDirectory,
-    string? model, RalphLogger logger, CancellationToken ct)
+    string? model, RalphLogger logger, CancellationToken ct,
+    int maxVerifyRetries = 1)
 {
-    const int maxVerifyRetries = 1;
+    if (maxVerifyRetries < 0) maxVerifyRetries = 0;
     string? failureCtx = null;
 
     for (var attempt = 0; attempt <= maxVerifyRetries; attempt++)
@@ -1362,7 +1423,7 @@ async Task<bool> RunClaudeWithVerification(
             return false;
         }
 
-        AnsiConsole.MarkupLine("[yellow]⚠ 검증 실패, Claude에게 수정 요청 (1회 retry)[/]");
+        AnsiConsole.MarkupLine($"[yellow]⚠ 검증 실패, Claude에게 수정 요청 ({attempt + 1}/{maxVerifyRetries} retry)[/]");
         logger.Warn($"[verification] {task.Id} failed (attempt {attempt + 1}); retrying with failure context");
         failureCtx = VerificationRunner.BuildFailureContext(spec.Command, verify);
     }

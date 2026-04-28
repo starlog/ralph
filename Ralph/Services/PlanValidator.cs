@@ -105,25 +105,31 @@ public static class PlanValidator
             }
         }
 
-        // 6. category-prompt 정합성 (간이 휴리스틱)
-        foreach (var task in tasks)
+        // 6. category-prompt 정합성 (간이 휴리스틱). workflow.categories를 customize한 프로젝트에서는
+        //    아래의 plan/test/commit 키워드 가정이 맞지 않을 수 있어 default 4-stage 사용 시에만 적용.
+        var configuredCats = tm.Data.Workflow?.Categories;
+        var usingDefaultCategories = configuredCats is null || configuredCats.Count == 0;
+        if (usingDefaultCategories)
         {
-            if (string.IsNullOrWhiteSpace(task.Prompt) || string.IsNullOrWhiteSpace(task.Category)) continue;
-            var lower = task.Prompt.ToLowerInvariant();
-            switch (task.Category)
+            foreach (var task in tasks)
             {
-                case "test" or "testing":
-                    if (!lower.Contains("test") && !lower.Contains("테스트") && !lower.Contains("검증"))
-                        report.Warnings.Add($"'{task.Id}' (category=testing)의 prompt에 test/테스트/검증 키워드가 없습니다");
-                    break;
-                case "commit":
-                    if (!lower.Contains("commit") && !lower.Contains("커밋") && !lower.Contains("git "))
-                        report.Warnings.Add($"'{task.Id}' (category=commit)의 prompt에 commit/커밋/git 키워드가 없습니다");
-                    break;
-                case "plan":
-                    if (!lower.Contains("plan") && !lower.Contains("계획") && !lower.Contains("설계") && !lower.Contains("분석"))
-                        report.Warnings.Add($"'{task.Id}' (category=plan)의 prompt에 plan/계획/설계/분석 키워드가 없습니다");
-                    break;
+                if (string.IsNullOrWhiteSpace(task.Prompt) || string.IsNullOrWhiteSpace(task.Category)) continue;
+                var lower = task.Prompt.ToLowerInvariant();
+                switch (task.Category)
+                {
+                    case "test" or "testing":
+                        if (!lower.Contains("test") && !lower.Contains("테스트") && !lower.Contains("검증"))
+                            report.Warnings.Add($"'{task.Id}' (category=testing)의 prompt에 test/테스트/검증 키워드가 없습니다");
+                        break;
+                    case "commit":
+                        if (!lower.Contains("commit") && !lower.Contains("커밋") && !lower.Contains("git "))
+                            report.Warnings.Add($"'{task.Id}' (category=commit)의 prompt에 commit/커밋/git 키워드가 없습니다");
+                        break;
+                    case "plan":
+                        if (!lower.Contains("plan") && !lower.Contains("계획") && !lower.Contains("설계") && !lower.Contains("분석"))
+                            report.Warnings.Add($"'{task.Id}' (category=plan)의 prompt에 plan/계획/설계/분석 키워드가 없습니다");
+                        break;
+                }
             }
         }
 

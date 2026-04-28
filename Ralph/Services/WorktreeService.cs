@@ -490,4 +490,52 @@ public class WorktreeService
 
         return stale;
     }
+
+    /// <summary>
+    /// mid-task 상태(uncommitted 변경 또는 base 위로 진행된 커밋)인 worktree만 추려서 보고.
+    /// 반환되는 각 항목은 사용자에게 "이 worktree에 작업이 진행 중일 수 있습니다"를 알리는 용도.
+    /// </summary>
+    public async Task<List<MidTaskWorktreeInfo>> DetectMidTaskWorktreesAsync(
+        string baseBranch, CancellationToken ct = default)
+    {
+        var result = new List<MidTaskWorktreeInfo>();
+        if (!Directory.Exists(_worktreeBase)) return result;
+
+        foreach (var dir in Directory.GetDirectories(_worktreeBase))
+        {
+            ct.ThrowIfCancellationRequested();
+            var taskId = Path.GetFileName(dir);
+            if (string.IsNullOrEmpty(taskId)) continue;
+
+            var (statusExit, statusOut) = await _git.RunAsync(
+                ["status", "--porcelain"], dir, ct);
+            var hasUncommitted = statusExit == 0 && !string.IsNullOrWhiteSpace(statusOut);
+
+            // base..HEAD에 커밋이 있으면 mid-task 진행분
+            var (countExit, countOut) = await _git.RunAsync(
+                ["rev-list", "--count", $"{baseBranch}..HEAD"], dir, ct);
+            int aheadCount = 0;
+            if (countExit == 0 && int.TryParse(countOut.Trim(), out var n)) aheadCount = n;
+
+            if (hasUncommitted || aheadCount > 0)
+            {
+                result.Add(new MidTaskWorktreeInfo(
+                    TaskId: taskId,
+                    WorktreePath: Path.GetFullPath(dir),
+                    AheadCount: aheadCount,
+                    HasUncommitted: hasUncommitted));
+            }
+        }
+
+        return result;
+    }
 }
+
+/// <summary>
+/// 중단/재개 시나리오에서 사용자에게 보여주기 위한 mid-task 워크트리 정보.
+/// </summary>
+public sealed record MidTaskWorktreeInfo(
+    string TaskId,
+    string WorktreePath,
+    int AheadCount,
+    bool HasUncommitted);

@@ -8,10 +8,21 @@ namespace Ralph.Services;
 
 public partial class PlanGenerator
 {
+    /// <summary>
+    /// 기본 4-stage. workflow.categories가 명시되지 않은 프로젝트에서 사용.
+    /// 외부에서 재정의하면 PlanGenerator는 이 목록의 첫 항목을 plan, 마지막을 commit으로 가정 없이
+    /// 단순히 사용자 정의 stage 이름으로 prompt에 주입한다.
+    /// </summary>
+    public static readonly IReadOnlyList<string> DefaultCategories =
+        ["plan", "implementation", "testing", "commit"];
+
     public async Task<int> GenerateAsync(
         string prdFile, string schemaContent, string tasksFile,
-        ClaudeService claude, string model = "opus", RalphLogger? logger = null, CancellationToken ct = default)
+        ClaudeService claude, string model = "opus", RalphLogger? logger = null,
+        IReadOnlyList<string>? categories = null,
+        CancellationToken ct = default)
     {
+        categories ??= DefaultCategories;
         // Header
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Rule("[green]RALPH - Plan Generator[/]").RuleStyle("blue"));
@@ -24,7 +35,7 @@ public partial class PlanGenerator
         // Build prompt (PRD file path only — Claude reads it via Read tool)
         var prdFullPath = Path.GetFullPath(prdFile);
         var tasksFullPath = Path.GetFullPath(tasksFile);
-        var prompt = BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath);
+        var prompt = BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath, categories);
 
         // Run Claude (full tool access — Claude can explore codebase and write tasks.json directly)
         AnsiConsole.Write(new Rule("[yellow]Claude Code Output[/]").RuleStyle("yellow"));
@@ -99,16 +110,17 @@ public partial class PlanGenerator
             return 1;
         }
 
-        // Validate phase distribution (informational — flexible granularity is allowed)
-        var planCount = parsed.Tasks.Count(t => t.Category == "plan");
-        var implCount = parsed.Tasks.Count(t => t.Category == "implementation");
-        var testCount = parsed.Tasks.Count(t => t.Category == "testing");
-        var commitCount = parsed.Tasks.Count(t => t.Category == "commit");
-
-        if (implCount == 0 && parsed.Tasks.Count > 0)
+        // Validate category distribution (informational — flexible granularity is allowed).
+        // 사용자 정의 categories를 받아 카운팅. 모든 카테고리가 0건이면 아무 task도 분류되지
+        // 않은 것이므로 경고. 그 외에는 분포만 보여주고 진행.
+        var categoryCounts = categories
+            .Distinct(StringComparer.Ordinal)
+            .ToDictionary(c => c, c => parsed.Tasks.Count(t => t.Category == c), StringComparer.Ordinal);
+        var totalCategorized = categoryCounts.Values.Sum();
+        if (totalCategorized == 0 && parsed.Tasks.Count > 0)
         {
             AnsiConsole.MarkupLine(
-                "[yellow]Warning: No 'implementation' tasks found — feature granularity may be off.[/]");
+                $"[yellow]Warning: 어떤 task도 정의된 categories({string.Join(", ", categories)})에 매칭되지 않습니다 — feature granularity 확인 필요.[/]");
         }
 
         // Write validated JSON atomically (tmp + rename) to avoid truncation on interrupt
@@ -137,12 +149,9 @@ public partial class PlanGenerator
         table.AddColumn("Key");
         table.AddColumn("Value");
         table.AddRow("Total tasks", parsed.Tasks.Count.ToString());
-        table.AddRow("Features", planCount.ToString());
-        table.AddRow("Per feature", "plan -> implementation -> testing -> commit");
-        table.AddRow("[cyan]Plan[/]", $"{planCount} tasks");
-        table.AddRow("[cyan]Implementation[/]", $"{implCount} tasks");
-        table.AddRow("[cyan]Testing[/]", $"{testCount} tasks");
-        table.AddRow("[cyan]Commit[/]", $"{commitCount} tasks");
+        table.AddRow("Per feature", string.Join(" -> ", categories));
+        foreach (var (cat, count) in categoryCounts)
+            table.AddRow($"[cyan]{Markup.Escape(cat)}[/]", $"{count} tasks");
         table.AddRow("[green]Root tasks (no deps)[/]", $"{noDeps} (parallel start points)");
         table.AddRow("[green]With modifiedFiles[/]", $"{withModFiles} tasks");
         AnsiConsole.Write(table);
@@ -156,12 +165,22 @@ public partial class PlanGenerator
         return 0;
     }
 
-    internal static string BuildPlanPrompt(string prdFilePath, string schemaContent, string tasksFilePath = "tasks.json")
+    internal static string BuildPlanPrompt(
+        string prdFilePath, string schemaContent, string tasksFilePath = "tasks.json",
+        IReadOnlyList<string>? categories = null)
     {
+        categories ??= DefaultCategories;
+        var categoryListText = string.Join(", ", categories.Select(c => $"\"{c}\""));
         var sb = new StringBuilder();
         sb.AppendLine($$"""
             You are a project planner that generates a tasks.json file for the Ralph task executor.
             Ralph supports **parallel execution** of independent tasks using git worktrees.
+
+            Allowed task categories for this project: {{categoryListText}}.
+            Use ONLY these category values in the `category` field. The descriptions below match
+            the default 4-stage pattern (plan/implementation/testing/commit); when this project
+            defines a different category set, infer each stage's intent from its name and adapt
+            the prompt template accordingly.
 
             ## Your Goal
             Read the PRD file at `{{prdFilePath}}`, explore the codebase, and write a valid JSON task plan to `{{tasksFilePath}}`.

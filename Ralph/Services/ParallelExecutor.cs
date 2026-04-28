@@ -20,6 +20,11 @@ public class ParallelExecutor
     private int _cleanupFailures;
 
     /// <summary>
+    /// verification 실패 시 self-fix 재시도 횟수. workflow.verifyRetries > 1(기본).
+    /// </summary>
+    private int VerifyRetries => Math.Max(0, _taskManager.Data.Workflow?.VerifyRetries ?? 1);
+
+    /// <summary>
     /// budget(USD) 임계값 도달로 새 dispatch를 차단했는지 여부.
     /// 호출자가 확인해 종료 코드 2를 결정할 수 있다.
     /// </summary>
@@ -54,19 +59,41 @@ public class ParallelExecutor
             return 1;
         }
 
-        // 잔존 worktree 감지
-        var stale = await _worktree.DetectStaleWorktreesAsync(ct);
-        if (stale.Count > 0)
-        {
-            AnsiConsole.MarkupLine($"[yellow]잔존 worktree {stale.Count}개 감지. 정리합니다...[/]");
-            await _worktree.CleanupAllAsync(_logger, ct);
-        }
-
-        // worktree 사용을 위해 최소 1개의 커밋이 필요
+        // worktree 사용을 위해 최소 1개의 커밋이 필요 (base branch 식별 전에 보장)
         await _git.EnsureInitialCommitAsync(_logger, ct);
 
         var baseBranch = await _git.GetCurrentBranchAsync(ct: ct);
         _logger.Info($"Parallel execution starting on branch: {baseBranch}");
+
+        // mid-task 잔존 worktree 검출. uncommitted 변경 또는 base 위로 진행된 커밋이 있으면
+        // 이전 실행이 중단된 상태일 수 있다 — 사용자 확인 없이 silently 삭제하지 않는다.
+        var midTask = await _worktree.DetectMidTaskWorktreesAsync(baseBranch, ct);
+        if (midTask.Count > 0)
+        {
+            AnsiConsole.MarkupLine(
+                $"\n[yellow]⚠ 중단된 작업으로 보이는 worktree {midTask.Count}개 감지:[/]");
+            foreach (var w in midTask)
+            {
+                var ahead = w.AheadCount > 0 ? $"{w.AheadCount} commit(s) ahead" : "no commits";
+                var dirty = w.HasUncommitted ? "uncommitted 변경 있음" : "clean";
+                AnsiConsole.MarkupLine(
+                    $"  [dim]•[/] [cyan]{Markup.Escape(w.TaskId)}[/]  [dim]({ahead}, {dirty})[/]");
+                AnsiConsole.MarkupLine($"    [dim]{Markup.Escape(w.WorktreePath)}[/]");
+            }
+            AnsiConsole.MarkupLine(
+                "[yellow]자동 정리하지 않습니다. 직접 머지/회수하거나, [cyan]ralph --worktree-cleanup[/]으로 강제 삭제하세요.[/]");
+            _logger.Warn(
+                $"Mid-task worktrees detected: {string.Join(", ", midTask.Select(m => m.TaskId))} — leaving in place");
+            return 1;
+        }
+
+        // mid-task가 아닌 잔존 worktree(이전 실행에서 cleanup 누락된 빈 worktree)는 자동 정리
+        var stale = await _worktree.DetectStaleWorktreesAsync(ct);
+        if (stale.Count > 0)
+        {
+            AnsiConsole.MarkupLine($"[yellow]잔존 worktree {stale.Count}개 감지 (clean). 정리합니다...[/]");
+            await _worktree.CleanupAllAsync(_logger, ct);
+        }
 
         while (true)
         {
@@ -386,6 +413,11 @@ public class ParallelExecutor
 
             // 5. tasks.json 변경사항 커밋 (다음 배치 병합 시 충돌 방지)
             await CommitTasksFileAsync(taskIds, ct);
+
+            // 5.5 머지 후 smoke test (workflow.smokeTest 설정 시). claude conflict 전략이나
+            // auto-* 머지로 인한 semantic 정합성 깨짐을 잡는 단계. 실패 시 호출자에게 신호.
+            if (await RunPostMergeSmokeTestAsync(ct) is { } smokeFail)
+                return smokeFail;
         }
         finally
         {
@@ -441,6 +473,13 @@ public class ParallelExecutor
             // tasks.json을 수정했을 가능성을 방어. 머지 충돌의 가장 흔한 원인.
             await GuardTasksFileAsync(taskId, worktreePath, logWriter, ct);
 
+            // F4-pre: 워크트리 staging 직전 scope 위반 검사. base..HEAD가 아닌 working-tree
+            // 변경(`git status --porcelain`) 전체를 본다. 이 시점에서 declared 외 변경이
+            // 검출되면 declaredFiles 필터에 의해 silently 사라지는 것을 막을 수 있다.
+            // strict-files 모드에서는 worktree 단계에서 fail-fast해 머지/cleanup 비용을 절약.
+            if (!await PreCommitScopeGuardAsync(task, worktreePath, logWriter, tracker, ct))
+                return false;
+
             // worktree 안에서 커밋. declared 파일만 staging해서 격리 보장
             // (선언 안 된 worktree 변경 — 예: __pycache__, 다른 task의 파일 — 머지 표면에서 제외).
             // declared가 비어있으면 fallback으로 -A 사용 (legacy 동작).
@@ -479,7 +518,7 @@ public class ParallelExecutor
     /// </summary>
     private async Task<bool> RunSingleWithVerificationAsync(TaskItem task, CancellationToken ct)
     {
-        const int maxVerifyRetries = 1;
+        var maxVerifyRetries = VerifyRetries;
         var basePrompt = BuildPrompt(task);
         string? failureCtx = null;
 
@@ -528,7 +567,7 @@ public class ParallelExecutor
             }
 
             AnsiConsole.MarkupLine(
-                $"[yellow]⚠ 검증 실패, Claude에게 수정 요청 (1회 retry)[/]");
+                $"[yellow]⚠ 검증 실패, Claude에게 수정 요청 ({attempt + 1}/{maxVerifyRetries} retry)[/]");
             failureCtx = VerificationRunner.BuildFailureContext(spec.Command, verify);
         }
 
@@ -537,13 +576,14 @@ public class ParallelExecutor
 
     /// <summary>
     /// Claude 실행 + (선택) 외부 verification 명령 실행. verification 실패 시 stdout/stderr를
-    /// 다음 시도 prompt에 prepend해 1회 self-fix 시도. 모두 실패하면 false 반환.
+    /// 다음 시도 prompt에 prepend해 self-fix 시도. workflow.verifyRetries 횟수만큼 반복하며
+    /// 모두 실패하면 false 반환.
     /// </summary>
     private async Task<bool> RunPromptWithVerificationAsync(
         TaskItem task, IReadOnlyList<TaskItem> siblings, string workingDirectory,
         TextWriter logWriter, TaskProgressTracker tracker, CancellationToken ct)
     {
-        const int maxVerifyRetries = 1; // Claude self-fix 1회만 허용
+        var maxVerifyRetries = VerifyRetries;
         string? failureCtx = null;
 
         for (var attempt = 0; attempt <= maxVerifyRetries; attempt++)
@@ -595,13 +635,86 @@ public class ParallelExecutor
             }
 
             AnsiConsole.MarkupLine(
-                $"  [yellow]⚠[/] {Markup.Escape(task.Id)} verification 실패 → Claude에게 수정 요청 (1회 retry)");
+                $"  [yellow]⚠[/] {Markup.Escape(task.Id)} verification 실패 → Claude에게 수정 요청 ({attempt + 1}/{maxVerifyRetries} retry)");
             _logger.Warn(
                 $"[verification] {task.Id} failed (attempt {attempt + 1}); retrying with failure context");
             failureCtx = VerificationRunner.BuildFailureContext(spec.Command, verify);
         }
 
         return false; // unreachable
+    }
+
+    /// <summary>
+    /// Claude 실행 직후 staging 직전, worktree의 working-tree 변경 전체와 declared 집합을 비교한다.
+    /// 새 파일/수정/삭제(staged·unstaged·untracked) 모두 보고 declared 외면 warn-only(또는 strict-files면 fail).
+    /// commit 이후의 base..HEAD 검증과 보완 관계 — 이쪽은 staging 필터에 의해 사라지기 전 raw 변경을 본다.
+    /// tasks.json은 별도 GuardTasksFileAsync가 정규화하므로 검사에서 제외.
+    /// </summary>
+    private async Task<bool> PreCommitScopeGuardAsync(
+        TaskItem task, string worktreePath, TextWriter logWriter,
+        TaskProgressTracker tracker, CancellationToken ct)
+    {
+        var (statusExit, statusOut) = await _git.RunAsync(
+            ["status", "--porcelain"], worktreePath, ct);
+        if (statusExit != 0)
+        {
+            await logWriter.WriteLineAsync($"\n=== [scope-guard] git status 실패 — skip ===");
+            _logger.Warn($"[scope-guard] {task.Id}: git status 실패 — 검사 스킵");
+            return true; // diff 실패가 머지를 막지 않게(F4와 동일 정책)
+        }
+        if (string.IsNullOrWhiteSpace(statusOut)) return true;
+
+        var declared = BuildDeclaredSet(task);
+        var declaredSet = new HashSet<string>(
+            declared.Where(s => !string.IsNullOrWhiteSpace(s))
+                    .Select(p => p.Replace('\\', '/').Trim()),
+            StringComparer.Ordinal);
+
+        var tasksFileName = Path.GetFileName(_tasksFile);
+        var changed = new List<string>();
+        foreach (var line in statusOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            // porcelain v1: "XY path" 또는 "XY orig -> new" (rename)
+            if (line.Length < 4) continue;
+            var rest = line[3..];
+            string path;
+            var arrowIdx = rest.IndexOf(" -> ", StringComparison.Ordinal);
+            if (arrowIdx >= 0) path = rest[(arrowIdx + 4)..].Trim();
+            else path = rest.Trim();
+
+            // " 안의 따옴표 제거 (renamed/space-containing 경로)
+            if (path.Length >= 2 && path[0] == '"' && path[^1] == '"') path = path[1..^1];
+            path = path.Replace('\\', '/').Trim();
+            if (path.Length == 0) continue;
+            if (string.Equals(path, tasksFileName, StringComparison.Ordinal)) continue;
+            changed.Add(path);
+        }
+
+        var undeclared = changed
+            .Where(p => !declaredSet.Contains(p))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (undeclared.Count == 0) return true;
+
+        var preview = string.Join(", ", undeclared.Take(5));
+        var more = undeclared.Count > 5 ? $" (외 {undeclared.Count - 5}건)" : "";
+
+        if (_strictFiles)
+        {
+            await logWriter.WriteLineAsync(
+                $"\n=== [scope-guard] STRICT FAIL: undeclared {undeclared.Count}건 — {preview}{more} ===");
+            tracker.UpdateStatus(task.Id, TaskProgressStatus.Failed);
+            _logger.Error(
+                $"[scope-guard][strict] {task.Id} undeclared {undeclared.Count}건: {string.Join(", ", undeclared)}");
+            return false;
+        }
+
+        await logWriter.WriteLineAsync(
+            $"\n=== [scope-guard] WARN: undeclared {undeclared.Count}건 (warn-only) — {preview}{more} ===");
+        _logger.Warn(
+            $"[scope-guard] {task.Id} undeclared {undeclared.Count}건 (warn-only): {string.Join(", ", undeclared)}");
+        return true;
     }
 
     /// <summary>
@@ -833,6 +946,38 @@ public class ParallelExecutor
 
         await _worktree.AbortMergeAsync(ct);
         return false;
+    }
+
+    /// <summary>
+    /// workflow.smokeTest가 설정되어 있으면 base에서 한 번 실행해 머지 결과의 semantic
+    /// 정합성을 검증한다. 실패 시 종료 코드 1(non-success)을 반환해 ParallelExecutor가
+    /// 다음 배치를 dispatch하지 않게 한다.
+    /// 미설정이면 null을 반환해 호출자가 다음 단계로 진행.
+    /// </summary>
+    private async Task<int?> RunPostMergeSmokeTestAsync(CancellationToken ct)
+    {
+        var spec = _taskManager.Data.Workflow?.SmokeTest;
+        if (spec is null || string.IsNullOrWhiteSpace(spec.Command)) return null;
+
+        var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+        AnsiConsole.MarkupLine(
+            $"\n[cyan]Smoke test 실행:[/] [dim]{Markup.Escape(spec.Command)}[/] [dim](cwd: {Markup.Escape(repoRoot)})[/]");
+        _logger.Info($"[smoke-test] running: {spec.Command} (cwd: {repoRoot})");
+
+        var result = await _verifier.RunAsync(spec, repoRoot, _logger, output: null, ct);
+        if (result.Success)
+        {
+            AnsiConsole.MarkupLine($"[green]✓ Smoke test 통과[/] ({result.Duration.TotalSeconds:F1}s)");
+            return null;
+        }
+
+        AnsiConsole.MarkupLine(
+            $"[red]✗ Smoke test 실패[/] (exit={result.ExitCode}{(result.TimedOut ? ", TIMEOUT" : "")}, {result.Duration.TotalSeconds:F1}s)");
+        if (!string.IsNullOrWhiteSpace(result.Stderr))
+            AnsiConsole.MarkupLine($"[dim]{Markup.Escape(result.Stderr.Trim())}[/]");
+        _logger.Error(
+            $"[smoke-test] failed exit={result.ExitCode} timedOut={result.TimedOut}");
+        return 1;
     }
 
     /// <summary>

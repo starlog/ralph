@@ -120,6 +120,28 @@
           "minimum": 0,
           "default": 5,
           "description": "Delay (seconds) between retries. Priority: env RETRY_DELAY > this > 5."
+        },
+        "verifyRetries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1,
+          "description": "Max self-fix retries when verification.command exits non-zero. 0 disables retry. Higher values cost more tokens but increase recovery odds for flaky/test failures."
+        },
+        "smokeTest": {
+          "type": "object",
+          "description": "Single command run on the base branch after each parallel batch's merges complete. Catches semantic conflicts that survived auto/claude conflict resolution. Failure stops the run with non-zero exit.",
+          "properties": {
+            "command": { "type": "string", "description": "Shell command to run on base branch after merges" },
+            "timeoutSec": { "type": "integer", "minimum": 1, "description": "Per-call timeout (seconds). Default 120." }
+          },
+          "required": ["command"],
+          "additionalProperties": false
+        },
+        "categories": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Custom task category list used by PlanGenerator. Defaults to ['plan','implementation','testing','commit']. Override to support different stage patterns (e.g. ['design','impl','docs'])."
         }
       },
       "additionalProperties": false

@@ -129,6 +129,29 @@ public class WorkflowSettings
     [JsonPropertyName("retryDelay")]
     public int? RetryDelay { get; set; }
 
+    /// <summary>
+    /// verification.command가 실패했을 때 Claude에게 self-fix를 시도하게 할 최대 재시도 횟수.
+    /// 0이면 retry 없이 즉시 실패. null이면 1(기본). 큰 값(예: 3)을 주면 같은 prompt에
+    /// failure context를 누적해 재시도하므로 cost는 비례해서 증가.
+    /// </summary>
+    [JsonPropertyName("verifyRetries")]
+    public int? VerifyRetries { get; set; }
+
+    /// <summary>
+    /// 배치 머지 완료 후 base 브랜치에서 한 번 실행되는 smoke test 명령. 충돌을 LLM으로 풀거나
+    /// auto-* 전략으로 해결한 후의 semantic 정합성을 검증한다. 실패 시 exit code 3으로 ralph 종료.
+    /// </summary>
+    [JsonPropertyName("smokeTest")]
+    public VerificationSpec? SmokeTest { get; set; }
+
+    /// <summary>
+    /// PlanGenerator가 사용할 task category 목록. 기본 ["plan","implementation","testing","commit"].
+    /// 4-stage가 강제되지 않도록 외부에서 재정의 가능. 이 목록은 prompt에 그대로 주입되어
+    /// Claude가 생성하는 task의 category 값으로 사용된다.
+    /// </summary>
+    [JsonPropertyName("categories")]
+    public List<string>? Categories { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }

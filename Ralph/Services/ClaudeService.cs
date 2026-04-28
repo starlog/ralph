@@ -19,6 +19,12 @@ public class ClaudeResult
     /// RunWithRetryAsync는 이 플래그가 true이면 retry를 건너뜁니다 (hang은 재시도로 잘 안 풀림).
     /// </summary>
     public bool TimedOut { get; init; }
+
+    /// <summary>
+    /// stderr/errorMessages에서 rate-limit/overloaded 신호를 감지한 결과. RunWithRetryAsync는
+    /// 이 플래그가 true이면 일반 retryDelay 대신 exponential backoff(60s × 2^attempt, 최대 600s)를 적용한다.
+    /// </summary>
+    public bool RateLimited { get; init; }
 }
 
 public record TokenUsage(
@@ -415,16 +421,37 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
 
         totalSw.Stop();
 
+        var errMsgsText = errorMessages.ToString();
         return new ClaudeResult
         {
             Success = process.ExitCode == 0,
             Output = finalOutput,
             Stderr = stderr,
-            ErrorMessages = errorMessages.ToString(),
+            ErrorMessages = errMsgsText,
             ExitCode = process.ExitCode,
             Usage = capturedUsage,
             Duration = totalSw.Elapsed,
+            RateLimited = process.ExitCode != 0 && IsRateLimitSignal(stderr, errMsgsText),
         };
+    }
+
+    /// <summary>
+    /// stderr/error 메시지에 rate-limit/overloaded 신호가 있는지 휴리스틱으로 감지.
+    /// HTTP 429, "rate limit"/"rate_limit"/"too many requests"/"overloaded"/"resource_exhausted" 패턴.
+    /// false positive 시에는 단순히 backoff가 길어지는 정도의 영향만 있다.
+    /// </summary>
+    internal static bool IsRateLimitSignal(string stderr, string errorMessages)
+    {
+        if (string.IsNullOrEmpty(stderr) && string.IsNullOrEmpty(errorMessages)) return false;
+        var combined = (stderr + "\n" + errorMessages).ToLowerInvariant();
+        return combined.Contains("rate limit")
+            || combined.Contains("rate_limit")
+            || combined.Contains("too many requests")
+            || combined.Contains("\"status\":429") || combined.Contains("status code 429")
+            || combined.Contains(" 429 ") || combined.Contains("http 429")
+            || combined.Contains("overloaded")
+            || combined.Contains("resource_exhausted")
+            || combined.Contains("quota exceeded");
     }
 
     public async Task<ClaudeResult> RunWithRetryAsync(
@@ -454,12 +481,27 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                     {prompt}
                     """;
 
-                if (output == null)
-                    AnsiConsole.MarkupLine(
-                        $"[yellow]Retry attempt {attempt}/{maxRetries} (waiting {retryDelay}s)...[/]");
-                logger?.Info($"Retry attempt {attempt}/{maxRetries} with failure context (exit={lastResult.ExitCode})");
-                output?.WriteLine($"\n=== Retry {attempt}/{maxRetries} (previous exit={lastResult.ExitCode}) ===");
-                await Task.Delay(retryDelay * 1000, ct);
+                // rate-limit 신호면 exponential backoff(60·120·240..., 최대 600초). 그 외엔 retryDelay.
+                int delaySec;
+                if (lastResult.RateLimited)
+                {
+                    delaySec = Math.Min(600, 60 * (int)Math.Pow(2, attempt - 2));
+                    if (output == null)
+                        AnsiConsole.MarkupLine(
+                            $"[yellow]Rate limit 감지 — exponential backoff {delaySec}s 대기 (attempt {attempt}/{maxRetries})[/]");
+                    logger?.Warn($"Rate-limit backoff {delaySec}s before attempt {attempt}/{maxRetries}");
+                    output?.WriteLine($"\n=== Rate-limit backoff {delaySec}s before attempt {attempt}/{maxRetries} ===");
+                }
+                else
+                {
+                    delaySec = retryDelay;
+                    if (output == null)
+                        AnsiConsole.MarkupLine(
+                            $"[yellow]Retry attempt {attempt}/{maxRetries} (waiting {delaySec}s)...[/]");
+                    logger?.Info($"Retry attempt {attempt}/{maxRetries} with failure context (exit={lastResult.ExitCode})");
+                    output?.WriteLine($"\n=== Retry {attempt}/{maxRetries} (previous exit={lastResult.ExitCode}) ===");
+                }
+                await Task.Delay(delaySec * 1000, ct);
             }
             else
             {
