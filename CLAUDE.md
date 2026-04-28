@@ -4,28 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Ralph is a CLI task orchestrator that generates execution plans from PRD (Product Requirements Document) files and runs them in parallel (or sequentially) using Claude Code. It follows a 4-phase pattern per feature: **plan → implementation → testing → commit**, with dependency tracking between tasks. Built with .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.1**.
+Ralph is a CLI task orchestrator that generates execution plans from PRD (Product Requirements Document) files and runs them in parallel (or sequentially) using Claude Code. It follows a 4-phase pattern per feature: **plan → implementation → testing → commit** (configurable via `workflow.categories`), with dependency tracking between tasks. Built with .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.1**.
 
 ## Architecture
 
 - **Ralph/** — .NET 8 C# project producing a self-contained single-file binary.
-- **Ralph.Tests/** — xUnit test project (worktree integration tests, plan validator tests, etc.).
-- **ralph-schema.json** — JSON Schema (2020-12) defining the `tasks.json` structure: tasks array (id/title/done/prompt/dependsOn/outputFiles/modifiedFiles/subtasks/verification), workflow settings (parallel, notifications, logRetentionDays, budgetUsd, taskTimeoutSec, maxRetries, retryDelay), and optional apiSpecs/samplePages. Embedded in the binary as `EmbeddedResource`.
+  - `Program.cs` — entrypoint. Sets UTF-8 console, wires Ctrl+C → CancellationToken, runs `DependencyChecker` for `claude` / `git`, parses argv via `ArgParser`, dispatches via `CommandDispatcher`.
+  - `Commands/` — one ICommand per CLI subcommand (`PlanCommand`, `RunCommand`, `DryRunCommand`, `SingleTaskCommand`, `InteractiveCommand`, `ListCommand`, `GraphCommand`, `PromptsCommand`, `ShowPromptCommand`, `StatusCommand`, `LogsCommand`, `CostCommand`, `ResetCommand`, `ValidateCommand`, `CritiqueCommand`, `WorktreeCleanupCommand`, `HelpCommand`, ...) plus `ArgParser` / `CommandDispatcher` / `CommandContext` / `DependencyChecker` / `DisplayHelpers` / `SchemaLoader`.
+  - `Services/` — orchestration and integration code (table below).
+  - `Models/` — `TasksFile.cs` (POCOs for tasks.json) and `RalphJsonContext.cs` (System.Text.Json source-gen context for AOT-friendly serialization).
+- **Ralph.Tests/** — xUnit test project (worktree integration tests, plan validator tests, parallel batch transition tests, etc.).
+- **ralph-schema.json** — JSON Schema (2020-12) defining the `tasks.json` structure: tasks array (id/title/done/prompt/dependsOn/outputFiles/modifiedFiles/subtasks/verification), workflow settings (parallel, notifications, logRetentionDays, budgetUsd, taskTimeoutSec, maxRetries, retryDelay, verifyRetries, smokeTest, categories), and optional apiSpecs/samplePages. Embedded in the binary as `EmbeddedResource`.
 - **pricing.json** — Per-model token pricing used by `CostTracker`. Embedded as `EmbeddedResource`; can be overridden by `~/.ralph/pricing.json`.
+- **install.sh / install.ps1 / install-binary.sh / release-binary.sh** — install + release scripts. Homebrew/Scoop manifests under `Formula/` and `scoop/` track the latest GitHub release.
 
 ### Key Services (Ralph/Services/)
 
 | Service | Purpose |
 |---|---|
-| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus model) to produce tasks.json. Atomic write (tmp + rename). |
+| `IAgentRunner.cs` | Abstraction over an LLM agent runner (Claude). Allows tests/mocks to substitute the real CLI. |
+| `ClaudeService.cs` | Runs Claude Code with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY), per-call timeout. Implements `IAgentRunner`. |
+| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus model) to produce tasks.json. Atomic write (tmp + rename). Honors `workflow.categories` for non-default stage patterns. |
 | `PlanValidator.cs` | Validates tasks.json: cycles, dangling deps, duplicate IDs, file overlaps, sensitive paths, eval-string body checks. |
-| `ClaudeService.cs` | Runs Claude Code with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY), per-call timeout. |
+| `PrdCritic.cs` | Static analysis of tasks.json — finds parallelism gaps, missing verification commands, dependency oddities. Backs `--critique`. |
+| `LlmCritic.cs` | Optional LLM-driven critique of the generated plan against the original PRD. Triggered by `--llm-critique` after `--plan`. |
 | `PromptBuilder.cs` | Builds the prompt sent to Claude — adds Scope, dependency outputs, sibling context, hard prohibitions. |
-| `TaskManager.cs` | Loads/saves/queries tasks.json; dependency DAG traversal, parallel batch grouping, topological layering. |
-| `ParallelExecutor.cs` | Worktree-based parallel execution with live dashboard, merge handling, conflict-strategy chain. |
-| `WorktreeService.cs` | Git worktree lifecycle: create, rebase-advance before merge, merge, cleanup, stale detection. |
-| `VerificationRunner.cs` | Runs `verification.command` after Claude; exit-code-based ground truth (one self-fix retry on failure). |
-| `CostTracker.cs` | Records per-call usage to `.ralph-logs/cost.jsonl`; cumulative cache shared across dispatches. |
+| `TaskManager.cs` | Loads/saves/queries tasks.json; dependency DAG traversal, parallel batch grouping, topological layering. Atomic save (tmp + rename). |
+| `ParallelExecutor.cs` | Worktree-based parallel execution entrypoint with live dashboard. Delegates merge to `MergeOrchestrator` and per-task work to `WorktreeTaskRunner`. Also exposes `InferSmokeTestCommand` for repo-root marker-based smoke test inference. |
+| `WorktreeTaskRunner.cs` | Runs a single task inside its worktree: prompt build → Claude → verification loop. |
+| `SequentialRunner.cs` | In-place sequential execution path (no worktrees). Used for single-task runs and merge `abort` fallback. |
+| `MergeOrchestrator.cs` | Worktree merge pipeline: pre-merge tasks.json normalization, declared-vs-actual file validation, rebase-advance, merge with strategy chain, conflict resolution (auto-* or Claude), done-marking, tasks.json commit, post-merge smoke test. |
+| `WorktreeService.cs` | Git worktree lifecycle: create (with optional `--shared`), rebase-advance before merge, merge, conflict file extraction, abort, cleanup, stale detection. |
+| `VerificationRunner.cs` | Runs `verification.command` after Claude; exit-code-based ground truth. POSIX `/bin/sh -c`, Windows `cmd /c`. |
+| `VerificationLoop.cs` | Wraps `VerificationRunner` with the self-fix retry loop (`workflow.verifyRetries`, default 1). Records each attempt to `validation.jsonl`. |
+| `CostTracker.cs` | Records per-call usage to `.ralph-logs/cost.jsonl`; cumulative cache shared across dispatches. Loads embedded `pricing.json` (override at `~/.ralph/pricing.json`). |
 | `BudgetGate.cs` | Cumulative cost ceiling (`--budget-usd`); 80% warning, 100% blocks new dispatches. |
 | `NotificationService.cs` | Session-completion webhook (Slack/Discord/generic auto-detect by hostname). |
 | `LogRotator.cs` | Deletes old logs in `.ralph-logs/` (default retention 30 days; preserves cost.jsonl, validation.jsonl). |
@@ -37,34 +49,37 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 
 ### Execution Modes
 
-- `--run [file]` — Auto mode: parallel by default (uses git worktrees), falls back to sequential for single tasks
-- `--run --sequential` — Force sequential execution (no worktrees)
-- `--run --max-parallel N` — Cap concurrent tasks
-- `--interactive` — Prompts before each task
-- `--dry-run` — Simulates execution; tasks.json restored on exit (try/finally guarantee)
-- `--task <id>` — Runs a single task by ID; honors deps unless `--force`
+- `--run [file]` — Auto mode: parallel by default (uses git worktrees), falls back to sequential for single tasks.
+- `--run --sequential` — Force sequential execution (no worktrees, via `SequentialRunner`).
+- `--run --max-parallel N` — Cap concurrent tasks.
+- `--interactive` — Prompts before each task.
+- `--dry-run` — Simulates execution; tasks.json restored on exit (try/finally guarantee).
+- `--task <id>` — Runs a single task by ID; honors deps unless `--force`.
 
 ### Parallel Execution Flow
 
-1. Ensure at least one commit exists (required for worktree creation)
-2. Detect and clean stale worktrees
-3. Group independent tasks into parallel batches
-4. Create a git worktree per task (`ralph/{taskId}` branch under `.ralph-worktrees/`)
-5. Run Claude Code in each worktree concurrently (live progress table)
-6. Run `verification.command` if defined; one self-fix retry on failure
-7. Rebase the worktree branch onto the latest base before merge (advance)
-8. Sequentially merge completed branches; resolve conflicts via the strategy chain
-   (`conflictStrategies`: ordered fallback, e.g. `["auto-theirs", "claude"]`)
-9. Optionally validate `modifiedFiles` post-merge (`--strict-files`)
+1. Ensure at least one commit exists (required for worktree creation).
+2. Detect and clean stale worktrees.
+3. Group independent tasks into parallel batches via `TaskManager` topological layering.
+4. Create a git worktree per task (`ralph/{taskId}` branch under `.ralph-worktrees/`). Optionally `git worktree add --shared` (`--shared-worktrees`).
+5. Run Claude Code in each worktree concurrently (live progress table).
+6. `VerificationLoop` runs `verification.command` if defined; up to `workflow.verifyRetries` self-fix retries (default 1) on failure.
+7. `MergeOrchestrator` per task: normalize tasks.json against base → validate declared vs actual `modifiedFiles` (`--strict-files` aborts on undeclared) → rebase-advance onto latest base → merge with primary strategy → if conflicts, run the `conflictStrategies` chain (auto-* / claude / abort).
+8. Mark `done: true` thread-safely, atomic save tasks.json, commit tasks.json change.
+9. Run a post-merge smoke test on base (`workflow.smokeTest` or auto-inferred from repo-root markers; disabled by `--no-smoke-test`).
+10. Advance to the next batch.
 
 ## Commands
 
 ```bash
 # Standard workflow
 ralph --plan PRD.md              # Generate tasks.json from PRD (atomic write)
+ralph --plan PRD.md --llm-critique  # Plan + extra LLM critique pass
 ralph --plan-prompt PRD.md       # Show full plan prompt without executing
 ralph --validate                 # Validate tasks.json (cycles, deps, file overlaps, sensitive paths)
+ralph --critique                 # Static critique of tasks.json (parallelism / verification gaps)
 ralph --list                     # List pending tasks (parallel-eligibility shown)
+ralph --graph                    # ASCII task dependency graph
 ralph --dry-run                  # Preview execution (tasks.json restored on exit)
 ralph --run                      # Execute all tasks (parallel by default)
 ralph --run custom.json          # Positional file argument
@@ -75,7 +90,9 @@ ralph --run --sequential         # Force sequential
 ralph --run --max-parallel 4     # Cap concurrency
 ralph --run --budget-usd 5.00    # Stop dispatching new tasks once cumulative cost ≥ $5
 ralph --run --task-timeout 30m   # Per-Claude-call timeout (30m, 1h, 90s, or seconds)
-ralph --run --strict-files       # Validate declared vs actual modifiedFiles after merge
+ralph --run --strict-files       # Validate declared vs actual modifiedFiles after merge; abort on undeclared
+ralph --run --shared-worktrees   # git worktree add --shared (saves disk/IO; auto-fallback)
+ralph --run --no-smoke-test      # Skip post-merge smoke test
 ralph --run --model sonnet       # Model override (sonnet | opus, default: opus)
 
 # Single task
@@ -83,7 +100,6 @@ ralph --task <id>                # Honors dependsOn
 ralph --task <id> --force        # Bypass dependency / validation checks
 
 # Monitoring
-ralph --graph                    # ASCII task dependency graph
 ralph --status                   # Progress dashboard with parallel batch info
 ralph --cost                     # Cumulative token usage and estimated USD cost
 ralph --logs                     # List log files
@@ -101,9 +117,9 @@ ralph --worktree-cleanup         # Clean up stale worktrees
 
 ## Dependencies
 
-- **claude** — Claude Code CLI, invoked with `--dangerously-skip-permissions --output-format stream-json`
-- **git** — Auto-commit after each task completion, worktree-based parallel execution
-- **.NET 8 SDK** — Build only (published binary is self-contained)
+- **claude** — Claude Code CLI, invoked with `--dangerously-skip-permissions --output-format stream-json`.
+- **git** — Auto-commit after each task completion, worktree-based parallel execution.
+- **.NET 8 SDK** — Build only (published binary is self-contained).
 
 ## Environment Variables
 
@@ -114,6 +130,8 @@ ralph --worktree-cleanup         # Clean up stale worktrees
 | `RALPH_MAX_PARALLEL` | 0 (use tasks.json) | Override max concurrent tasks |
 | `RALPH_PARALLEL` | true | Set to `false` to disable parallel execution |
 | `RALPH_STRICT_FILES` | false | Set to `true` to enable `--strict-files` |
+| `RALPH_SHARED_WORKTREES` | false | Set to `true` to enable `--shared-worktrees` |
+| `RALPH_NO_SMOKE_TEST` | false | Set to `true` or `1` to disable post-merge smoke test |
 | `RALPH_BUDGET_USD` | (unset) | Cumulative cost ceiling. CLI `--budget-usd` wins. |
 | `RALPH_TASK_TIMEOUT_SEC` | (unset) | Per-Claude-call timeout (seconds). CLI `--task-timeout` wins. |
 | `RALPH_WEBHOOK_URL` | (unset) | Default session-completion webhook |
@@ -121,16 +139,46 @@ ralph --worktree-cleanup         # Clean up stale worktrees
 
 Priority for shared knobs: CLI flag > env var > workflow setting in tasks.json > built-in default.
 
+## Workflow Settings (tasks.json)
+
+```jsonc
+{
+  "workflow": {
+    "onTaskComplete": { "commitChanges": true, "commitMessageTemplate": "[Task #{taskId}] {taskTitle}" },
+    "parallel": {
+      "enabled": true,
+      "maxConcurrent": 5,
+      "conflictStrategies": ["auto-theirs", "claude"],
+      "sharedWorktreeObjects": false
+    },
+    "notifications": { "onComplete": "https://...", "format": "slack" },
+    "logRetentionDays": 30,
+    "budgetUsd": 10.00,
+    "taskTimeoutSec": 1800,
+    "maxRetries": 2,
+    "retryDelay": 5,
+    "verifyRetries": 1,
+    "smokeTest": { "command": "dotnet build", "timeoutSec": 180 },
+    "categories": ["plan", "implementation", "testing", "commit"]
+  }
+}
+```
+
+- `verifyRetries` — self-fix retries when `verification.command` exits non-zero (default 1, 0 disables).
+- `smokeTest` — single command run on the base branch after each merge batch. Auto-inferred from repo-root markers (`*.csproj`/`*.sln` → `dotnet build`, `package.json` → `npm test`, `Cargo.toml` → `cargo build`, `go.mod` → `go build`). Explicit value always wins. Disable with `--no-smoke-test` / `RALPH_NO_SMOKE_TEST=true`.
+- `categories` — override the default 4-stage list (`plan / implementation / testing / commit`) when generating plans.
+
 ## Conventions
 
-- Task IDs use kebab-case: `{feature}-plan`, `{feature}-impl`, `{feature}-test`, `{feature}-commit`
-- Git commit messages must be in Korean
-- Sensitive files (.env, *.pem, *.key, credentials.json, id_rsa, id_ed25519, etc.) are auto-excluded from commits and flagged by `PlanValidator`
-- Session logs: `.ralph-logs/ralph-YYYYMMDD-HHMMSS.log`
-- Task logs (parallel): `.ralph-logs/{taskId}.log`
-- Cost ledger: `.ralph-logs/cost.jsonl` (preserved across log rotation)
-- Verification ledger: `.ralph-logs/validation.jsonl` (preserved across log rotation)
-- Worktrees created at `.ralph-worktrees/{taskId}` (auto-cleaned after execution)
-- Schema and pricing are embedded in the binary as `EmbeddedResource`; pricing override at `~/.ralph/pricing.json`
-- `tasks.json` writes are atomic (tmp + rename) — never partial files on crash
-- Dry-run restores `tasks.json` via try/finally — interruption is safe
+- Task IDs use kebab-case: `{feature}-plan`, `{feature}-impl`, `{feature}-test`, `{feature}-commit`.
+- Git commit messages must be in Korean.
+- Sensitive files (.env, *.pem, *.key, credentials.json, id_rsa, id_ed25519, etc.) are auto-excluded from commits and flagged by `PlanValidator`.
+- Session logs: `.ralph-logs/ralph-YYYYMMDD-HHMMSS.log`.
+- Task logs (parallel): `.ralph-logs/{taskId}.log`.
+- Cost ledger: `.ralph-logs/cost.jsonl` (preserved across log rotation).
+- Verification ledger: `.ralph-logs/validation.jsonl` (preserved across log rotation).
+- Worktrees created at `.ralph-worktrees/{taskId}` (auto-cleaned after execution; force via `ralph --worktree-cleanup`).
+- Schema and pricing are embedded in the binary as `EmbeddedResource`; pricing override at `~/.ralph/pricing.json`.
+- `tasks.json` writes are atomic (tmp + rename) — never partial files on crash.
+- Dry-run restores `tasks.json` via try/finally — interruption is safe.
+- Already-merged tasks are not auto-rolled-back. Use `--strict-files` and `workflow.smokeTest` to catch problems before merge becomes durable.

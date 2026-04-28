@@ -2,34 +2,100 @@
 
 [English](README.md) | **한국어**
 
-PRD(Product Requirements Document) 기반 작업 계획을 생성하고, Claude Code를 통해 **병렬로** 자동 실행하는 CLI 태스크 오케스트레이터.
-.NET 8로 구현 (Windows, macOS, Linux 크로스플랫폼).
+PRD(Product Requirements Document)를 실행 가능한 plan으로 변환해 Claude Code로 실행하는 CLI 태스크 오케스트레이터 — 기본은 git worktree 기반 병렬, 의존성 추적 / exit code 기반 검증 / 충돌 인지 머지 / 누적 비용 게이트 / smoke test / 실시간 진행 모니터링 포함. .NET 8 기반 크로스플랫폼 (Windows, macOS, Linux). 현재 버전: **v1.1**.
 
-**git worktree 기반 병렬 실행을 최초로 구현한 Ralph 변종.** 독립적인 기능들에 대해 여러 Claude Code 에이전트를 동시에 실행하며, 자동 의존성 해결, 충돌 fallback chain, exit code 기반 검증 게이트, 누적 비용 게이트, 실시간 진행 모니터링을 제공한다.
+**git worktree 기반 병렬 실행을 최초로 구현한 Ralph 변종.** 독립적인 기능들을 격리된 Claude Code 에이전트로 동시에 실행하고 자동으로 다시 머지한다.
+
+---
+
+## 목차
+
+- [Ralph를 쓰는 이유](#ralph를-쓰는-이유)
+- [보안 주의](#-보안-주의)
+- [다른 Ralph 구현체와의 비교](#다른-ralph-구현체와의-비교)
+- [동작 원리](#동작-원리)
+- [사례 연구 — Ralph가 자기 자신을 고치다](#사례-연구--ralph가-자기-자신을-고치다)
+- [버전](#버전)
+- [필수 의존성](#필수-의존성)
+- [설치](#설치)
+- [빠른 시작](#빠른-시작)
+- [명령어](#명령어)
+- [실행 옵션](#실행-옵션)
+- [환경변수](#환경변수)
+- [병렬 실행 흐름](#병렬-실행-흐름)
+- [실패 처리 및 재개](#실패-처리-및-재개)
+- [충돌 해결 전략](#충돌-해결-전략)
+- [검증 게이트(Verification Gate)](#검증-게이트verification-gate)
+- [Smoke Test (머지 후)](#smoke-test-머지-후)
+- [비용 추적 및 예산 게이트](#비용-추적-및-예산-게이트)
+- [Webhook 알림](#webhook-알림)
+- [실시간 모니터링](#실시간-모니터링)
+- [tasks.json 구조](#tasksjson-구조)
+- [Workflow 설정](#workflow-설정)
+- [설계 노트 — 왜 `tasks.json`은 mutable + declarative 인가?](#설계-노트--왜-tasksjson은-mutable--declarative-인가)
+- [병렬 실행을 위한 PRD 작성법](#병렬-실행을-위한-prd-작성법)
+- [로그](#로그)
+- [예시](#예시)
+- [고려사항(Things to Consider)](#고려사항things-to-consider)
+- [트러블슈팅](#트러블슈팅)
+- [보안](#보안)
+- [기여 및 개발](#기여-및-개발)
+- [GitHub Topics](#github-topics)
+
+---
+
+## Ralph를 쓰는 이유
+
+| 기능 | 의미 |
+|---|---|
+| **기본 병렬** | 독립 기능들이 격리된 git worktree에서 동시에 실행됨 — 수동 오케스트레이션 불필요. |
+| **의존성 인지** | `dependsOn` 기반 위상 정렬 DAG가 스케줄링을 결정 — 의존하는 task는 대기, 형제 task는 병렬화. |
+| **검증 게이트** | `verification.command`의 exit code가 ground truth. Claude의 self-report는 무시. 기본 self-fix 1회 재시도. |
+| **충돌 전략 chain** | `auto-theirs` 시도 → `claude` fallback → `abort` fallback. 프로젝트별 설정 가능. |
+| **비용 예산** | `--budget-usd` 하드 상한 + 80% 경고. 호출별 토큰 사용량은 append-only ledger로 기록. |
+| **머지 후 smoke test** | 각 배치 머지 후 base 브랜치에서 단일 명령 실행 — auto-merge로 살아남은 semantic 충돌을 잡는다. |
+| **재개 안전** | `done: true`는 task별 atomic write — 재실행 시 정확히 중단점부터 이어진다. |
+| **Plan 비평** | 정적 `--critique`가 병렬화/검증 누락을 진단. 선택적 `--llm-critique`는 PRD vs plan을 LLM이 한 번 더 검토. |
+| **단일 self-contained 바이너리** | 대상 머신에 .NET 런타임 설치 불필요. 스키마와 가격표가 바이너리에 임베드됨. |
 
 ## ⚠️ 보안 주의
 
-Ralph는 호스트 머신에서 Claude Code를 직접 실행한다. 신뢰할 수 없는 PRD나 외부 `tasks.json` 파일은 격리된 환경(별도 사용자 계정, VM 또는 컨테이너)에서 실행해야 한다. 다음과 같은 정보가 노출될 수 있다:
+Ralph는 호스트 머신에서 Claude Code를 `--dangerously-skip-permissions`로 직접 실행한다. 신뢰할 수 없는 PRD나 외부 `tasks.json` 파일은 격리된 환경(별도 사용자 계정, VM 또는 컨테이너)에서 실행해야 한다. 다음과 같은 정보가 노출될 수 있다:
 
 - `~/.ssh`, `~/.aws`, `~/.config` 내 자격 증명
 - 환경변수에 저장된 API 키
 - 호스트의 모든 파일에 대한 읽기 권한
 
+`PlanValidator`가 declared `outputFiles` / `modifiedFiles`에 포함된 민감 경로를 경고하지만 이는 휴리스틱일 뿐 — sandbox가 아니다.
+
+## 다른 Ralph 구현체와의 비교
+
+| 기능 | snarktank/ralph | PageAI/ralph-loop | starlog/ralph |
+|---|---|---|---|
+| 병렬 실행 | ❌ | ❌ | ✅ |
+| Windows 지원 | ❌ | ❌ | ✅ |
+| DAG 의존성 | ❌ | 부분 지원 | ✅ |
+| 비용 추적 + 예산 게이트 | ❌ | ❌ | ✅ |
+| 검증 게이트 (exit code) | ❌ | ❌ | ✅ |
+| 머지 후 smoke test | ❌ | ❌ | ✅ |
+| Webhook 알림 | ❌ | ❌ | ✅ |
+| 단일 바이너리 | ❌ | ❌ | ✅ |
+
 ## 동작 원리
 
-Ralph는 기능 단위로 **4단계 패턴**을 따른다:
+Ralph는 기능 단위로 **4단계 패턴**을 따른다 (`workflow.categories`로 변경 가능):
 
 ```
 plan → implementation → testing → commit
 ```
 
-각 기능(feature)마다 위 4개의 태스크가 생성되며, 의존성 체인으로 연결되어 순서가 보장된다. 독립적인 기능들은 git worktree 기반으로 **병렬 실행**된다.
+한 기능 안의 4단계는 `dependsOn`으로 항상 직렬화된다. 독립적인 기능들은 git worktree 기반으로 **병렬 실행**되고 다시 base 브랜치로 머지된다.
 
 ```
 user-auth-plan ─→ user-auth-impl ─→ user-auth-test ─→ user-auth-commit ─┐
                                                                           ├─→ main-plan ─→ ...
 payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit ──────────┘
-  (병렬 실행)                                                    (병합 후 순차)
+   (병렬 실행)                                                  (머지 후 순차)
 ```
 
 ## 사례 연구 — Ralph가 자기 자신을 고치다
@@ -53,14 +119,14 @@ Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들�
 | v0.6 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 병렬 실행, worktree, live log |
 | v0.7 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `--graph` 태스크 의존성 그래프 |
 | v1.0 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 비용 추적, 플랜 검증, prompt builder, webhook 알림, 로그 로테이션 |
-| v1.1 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 검증 게이트, 충돌 전략 chain, `--task-timeout`, `--budget-usd`, `--strict-files`, 머지 직전 worktree rebase |
+| v1.1 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 검증 게이트, 충돌 전략 chain, 머지 후 smoke test, `--task-timeout`, `--budget-usd`, `--strict-files`, `--shared-worktrees`, `--critique` / `--llm-critique`, 머지 직전 worktree rebase |
 
 ## 필수 의존성
 
 | 도구 | 설명 |
 |---|---|
 | [Claude Code](https://claude.ai/code) | Claude Code CLI |
-| [git](https://git-scm.com/) | 버전 관리 (worktree 기반 병렬 실행에 필요) |
+| [git](https://git-scm.com/) | 버전 관리 (worktree 기반 병렬 실행에 필수, `--shared-worktrees` 사용 시 git 2.10+) |
 
 ## 설치
 
@@ -102,7 +168,7 @@ tar -xzf ralph-v1.1.0-linux-x64.tar.gz
 sudo mv ralph /usr/local/bin/
 ```
 
-바이너리는 자체 포함(self-contained)이므로 .NET 런타임 설치가 필요 없다.
+바이너리는 self-contained이므로 .NET 런타임이 필요 없다.
 
 ### 방법 3: 패키지 매니저
 
@@ -111,108 +177,114 @@ sudo mv ralph /usr/local/bin/
 brew tap starlog/ralph https://github.com/starlog/ralph
 brew install ralph
 
-# Windows — Scoop (custom manifest)
+# Windows — Scoop (커스텀 manifest)
 scoop install https://raw.githubusercontent.com/starlog/ralph/main/scoop/ralph.json
 ```
 
-매니페스트는 [`Formula/ralph.rb`](Formula/ralph.rb), [`scoop/ralph.json`](scoop/ralph.json)에 위치하며 최신 GitHub Release를 가리킨다.
+매니페스트는 [`Formula/ralph.rb`](Formula/ralph.rb)와 [`scoop/ralph.json`](scoop/ralph.json)에 있으며 최신 GitHub 릴리스를 추적한다.
 
-## 사용법
-
-### 기본 워크플로우
+## 빠른 시작
 
 ```bash
-# 1. PRD에서 작업 계획 생성 (atomic write)
+# 1. PRD에서 task plan 생성
 ralph --plan docs/PRD.md
 
-# 2. 생성된 플랜 검증 (cycle / dangling deps / 파일 충돌 등)
+# 2. (선택) 생성된 plan 비평
+ralph --critique                            # 정적 점검: 병렬화 / 검증 / 의존성 이상
+ralph --plan docs/PRD.md --llm-critique    # LLM 기반 추가 검토 (비용 발생)
+
+# 3. 생성된 plan 검증 (cycle, 의존성, 파일 중복, 민감 경로)
 ralph --validate
 
-# 3. 생성된 작업 확인
+# 4. 생성된 task 확인
 ralph --list
+ralph --graph
 
-# 4. 실행 미리보기 (실제 변경 없음)
+# 5. dry-run으로 미리보기 (실제 변경 없음)
 ralph --dry-run
 
-# 5. 전체 작업 자동 실행
+# 6. 전체 파이프라인 실행
 ralph --run
 ```
 
-### 전체 명령어
+## 명령어
 
-| 명령어 | 설명 |
+| 명령 | 설명 |
 |---|---|
-| `--plan <파일>` | PRD 파일을 분석하여 `tasks.json` 생성 (atomic write) |
-| `--plan-prompt <파일>` | 실제 실행 없이 plan 프롬프트 전체를 출력 |
-| `--validate` | `tasks.json` 검증 (cycle, dangling deps, 중복 ID, 파일 충돌, 민감 경로) |
-| `--run [파일]` | 모든 pending 작업 실행 (병렬 모드 기본). 파일 미지정 시 `tasks.json` 사용 |
-| `--dry-run [파일]` | 실행 시뮬레이션 (종료 시 `tasks.json` 자동 복원) |
-| `--task <id>` | 특정 작업 하나만 실행 (`--force`로 의존성 검사 우회) |
-| `--interactive` | 대화형 모드 — 각 작업마다 확인 후 실행 |
-| `--list`, `-l` | pending 작업 목록 출력 (병렬 실행 가능 여부 표시) |
-| `--graph`, `-g` | ASCII 태스크 의존성 그래프 출력 (병렬/순차 구조 시각화) |
-| `--prompts`, `-p` | 모든 작업의 Claude 프롬프트 출력 |
-| `--show-prompt <id>` | 특정 작업에 전송될 전체 프롬프트 출력 |
-| `--status`, `-s` | 진행 상황 대시보드 (병렬 배치 정보 포함) |
-| `--cost` | 누적 토큰 사용량 / 추정 USD 비용 출력 |
-| `--reset`, `-r` | 모든 작업을 pending으로 초기화 |
-| `--logs` | 로그 파일 목록 (세션 + 태스크) |
+| `--plan <file>` | PRD를 분석해 `tasks.json` 생성 (atomic write) |
+| `--plan-prompt <file>` | 실제 실행 없이 plan prompt 전체 출력 |
+| `--validate` | `tasks.json` 검증 (cycle, dangling deps, 중복 ID, 파일 중복, 민감 경로) |
+| `--critique` | `tasks.json` 정적 비평 (병렬화 / 검증 누락 / 의존성 이상) |
+| `--run [file]` | 모든 pending task 실행 (기본 병렬). 기본 `tasks.json` |
+| `--dry-run [file]` | 실행 시뮬레이션. 종료 시 `tasks.json` 복원 |
+| `--task <id>` | ID로 단일 태스크 실행 (의존성 무시는 `--force`) |
+| `--interactive` | 인터랙티브 모드 — 매 태스크 확인 |
+| `--list`, `-l` | pending task 목록 (병렬 가능 여부 표시) |
+| `--graph`, `-g` | ASCII 의존성 그래프 |
+| `--prompts`, `-p` | 모든 task의 Claude prompt 출력 |
+| `--show-prompt <id>` | 단일 task에 보낼 prompt 전체 출력 |
+| `--status`, `-s` | 진행 대시보드 (병렬 배치 정보 포함) |
+| `--cost` | 누적 토큰 사용량 + USD 추정 |
+| `--reset`, `-r` | 모든 task를 pending으로 리셋 |
+| `--logs` | 로그 파일 목록 (세션 + 태스크별) |
 | `--logs <task-id>` | 특정 태스크 로그 출력 |
-| `--logs --live <task-id>` | 태스크 로그 실시간 추적 (tail -f) |
-| `--logs --cleanup` | retention 기간을 지난 로그 삭제 |
-| `--worktree-cleanup` | 잔존 worktree 정리 |
-| `--help`, `-h` | 도움말 |
+| `--logs --live <task-id>` | 태스크 로그 라이브 tail (`tail -f`처럼) |
+| `--logs --cleanup` | 보존 기간 초과 로그 삭제 |
+| `--worktree-cleanup` | 남은 worktree 정리 |
+| `--help`, `-h` | 도움말 표시 |
 
 ### 실행 옵션
 
 | 옵션 | 설명 |
 |---|---|
-| `-f`, `--file <경로>` | 커스텀 tasks 파일 사용 (대부분 명령어와 호환) |
-| `--sequential` | 병렬 실행 비활성화, 순차 실행 강제 |
-| `--max-parallel N` | 최대 동시 실행 태스크 수 지정 |
-| `--force` | 의존성 / 검증 우회 (`--task` 또는 `--run`과 함께) |
-| `--strict-files` | 머지 후 declared `modifiedFiles` 외 파일 변경이 있으면 abort |
-| `--shared-worktrees` | `git worktree add --shared`로 `.git` objects를 공유해 디스크/IO 절약 (미지원 시 자동 fallback) |
-| `--budget-usd <amt>` | 누적 비용이 amt(USD) 도달 시 새 태스크 dispatch 중단 |
-| `--task-timeout <기간>` | Claude 호출당 timeout (예: `30m`, `1h`, `90s`, `1800`) — hang 방지 |
-| `--llm-critique` | `--plan` 직후 LLM 기반 PRD/plan 비평 1회 추가 실행 (기본 off, 추가 LLM 호출 비용) |
-| `--model <name>` | 모델 선택 (`sonnet`, `opus`; 기본: `opus`) |
-| `--debug` | Claude stream 이벤트 출력 |
+| `-f`, `--file <path>` | 커스텀 tasks 파일 (대부분 명령에서 동작) |
+| `--sequential` | 병렬 실행 비활성 — 한 번에 하나씩 |
+| `--max-parallel N` | 동시 실행 task 수 상한 |
+| `--force` | 의존성/검증 무시 (`--task` / `--run`과 함께) |
+| `--strict-files` | 머지 후 declared vs actual `modifiedFiles` 검증; undeclared 발견 시 중단 |
+| `--shared-worktrees` | `git worktree add --shared`로 `.git` objects 공유 (디스크/IO 절약, 미지원 시 자동 fallback) |
+| `--no-smoke-test` | 머지 후 smoke test 건너뜀 (그렇지 않으면 자동 추론 또는 `workflow.smokeTest` 사용) |
+| `--budget-usd <amt>` | 누적 비용이 `<amt>` USD에 도달하면 새 task dispatch 중단 |
+| `--task-timeout <dur>` | per-Claude 호출 timeout (예: `30m`, `1h`, `90s`, `1800`) — 멈춘 호출 강제 종료 |
+| `--llm-critique` | `--plan` 직후 PRD + plan에 대한 LLM 기반 비평 1회 추가 (기본 off, 추가 비용) |
+| `--model <name>` | 모델: `sonnet` 또는 `opus` (기본: `opus`) |
+| `--debug` | Claude stream 이벤트 출력 (진단용) |
 
-### 커스텀 tasks.json 파일 사용
+### 커스텀 tasks.json
 
-두 가지 방법:
+기본 파일이 아닌 다른 파일을 가리키는 두 가지 방법:
 
 ```bash
-ralph --run my-project-tasks.json     # 위치 인자 (run/dry-run/list/graph 등)
+ralph --run my-project-tasks.json     # positional (run/dry-run/list/graph 등)
 ralph -f my-project-tasks.json --run  # 글로벌 -f / --file 플래그
 ```
 
-### 대화형 모드
+### 인터랙티브 모드
 
-`--interactive`로 실행하면 각 작업마다 선택지가 표시된다:
+`--interactive`는 각 태스크 전에 다음 선택지를 제공한다:
 
-- `Yes - Execute` — 실행
-- `Preview prompt` — 프롬프트 미리보기
-- `Skip` — 건너뛰기
+- `Yes - Execute` — 태스크 실행
+- `Preview prompt` — prompt만 보여주고 실행하지 않음
+- `Skip` — 이 태스크 건너뜀
 - `Quit` — 종료
 
-### 환경 변수
+## 환경변수
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `MAX_RETRIES` | 2 | Claude Code 실행 실패 시 재시도 횟수 |
-| `RETRY_DELAY` | 5 | 재시도 간 대기 시간 (초) |
-| `RALPH_MAX_PARALLEL` | 0 (tasks.json 설정 사용) | 최대 동시 실행 태스크 수 오버라이드 |
-| `RALPH_PARALLEL` | true | `false`로 설정 시 병렬 실행 비활성화 |
-| `RALPH_STRICT_FILES` | false | `true`로 설정 시 `--strict-files` 기본 활성화 |
-| `RALPH_SHARED_WORKTREES` | false | `true`로 설정 시 `--shared-worktrees` 기본 활성화 |
-| `RALPH_BUDGET_USD` | (없음) | 누적 비용 임계값 — CLI `--budget-usd`가 우선 |
-| `RALPH_TASK_TIMEOUT_SEC` | (없음) | Claude 호출당 timeout(초) — CLI `--task-timeout`가 우선 |
-| `RALPH_WEBHOOK_URL` | (없음) | 세션 종료 webhook 기본 URL |
-| `RALPH_LOG_RETENTION_DAYS` | 30 | N일보다 오래된 로그 자동 삭제 |
+| `MAX_RETRIES` | 2 | Claude Code 호출 재시도 횟수 |
+| `RETRY_DELAY` | 5 | 재시도 간 대기(초) |
+| `RALPH_MAX_PARALLEL` | 0 (tasks.json 사용) | 동시 실행 task 수 오버라이드 |
+| `RALPH_PARALLEL` | true | `false`면 병렬 비활성 |
+| `RALPH_STRICT_FILES` | false | `true`면 `--strict-files` 기본 활성화 |
+| `RALPH_SHARED_WORKTREES` | false | `true`면 `--shared-worktrees` 기본 활성화 |
+| `RALPH_NO_SMOKE_TEST` | false | `true`/`1`이면 머지 후 smoke test 비활성 |
+| `RALPH_BUDGET_USD` | unset | 누적 비용 상한 — CLI `--budget-usd` 우선 |
+| `RALPH_TASK_TIMEOUT_SEC` | unset | per-Claude 호출 timeout(초) — CLI `--task-timeout` 우선 |
+| `RALPH_WEBHOOK_URL` | unset | 세션 완료 webhook 기본값 |
+| `RALPH_LOG_RETENTION_DAYS` | 30 | N일 초과 로그 자동 삭제 |
 
-공유 설정의 우선순위: CLI 플래그 > 환경변수 > `tasks.json`의 `workflow` 설정 > 기본값.
+공통 설정의 우선순위: **CLI 플래그 > 환경변수 > `tasks.json`의 `workflow` 설정 > 내장 기본값.**
 
 ```bash
 # Linux/macOS
@@ -223,52 +295,152 @@ RALPH_TASK_TIMEOUT_SEC=1800 ralph --run
 
 # Windows (PowerShell)
 $env:MAX_RETRIES=3; ralph --run
-$env:RALPH_PARALLEL="false"; ralph --run    # 순차 실행 강제
+$env:RALPH_PARALLEL="false"; ralph --run    # 강제 순차 모드
 ```
 
-## 프로젝트 구조
+## 병렬 실행 흐름
+
+Ralph는 git worktree로 독립 task를 동시 실행한다. 의존성 그래프가 스케줄링을 결정 — `dependsOn`이 비어 있는 task는 모두 병렬 후보다.
 
 ```
-ralph/
-├── Ralph/                          # .NET 8 프로젝트 (v1.1)
-│   ├── Ralph.csproj                # 프로젝트 설정 (단일 파일, self-contained)
-│   ├── Program.cs                  # CLI 진입점 및 명령어 처리
-│   ├── Models/
-│   │   ├── TasksFile.cs            # tasks.json 모델 (TaskItem, SubTask, ParallelConfig 등)
-│   │   └── RalphJsonContext.cs     # JSON 소스 생성기 (IL 트리밍 호환)
-│   └── Services/
-│       ├── PlanGenerator.cs        # PRD → tasks.json 생성 (atomic write)
-│       ├── PlanValidator.cs        # tasks.json 무결성 검증
-│       ├── PromptBuilder.cs        # task 실행 프롬프트 조립
-│       ├── ClaudeService.cs        # Claude Code 프로세스 실행 / 스트리밍 / timeout
-│       ├── TaskManager.cs          # tasks.json 로드/저장/쿼리/의존성 DAG
-│       ├── ParallelExecutor.cs     # Worktree 기반 병렬 실행 엔진 + 충돌 chain
-│       ├── WorktreeService.cs      # Git worktree 생성/머지 직전 rebase/병합/정리
-│       ├── VerificationRunner.cs   # exit code 기반 외부 검증 + 1회 self-fix
-│       ├── CostTracker.cs          # token 사용량 / USD 비용 누적 (.ralph-logs/cost.jsonl)
-│       ├── BudgetGate.cs           # 누적 비용 임계값 게이트
-│       ├── NotificationService.cs  # Slack/Discord/generic webhook 세션 알림
-│       ├── LogRotator.cs           # 오래된 로그 정리 (cost.jsonl/validation.jsonl 보존)
-│       ├── DurationParser.cs       # "30m"/"1h"/"90s" 파서
-│       ├── GitService.cs           # Git 커밋, 초기 커밋 보장, 안전한 stdout/stderr 파이프
-│       ├── GraphRenderer.cs        # ASCII 태스크 의존성 그래프 렌더링
-│       ├── TaskProgressTracker.cs  # 병렬 실행 실시간 진행 상황 표시
-│       └── RalphLogger.cs          # thread-safe 파일 로거
-├── Ralph.Tests/                    # xUnit 테스트 프로젝트
-├── samples/                        # 예제 파일
-│   └── PRD.md                      # 병렬 실행 예제 PRD (CLI 계산기)
-├── install.sh                      # macOS/Linux 설치 스크립트
-├── install.ps1                     # Windows 설치 스크립트 (PowerShell)
-├── ralph.sh                        # (레거시) Bash 버전 v0.1
-├── ralph-schema.json               # JSON Schema (빌드 시 바이너리에 embed)
-├── pricing.json                    # 모델별 단가 (바이너리 embed; ~/.ralph/pricing.json로 override 가능)
-├── CLAUDE.md                       # Claude Code 가이드
-└── README.md
+ralph --run
 ```
+
+1. 최소 1개 commit 존재 확인 (worktree 생성 전제, 없으면 자동 초기 commit 생성).
+2. stale worktree 감지 및 정리.
+3. 위상 정렬로 ready task를 병렬 배치로 그룹화.
+4. task당 git worktree 생성 (`ralph/{taskId}` 브랜치, `.ralph-worktrees/` 아래). `--shared-worktrees` 시 공유.
+5. 각 worktree에서 Claude Code 동시 실행 (라이브 진행 대시보드).
+6. `verification.command` 정의 시 실행. 실패 시 `workflow.verifyRetries`까지 self-fix 재시도.
+7. 머지 직전 worktree 브랜치를 최신 base로 rebase (advance).
+8. (선택) declared `modifiedFiles`만 머지에 포함됐는지 검증 (`--strict-files`는 undeclared 발견 시 중단).
+9. 완료된 브랜치를 base 브랜치로 순차 머지.
+10. 머지 충돌은 `conflictStrategies` 체인으로 해결.
+11. `done: true` thread-safe 마킹, `tasks.json` atomic save, 변경 commit.
+12. base 브랜치에서 머지 후 smoke test 실행 (자동 추론 또는 `workflow.smokeTest`).
+13. 다음 배치(unblock된 task)로 진행.
+14. 마지막에 task가 1개 남으면 in-place 실행으로 fallback.
+
+## 실패 처리 및 재개
+
+병렬 배치가 부분 실패한 경우 동작:
+
+| 상황 | 동작 |
+|---|---|
+| 같은 배치 내 한 task에서 Claude 실패 | 다른 task들은 **정상 진행 + 머지**. 실패 task는 worktree 정리, `done` 플래그 false 유지. |
+| `verification.command` 실패 | `workflow.verifyRetries` (기본 1)까지 stdout/stderr를 context로 self-fix 재시도. 그래도 실패하면 task 실패 처리 + **머지에서 제외**. |
+| Pre-merge scope 위반 (`--strict-files`) | 머지 전에 worktree 빠르게 실패 — cleanup 비용 절약. 같은 배치의 다른 task는 영향 없음. |
+| 충돌 전략 chain으로도 해결 불가능한 머지 충돌 | 남은 미머지 worktree들은 정리. 이미 머지된 task는 **그대로 유지** (롤백 없음). |
+| 머지 후 `workflow.smokeTest` 실패 | non-zero exit로 ralph 종료. 머지는 revert되지 않으며 실패 내용은 로그 + 표시. |
+
+**중단 후 재개:**
+- `done: true`는 task 단위로 atomic write — `ralph --run`을 다시 실행하면 정확히 중단점부터 (오직 `done: false` task만 dispatch).
+- `--run` 시작 시 worktree에 uncommitted 변경 또는 base 대비 commit이 남아있으면 **조용히 삭제하지 않는다.** worktree 경로를 출력하고 사용자가 직접 머지/정리하거나 `ralph --worktree-cleanup`으로 강제 제거하도록 안내.
+- 작업이 사라지지 않은 깔끔한 stale worktree는 자동 제거.
+
+**이미 머지된 task는 자동 롤백되지 않는다.** Ralph 설계상 머지가 commit point — 되돌리려면 사람이 `git revert` / `git reset`을 실행해야 한다. 머지가 영구화되기 전에 문제를 잡으려면 `--strict-files`와 `workflow.smokeTest`를 활용.
+
+## 충돌 해결 전략
+
+`tasks.json`의 `workflow.parallel.conflictStrategies` (체인) 또는 legacy `workflow.parallel.conflictStrategy` (단일)로 설정. 체인은 **순서대로 시도하는 fallback list** — 첫 항목은 초기 머지 `-X` 플래그(`auto-*`용)를 결정하고, 나머지 항목은 직전 단계 실패 시 차례로 시도된다.
+
+| 전략 | 동작 |
+|---|---|
+| `claude` | Claude Code가 충돌 마커를 분석해 양쪽을 통합 (체인 마지막에 두는 것을 권장) |
+| `abort` | 머지를 중단하고 task를 순차 모드로 재실행 |
+| `auto-theirs` | git `-X theirs` — worktree 브랜치 변경을 우선 |
+| `auto-ours` | git `-X ours` — base 브랜치 변경을 우선 |
+
+예시 — 사소한 충돌은 `-X theirs`로 자동, `-X theirs`로 못 푸는 경우(add/add, rename/delete)만 Claude로 escalate:
+
+```json
+"conflictStrategies": ["auto-theirs", "claude"]
+```
+
+Claude 해결 후에는 `git diff --check --cached`로 staged 영역에 충돌 마커가 남아있지 않은지 한 번 더 확인한다.
+
+## 검증 게이트(Verification Gate)
+
+각 task는 `verification.command`를 선언할 수 있고, exit code가 ground truth가 된다 — Claude의 self-report는 무시. non-zero exit 시 stdout/stderr를 context로 Claude에게 self-fix 재시도를 요청 (횟수: `workflow.verifyRetries`, 기본 1).
+
+```json
+{
+  "id": "math-impl",
+  "verification": { "command": "go test ./...", "timeoutSec": 120 }
+}
+```
+
+명령은 task의 작업 디렉토리(병렬은 worktree, 순차는 repo 루트)에서 POSIX `/bin/sh -c` 또는 Windows `cmd /c`로 실행된다. 모든 시도는 `.ralph-logs/validation.jsonl`에 기록.
+
+자주 쓰는 명령: `pytest tests/`, `go test ./...`, `tsc --noEmit`, `dotnet test`, `npm test --silent`, `cargo test --quiet`.
+
+## Smoke Test (머지 후)
+
+매 병렬 배치 머지 완료 후, Ralph는 base 브랜치에서 **단 한 번** smoke test를 실행해 auto-merge 또는 Claude 해결로도 살아남은 semantic 충돌을 잡는다.
+
+우선순위:
+
+1. `--no-smoke-test` / `RALPH_NO_SMOKE_TEST=true` — 완전 비활성.
+2. `tasks.json`의 명시적 `workflow.smokeTest`.
+3. repo 루트 marker로 자동 추론:
+   - `*.csproj` / `*.sln` → `dotnet build -nologo`
+   - `package.json` → `npm test --silent`
+   - `Cargo.toml` → `cargo build --quiet`
+   - `go.mod` → `go build ./...`
+4. marker 없음 → smoke test 자동 스킵.
+
+실패 시 ralph는 non-zero exit로 종료. 머지는 revert되지 않는다.
+
+```json
+"workflow": {
+  "smokeTest": { "command": "dotnet build", "timeoutSec": 180 }
+}
+```
+
+## 비용 추적 및 예산 게이트
+
+Claude `stream-json`의 `result` 이벤트에서 호출별 사용량을 `.ralph-logs/cost.jsonl`에 기록 (로그 로테이션에서 보존). `--budget-usd <amt>` (또는 `RALPH_BUDGET_USD`)는 누적 비용이 상한에 도달하면 새 dispatch를 차단하고, 80%에 1회 경고를 띄운다.
+
+```bash
+ralph --cost                            # 누적 토큰 + USD 출력
+ralph --run --budget-usd 5.00           # $5 도달 시 새 dispatch 중단
+```
+
+가격은 임베드된 `pricing.json`에서 로드되며 `~/.ralph/pricing.json`으로 오버라이드 가능.
+
+예산 게이트는 **이미 실행 중인 task를 중단시키지 않는다** — 새 dispatch만 막으므로 이미 시작된 task의 비용만큼 초과 가능.
+
+## Webhook 알림
+
+세션 종료 시 webhook 1회 발송. 우선순위:
+
+1. `tasks.json`의 `workflow.notifications.onComplete` / `onFailure`
+2. `RALPH_WEBHOOK_URL` 환경변수 (글로벌 fallback)
+
+`format`은 hostname으로 자동 감지(`hooks.slack.com` → Slack, `discord(app)?.com` → Discord, 그 외 → `generic`)되고 `workflow.notifications.format`으로 강제 가능.
+
+Slack은 `{text, blocks}`, Discord는 `{content, embeds}`, `generic`은 Ralph의 구조화 JSON.
+
+## 실시간 모니터링
+
+병렬 실행 중 다른 터미널에서 task 로그 라이브 tail:
+
+```bash
+# 터미널 1: 실행
+ralph --run
+
+# 터미널 2: 한 task 라이브 tail
+ralph --logs --live add-impl
+
+# 터미널 3: 다른 task 라이브 tail
+ralph --logs --live subtract-impl
+```
+
+메인 `--run` 콘솔에는 Spectre.Console 라이브 테이블로 worktree별 상태/경과 시간/현재 Claude phase가 표시된다.
 
 ## tasks.json 구조
 
-`ralph --plan`으로 자동 생성되거나 직접 작성할 수 있다. 스키마는 `ralph-schema.json`에 정의되어 있고 바이너리에 embed된다.
+`tasks.json`은 `ralph --plan`이 생성하거나 직접 작성한다. 전체 스키마는 `ralph-schema.json`에 정의되어 있으며 바이너리에 임베드되어 있다.
 
 ### 최소 예시
 
@@ -279,23 +451,38 @@ ralph/
   "tasks": [
     {
       "id": "setup-plan",
-      "title": "프로젝트 초기 설정 계획",
+      "title": "Project setup plan",
       "done": false,
       "phase": "phase1-setup",
       "category": "plan",
-      "prompt": "프로젝트 구조를 분석하고 초기 설정 계획을 수립하세요...",
+      "prompt": "Analyze the project structure and draft a setup plan...",
       "outputFiles": ["docs/setup-plan.md"]
     }
   ]
 }
 ```
 
-### 전체 구조
+### Task 객체
+
+| 필드 | 필수 | 타입 | 설명 |
+|---|---|---|---|
+| `id` | **yes** | string | kebab-case 고유 ID (`^[a-zA-Z0-9_-]+$`) |
+| `title` | **yes** | string | task 제목 (≤ 200자) |
+| `done` | **yes** | boolean | 완료 플래그 — 실행 후 자동으로 `true` |
+| `description` | | string | 상세 설명 |
+| `phase` | | string | 프로젝트 단계 (`"phase1"`, `"phase2"` 등) |
+| `category` | | string | 카테고리 (`"plan"`, `"implementation"`, `"testing"`, `"commit"` 또는 `workflow.categories`에 명시된 값) |
+| `prompt` | | string | Claude Code에 전달되는 prompt; 비어있으면 Claude 호출 생략 |
+| `outputFiles` | | string[] | 생성/수정 예상 파일 경로 |
+| `modifiedFiles` | | string[] | 이 task가 수정할 파일 — 병렬 충돌 감지 + `--strict-files`에 사용 |
+| `dependsOn` | | string[] | 선행 task ID 목록; 비어있으면 병렬 후보 |
+| `subtasks` | | array | 선택적 subtask |
+| `verification` | | object | `{ command, timeoutSec? }` — exit code 기반 검증 (위 [검증 게이트](#검증-게이트verification-gate) 참고) |
+
+## Workflow 설정
 
 ```json
 {
-  "projectName": "프로젝트 이름",
-  "version": "1.0.0",
   "workflow": {
     "onTaskComplete": {
       "commitChanges": true,
@@ -304,7 +491,8 @@ ralph/
     "parallel": {
       "enabled": true,
       "maxConcurrent": 5,
-      "conflictStrategies": ["auto-theirs", "claude"]
+      "conflictStrategies": ["auto-theirs", "claude"],
+      "sharedWorktreeObjects": false
     },
     "notifications": {
       "onComplete": "https://hooks.slack.com/services/XXX",
@@ -314,385 +502,265 @@ ralph/
     "budgetUsd": 10.00,
     "taskTimeoutSec": 1800,
     "maxRetries": 2,
-    "retryDelay": 5
-  },
-  "apiSpecs": { ... },
-  "samplePages": { ... },
-  "tasks": [ ... ]
-}
-```
-
-### task 객체
-
-| 속성 | 필수 | 타입 | 설명 |
-|---|---|---|---|
-| `id` | **필수** | string | 고유 ID. kebab-case (`^[a-zA-Z0-9_-]+$`) |
-| `title` | **필수** | string | 작업 제목 (최대 200자) |
-| `done` | **필수** | boolean | 완료 여부. 실행 시 자동으로 `true`로 변경 |
-| `description` | | string | 상세 설명 |
-| `phase` | | string | 프로젝트 단계 (예: `"phase1"`, `"phase2"`) |
-| `category` | | string | 카테고리 (예: `"plan"`, `"implementation"`, `"testing"`, `"commit"`) |
-| `prompt` | | string | Claude Code에 전달할 프롬프트. 없으면 Claude 실행 생략 |
-| `outputFiles` | | string[] | 생성/수정 예상 파일 경로 목록 |
-| `modifiedFiles` | | string[] | 수정 대상 파일. 병렬 실행 시 머지 충돌 감지와 `--strict-files` 검증에 사용 |
-| `dependsOn` | | string[] | 선행 작업 ID 배열. 모두 완료되어야 실행 가능. 없으면 병렬 실행 대상 |
-| `subtasks` | | array | 하위 작업 배열 |
-| `verification` | | object | `{ command, timeoutSec? }` — exit code 기반 외부 검증 (아래 검증 게이트 참고) |
-
-### subtask 객체
-
-| 속성 | 필수 | 타입 | 설명 |
-|---|---|---|---|
-| `id` | **필수** | string | 하위 작업 고유 ID |
-| `title` | **필수** | string | 하위 작업 제목 |
-| `done` | **필수** | boolean | 완료 여부 |
-| `prompt` | | string | 하위 작업 전용 프롬프트 |
-
-### workflow 설정
-
-| 설정 | 기본값 | 설명 |
-|---|---|---|
-| `onTaskComplete.commitChanges` | true | task 완료 후 자동 `git add -A && git commit` |
-| `onTaskComplete.commitMessageTemplate` | — | `{taskId}`, `{taskTitle}` 플레이스홀더 사용 가능 |
-| `parallel.enabled` | true | 병렬 실행 활성화 |
-| `parallel.maxConcurrent` | 5 | 최대 동시 실행 수 (상한 16) |
-| `parallel.conflictStrategy` | `"claude"` | 단일 전략 (legacy, `conflictStrategies`가 없을 때만 사용) |
-| `parallel.conflictStrategies` | (없음) | 충돌 fallback chain — 있으면 `conflictStrategy`보다 우선 |
-| `notifications.onComplete` / `onFailure` | (없음) | 세션 webhook URL |
-| `notifications.format` | auto | `generic` / `slack` / `discord` |
-| `logRetentionDays` | 30 | `.ralph-logs/`에서 N일보다 오래된 로그 자동 삭제 (cost/validation은 보존) |
-| `budgetUsd` | (없음) | 누적 비용 임계값 — CLI/env가 우선 |
-| `taskTimeoutSec` | (없음) | Claude 호출당 timeout — CLI/env가 우선 |
-| `maxRetries` | 2 | Claude 호출당 재시도 횟수 (env `MAX_RETRIES`가 우선) |
-| `retryDelay` | 5 | 재시도 간 대기 (env `RETRY_DELAY`가 우선) |
-
-### apiSpecs / samplePages
-
-작업 프롬프트에서 참조할 수 있는 보조 정보:
-
-```json
-{
-  "apiSpecs": {
-    "createUser": {
-      "method": "POST",
-      "endpoint": "/api/users",
-      "description": "사용자 생성 API",
-      "requestBody": { ... },
-      "responseBody": { ... }
-    }
-  },
-  "samplePages": {
-    "loginPage": {
-      "url": "/login",
-      "description": "로그인 페이지"
-    }
+    "retryDelay": 5,
+    "verifyRetries": 1,
+    "smokeTest": { "command": "dotnet build", "timeoutSec": 180 },
+    "categories": ["plan", "implementation", "testing", "commit"]
   }
 }
 ```
 
-## 병렬 실행
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| `parallel.enabled` | true | 병렬 실행 활성화 |
+| `parallel.maxConcurrent` | 5 | 최대 동시 task 수 (상한 10) |
+| `parallel.conflictStrategy` | `"claude"` | legacy 단일 전략 (`conflictStrategies` 미설정 시만 사용) |
+| `parallel.conflictStrategies` | (unset) | 순서 있는 fallback chain — `conflictStrategy`보다 우선 |
+| `parallel.sharedWorktreeObjects` | false | `git worktree add --shared` 사용 (git 2.10+ 필요) |
+| `notifications.onComplete` / `onFailure` | (unset) | 세션 webhook URL |
+| `notifications.format` | auto | `generic` / `slack` / `discord` |
+| `logRetentionDays` | 30 | `.ralph-logs/`의 오래된 로그 자동 삭제 (`cost.jsonl`, `validation.jsonl`은 보존) |
+| `budgetUsd` | (unset) | 누적 비용 상한 — CLI/env가 우선 |
+| `taskTimeoutSec` | (unset) | per-Claude 호출 timeout — CLI/env가 우선 |
+| `maxRetries` | 2 | Claude 호출당 재시도 (env `MAX_RETRIES` 우선) |
+| `retryDelay` | 5 | 재시도 간 대기(초) (env `RETRY_DELAY` 우선) |
+| `verifyRetries` | 1 | `verification.command` 실패 시 self-fix 재시도 (0이면 비활성) |
+| `smokeTest` | (unset → 자동 추론) | 머지 배치 후 base 브랜치에서 실행할 단일 명령 |
+| `categories` | `["plan","implementation","testing","commit"]` | `--plan`에서 사용할 기능별 stage 목록 오버라이드 |
 
-Ralph는 독립적인 태스크를 git worktree를 이용하여 병렬로 실행한다. 핵심은 **의존성 그래프** — `dependsOn`이 없는 태스크들은 동시에 실행할 수 있다.
+## 설계 노트 — 왜 `tasks.json`은 mutable + declarative 인가?
 
-### 동작 방식
+`tasks.json`은 두 역할을 동시에 한다:
 
-```
-ralph --run
-```
+- **Declarative** — 의도의 manifest다: 어떤 task가 있는지, 각 task가 무엇을 해야 하는지, 어떤 파일을 건드리는지, 무엇이 검증하는지, 서로 어떻게 의존하는지. `--plan`이 작성하고 사람이 손댈 수 있다.
+- **Mutable** — 실행 도중 Ralph 자신이 다시 쓴다: task별 `done: true` 플립, 배치마다 자동 commit, `--reset`이 다시 덮어쓴다.
 
-1. 의존성 DAG를 분석하여 즉시 실행 가능한 태스크들을 배치로 그룹화
-2. 태스크별 git worktree 생성 (`ralph/{taskId}` 브랜치, `.ralph-worktrees/` 디렉토리)
-3. 각 worktree에서 Claude Code를 동시에 실행 (실시간 진행 대시보드 표시)
-4. 정의된 경우 `verification.command` 실행 — 실패 시 1회 self-fix 재시도
-5. 머지 직전 worktree 브랜치를 최신 base로 rebase (advance)
-6. 완료된 브랜치를 순차적으로 base 브랜치에 병합
-7. 머지 충돌 시 `conflictStrategies` chain을 순서대로 시도
-8. (`--strict-files`) 머지 결과가 declared `modifiedFiles` 안에 들어오는지 검증
-9. 다음 배치로 진행 (새로 의존성이 충족된 태스크들)
-10. 단일 태스크만 남으면 worktree 없이 직접 실행
+이 두 역할을 **하나의 파일**에 합친 것은 의도된 trade-off다.
 
-### 병렬 실행을 위한 PRD 작성 가이드
+### 한 파일로 합친 장점
 
-`ralph --plan`이 병렬 실행에 최적화된 `tasks.json`을 생성하도록 하려면, PRD에서 **독립적인 기능을 명확히 분리**해야 한다.
+- **재개 안전이 자연스럽게 보장된다.** 상태가 spec과 같은 곳에 살기 때문에 `ralph --run`을 다시 실행하면 정확히 멈춘 자리에서 이어진다 (오직 `done: false` task만 dispatch). 동기화가 필요한 sidecar DB나 별도 state 디렉토리가 없다.
+- **단일 audit 가능 산출물.** `git log tasks.json`이 곧 실행 이력 — 무엇을 계획했고 무엇을 완료했고 언제 했는지가 한 줄로 보인다. PR에서 plan과 progress를 함께 리뷰할 수 있다.
+- **오프라인/이식성.** 조정 서비스가 필요 없다. 파일(과 repo)을 어디로든 복사하면 전체 파이프라인이 그대로 기술된다.
+- **모델이 단순하다.** "spec.json (immutable) + state.json (mutable)" 분리, 둘을 일치시키는 동기화 로직, drift 가능성이 모두 사라진다.
 
-#### 핵심 원칙
+### 그 대가로 잃는 것
 
-**독립적인 기능** = 서로 다른 파일을 수정하고, 서로의 코드를 참조하지 않는 기능
+- **실행 중 편집은 위험하다.** writer가 두 명(사용자 + Ralph)이라 race가 가능하다. Ralph는 atomic tmp+rename, `MarkTaskDone`을 둘러싼 in-process file lock, 머지 사이의 reload로 완화하지만 — `--run` 도중의 손편집은 피해야 한다.
+- **하나의 파일 안에 관심사가 섞인다.** "무엇을 해야 하는가"와 "이미 무엇이 완료됐는가"가 같은 스키마에 공존한다. 리뷰어는 의도와 진행을 분리해서 보아야 한다.
+- **`tasks.json` 자체의 머지 충돌.** 각 worktree가 자기 task의 `done` 플립으로 `tasks.json`을 건드릴 수 있다. Ralph는 머지 직전에 worktree의 `tasks.json`을 base 브랜치 기준으로 정규화해 완화하지만 충돌 표면이 0은 아니다.
+- **provenance가 흐려진다.** `--plan` (LLM)이 쓰고, 사람이 손대고, Ralph가 변형한다. 중간 commit이 없으면 "어떤 줄을 누가 썼는가"를 추적하기 어렵다.
+- **`--reset`은 파괴적이다.** 사람이 직접 손댄 같은 파일을 다시 덮어쓴다. version control이 안전망 역할을 한다.
 
-Ralph의 plan generator는 다음 규칙으로 의존성을 결정한다:
-- 같은 기능 내 4단계(plan→impl→test→commit)는 항상 순차적
-- **다른 기능 간 `dependsOn`이 없으면** → 병렬 실행 가능
-- **다른 기능의 결과물을 사용하면** → `dependsOn`으로 연결 (순차)
+### Ralph가 적용한 완화책
 
-#### 좋은 PRD 구조 (병렬 최대화)
+- **Atomic write** (`tmp + rename`) — crash가 와도 partial 파일이 절대 안 남는다.
+- **In-process lock** — 병렬 배치에서 task done 마킹 시 단일 직렬화.
+- **Pre-merge 정규화** — 각 worktree의 `tasks.json`을 머지 전에 base 기준으로 reset, 결과적으로 Ralph의 `done` 플립만 머지 commit에 포함된다.
+- **`--dry-run` try/finally** — preview 실행은 항상 원본 `tasks.json`을 복원한다.
+- **배치 단위 자동 commit** — `done: true` 플립이 즉시 commit되므로 crash가 와도 진행 기록이 사라지지 않는다.
 
-기능을 독립된 모듈로 나누고, 공유 기반(shared foundation)은 별도 phase로 분리한다:
+### 이 설계가 맞지 않는 경우
+
+엄격한 spec/state 분리가 필요하다면(예: plan에 서명해서 freeze하고 state는 다른 곳에 보관) `tasks.json`을 spec으로 version control에 두고 `--dry-run`을 read-only 점검으로만 사용하는 방식이 가능하다. Ralph의 mutation은 `done` 플래그 + 일부 subtask 플립에 한정되며, plan 생성 후에 prompt나 의존성을 다시 쓰지는 않는다.
+
+## 병렬 실행을 위한 PRD 작성법
+
+`ralph --plan`이 병렬 친화적인 `tasks.json`을 만들도록 하려면 PRD에서 **독립 기능을 명확히 분리**한다.
+
+**독립 기능** = 서로 다른 파일을 건드리고 다른 기능의 코드를 참조하지 않는다.
+
+plan generator가 의존성을 결정하는 규칙:
+- 한 기능 내부의 4단계(plan → impl → test → commit)는 항상 직렬
+- 출력이 겹치지 않는 두 기능 → 병렬 후보
+- 다른 기능의 출력에 의존하는 기능 → `dependsOn`으로 연결
+
+### 좋은 PRD 구조
+
+기능을 독립 모듈로 쪼개고 공유되는 토대는 별도 phase로 분리:
 
 ```markdown
 # PRD: 계산기 앱
 
-## Phase 1 — 연산 모듈 (각각 독립적, 병렬 실행 가능)
+## Phase 1 — 연산 모듈 (독립, 병렬 실행)
 
 ### 덧셈 모듈
-- `add.py` 파일에 add(a, b) 함수 구현
-- `tests/test_add.py`에 테스트 작성
+- `add.py`에 add(a, b) 구현
+- `tests/test_add.py`에 테스트 추가
 
 ### 뺄셈 모듈
-- `subtract.py` 파일에 subtract(a, b) 함수 구현
-- `tests/test_subtract.py`에 테스트 작성
+- `subtract.py`에 subtract(a, b) 구현
+- `tests/test_subtract.py`에 테스트 추가
 
-### 곱셈 모듈
-- `multiply.py` 파일에 multiply(a, b) 함수 구현
-- `tests/test_multiply.py`에 테스트 작성
+## Phase 2 — 메인 진입점 (Phase 1 이후)
 
-### 나눗셈 모듈
-- `divide.py` 파일에 divide(a, b) 함수 구현 (0 나누기 예외 처리)
-- `tests/test_divide.py`에 테스트 작성
+### CLI main
+- `main.py`에서 연산 모듈을 import해 CLI 노출
 
-## Phase 2 — 메인 진입점 (Phase 1 완료 후)
-
-### CLI 메인
-- `main.py`에서 위 4개 모듈을 import하여 CLI 인터페이스 구현
-- 모든 연산 모듈이 완료된 후 구현해야 함
-
-## Phase 3 — 통합 테스트 (Phase 2 완료 후)
-
-### 통합 테스트
-- 전체 시스템 통합 테스트 작성
+## Phase 3 — 통합 테스트 (Phase 2 이후)
 ```
 
-이렇게 작성하면 생성되는 실행 구조:
+병렬화를 유도하는 팁:
 
-```
-                    ┌─ add-plan → add-impl → add-test → add-commit ────────┐
-                    ├─ subtract-plan → subtract-impl → ... → subtract-commit ┤
-ralph --run ────────┤                                                        ├─→ main-plan → ... → main-commit ─→ integration-plan → ...
-                    ├─ multiply-plan → multiply-impl → ... → multiply-commit ┤
-                    └─ divide-plan → divide-impl → ... → divide-commit ─────┘
-                         (4개 동시 실행)                         (병합)            (순차)                     (순차)
-```
-
-#### PRD에서 병렬 실행을 유도하는 팁
-
-| 전략 | 설명 |
+| 전술 | 효과 |
 |---|---|
-| **파일 분리 명시** | 각 기능이 수정하는 파일을 PRD에 명시하면 `modifiedFiles`가 정확하게 생성됨 |
-| **Phase 분리** | 독립 기능은 같은 Phase에, 의존 기능은 다음 Phase에 배치 |
-| **"독립적", "병렬" 키워드** | PRD에 "각각 독립적으로 구현 가능" 같은 힌트를 추가 |
-| **공유 코드 최소화** | 공통 유틸리티는 첫 Phase에서 만들고, 이후 기능들이 의존하도록 구조화 |
-| **기능 간 의존 명시** | "X 모듈은 Y 완료 후 구현" 같은 의존 관계를 명확히 기술 |
+| **기능별로 정확한 파일 목록 명시** | plan generator가 정확한 `modifiedFiles`를 생성 |
+| **Phase 분리** | 같은 phase에 독립 기능, 다음 phase에 의존 기능 배치 |
+| **힌트 키워드** | PRD에 "독립적", "병렬 실행 가능" 같은 표현 사용 |
+| **공유 코드 최소화** | 공통 유틸을 첫 phase에 두고 나머지는 의존 |
+| **의존성을 명시적으로 기술** | "X 모듈은 Y에 의존" → 정확한 `dependsOn` |
 
-#### 나쁜 예 (병렬 불가)
-
-모든 기능이 같은 파일을 수정하거나, 의존 관계가 불명확한 경우:
-
-```markdown
-# 나쁜 PRD 예시
-## 기능 1: 사용자 인증
-- app.py에 로그인 기능 추가
-
-## 기능 2: 사용자 프로필
-- app.py에 프로필 기능 추가    ← 같은 파일! 병합 충돌 발생
-
-## 기능 3: 대시보드
-- app.py에 대시보드 기능 추가   ← 같은 파일! 병합 충돌 발생
-```
-
-→ 이 경우 Ralph가 `dependsOn`을 걸거나, 병렬 실행 후 머지 충돌이 발생한다.
-
-**개선:** 각 기능을 별도 파일/모듈로 분리하도록 PRD를 작성한다.
-
-### 실패 처리와 재개
-
-병렬 배치 일부가 실패했을 때 동작:
-
-| 상황 | 동작 |
-|---|---|
-| 배치 안 한 task의 Claude 실행 실패 | 같은 배치의 **다른 task는 계속 진행하고 머지**된다. 실패한 task의 worktree만 정리되고 `done` 플래그는 그대로 `false`. |
-| `verification.command` 실패 | 1회 self-fix 재시도 (`workflow.verifyRetries`로 횟수 조정 가능). 재시도도 실패하면 task 실패로 마킹되며 **머지에서 제외**. |
-| pre-commit scope 위반 (`--strict-files`) | 머지 전 worktree 단계에서 fail-fast — 정리 비용 절감. 같은 배치의 다른 task는 영향 없음. |
-| 전략 chain으로도 풀지 못한 머지 충돌 | 미머지 worktree만 정리되고 **이미 머지된 task는 그대로 유지**된다 (자동 rollback 없음). |
-| 머지 후 `workflow.smokeTest` 실패 | 종료 코드 1로 중단. 이미 머지된 변경은 되돌리지 않으며 실패가 로그·콘솔에 표시. |
-
-**중단 후 재개:**
-- `done: true`는 task 단위 atomic write이므로 `ralph --run`을 다시 실행하면 미완료(`done: false`)인 task만 dispatch된다 — 정확히 멈춘 지점부터 이어진다.
-- `--run` 시작 시 worktree에 uncommitted 변경 또는 base 위 커밋이 있으면 Ralph는 **자동으로 삭제하지 않는다**. worktree 경로를 보여주고 사용자가 머지/회수 또는 `ralph --worktree-cleanup`으로 강제 삭제하도록 안내한다.
-- 변경이 없는(clean) 잔존 worktree는 자동 정리.
-
-**이미 머지된 task는 자동으로 되돌리지 않는다.** 머지를 commit point로 보는 설계 — 되돌리려면 사용자가 직접 `git revert` / `git reset` 해야 한다. 머지가 영구화되기 전에 잡으려면 `--strict-files`와 `workflow.smokeTest`를 활용.
-
-**Smoke test는 opt-out.** `workflow.smokeTest`를 명시하지 않으면 Ralph가 repo root marker로 자동 추론한다 (`*.csproj`/`*.sln` → `dotnet build`, `package.json` → `npm test`, `Cargo.toml` → `cargo build`, `go.mod` → `go build`). 명시 지정된 `workflow.smokeTest`는 항상 우선한다. 완전히 비활성화하려면 `--no-smoke-test` 또는 `RALPH_NO_SMOKE_TEST=true`.
-
-### 충돌 해결 전략
-
-`workflow.parallel.conflictStrategies` (chain) 또는 legacy `workflow.parallel.conflictStrategy` (단일)에서 설정한다. chain은 **순서가 있는 fallback list** — 첫 항목이 초기 머지의 `-X` 플래그(auto-* 인 경우)를 결정하고, 머지 또는 직전 단계가 실패하면 나머지 항목을 순서대로 시도한다.
-
-| 전략 | 동작 |
-|---|---|
-| `claude` | Claude Code가 충돌 마커를 분석하여 양쪽 변경사항을 병합 (chain 종단으로 권장) |
-| `abort` | 병합 중단 후 해당 태스크를 순차 모드로 재실행 |
-| `auto-theirs` | git의 `-X theirs` — worktree 브랜치의 변경사항 우선 |
-| `auto-ours` | git의 `-X ours` — base 브랜치의 변경사항 우선 |
-
-예시 — 사소한 충돌은 `-X theirs`로 자동 머지하고, `-X theirs`가 해결할 수 없는 경우(add/add, rename/delete)에만 Claude로 escalate:
-
-```json
-"conflictStrategies": ["auto-theirs", "claude"]
-```
-
-### 검증 게이트 (verification)
-
-각 태스크에 `verification.command`를 정의하면, Ralph는 그 exit code를 ground truth로 본다 — Claude의 self-report는 무시한다. exit code가 0이 아니면 Ralph가 stdout/stderr를 Claude에게 다시 넘기고 **1회 self-fix retry**를 한 뒤 실패 처리한다.
-
-```json
-{
-  "id": "math-impl",
-  "verification": { "command": "go test ./...", "timeoutSec": 120 }
-}
-```
-
-흔히 쓰는 명령: `pytest tests/`, `go test ./...`, `tsc --noEmit`, `dotnet test`, `npm test --silent`, `cargo test --quiet`.
-
-### 비용 추적 / 예산 게이트
-
-Claude의 `stream-json` `result` 이벤트에 들어오는 호출별 토큰/비용 정보가 `.ralph-logs/cost.jsonl`에 누적 기록된다. `--budget-usd <amt>`(또는 `RALPH_BUDGET_USD`)를 지정하면 누적 비용이 임계값에 도달했을 때 새 dispatch를 중단하며, 80% 도달 시 1회 경고가 뜬다.
-
-```bash
-ralph --cost                            # 누적 토큰/USD 출력
-ralph --run --budget-usd 5.00           # $5 도달 시 새 태스크 중단
-```
-
-단가는 embed된 `pricing.json`에서 로드한다. `~/.ralph/pricing.json`을 두면 override.
-
-### Webhook 알림
-
-세션 종료 시 한 번 webhook을 보낸다. 우선순위:
-
-1. `workflow.notifications.onComplete` / `onFailure` (tasks.json)
-2. `RALPH_WEBHOOK_URL` 환경변수 (전역 fallback)
-
-`format`은 호스트명으로 자동 감지(`hooks.slack.com` → Slack, `discord(app)?.com` → Discord, 그 외 → generic)되며 `workflow.notifications.format`으로 강제 지정 가능하다.
-
-### `modifiedFiles`의 역할
-
-각 태스크의 `modifiedFiles` 필드는 해당 태스크가 수정할 파일 목록이다. PRD에서 파일 경로를 명시하면 plan generator가 이 필드를 정확하게 생성한다. `--strict-files` (또는 `RALPH_STRICT_FILES=true`)를 켜면 머지 후 declared 외 파일이 변경되어 있을 때 abort한다.
-
-```json
-{
-  "id": "add-impl",
-  "title": "덧셈 모듈 구현",
-  "modifiedFiles": ["add.py", "tests/test_add.py"],
-  "dependsOn": ["add-plan"]
-}
-```
-
-### 실시간 모니터링
-
-병렬 실행 중 다른 터미널에서 태스크 로그를 실시간으로 확인할 수 있다:
-
-```bash
-# 터미널 1: 실행
-ralph --run
-
-# 터미널 2: 특정 태스크 로그 실시간 추적
-ralph --logs --live add-impl     # Ctrl+C로 종료
-
-# 터미널 3: 다른 태스크 로그 추적
-ralph --logs --live subtract-impl
-```
-
-### 병렬 실행 확인
-
-```bash
-# 태스크 의존성 그래프 시각화
-ralph --graph
-
-# 병렬 배치 구조 미리보기
-ralph --status
-```
-
-## 의존성 관리
-
-`dependsOn`으로 작업 간 실행 순서를 제어한다. 선행 작업이 모두 `done: true`가 되어야 해당 작업이 실행 가능하며, **`dependsOn`이 없는 태스크들은 병렬 실행 대상**이 된다.
-
-```json
-{
-  "tasks": [
-    { "id": "auth-plan", "title": "인증 설계", "done": false },
-    { "id": "auth-impl", "title": "인증 구현", "done": false, "dependsOn": ["auth-plan"] },
-    { "id": "auth-test", "title": "인증 테스트", "done": false, "dependsOn": ["auth-impl"] },
-    { "id": "auth-commit", "title": "인증 커밋", "done": false, "dependsOn": ["auth-test"] },
-
-    { "id": "payment-plan", "title": "결제 설계", "done": false },
-    { "id": "payment-impl", "title": "결제 구현", "done": false, "dependsOn": ["payment-plan"] }
-  ]
-}
-```
-
-위 예시에서 `auth-plan`과 `payment-plan`은 `dependsOn`이 없으므로 동시에 실행된다.
-
-`ralph --task <id>`는 기본적으로 `dependsOn`을 검사하며, 미완료 의존성이 있으면 차단된다. `--force`로 우회할 수 있다.
+`ralph --plan` 후 `ralph --critique`로 결과 `tasks.json`에 대한 정적 리포트(병렬화 누락, verification 누락, 의존성 이상)를 받을 수 있다. `--plan` 시 `--llm-critique`를 추가하면 PRD vs plan에 대한 LLM 기반 검토도 수행한다.
 
 ## 로그
 
-실행 로그는 `.ralph-logs/` 디렉토리에 저장된다:
+실행 로그는 `.ralph-logs/`에 기록된다:
 
 ```
 .ralph-logs/
 ├── ralph-20260219-165209.log   # 세션 로그
-├── add-plan.log                # 태스크별 로그 (병렬 실행 시)
+├── add-plan.log                # task별 로그 (병렬 실행)
 ├── subtract-plan.log
 ├── multiply-plan.log
-├── cost.jsonl                  # 누적 토큰/비용 ledger (rotation 시 보존)
-└── validation.jsonl            # verification 명령 ledger (rotation 시 보존)
+├── cost.jsonl                  # 누적 토큰 사용량 / 비용 ledger (보존)
+└── validation.jsonl            # 검증 명령 ledger (보존)
 ```
 
 ```bash
-# 로그 파일 목록
-ralph --logs
-
-# 특정 태스크 로그 보기
-ralph --logs add-impl
-
-# 실시간 로그 추적 (병렬 실행 중 모니터링)
-ralph --logs --live add-impl
-
-# retention 기간을 지난 로그 삭제 (기본 30일)
-ralph --logs --cleanup
+ralph --logs                    # 로그 파일 목록
+ralph --logs add-impl           # 특정 task 로그 출력
+ralph --logs --live add-impl    # 라이브 tail
+ralph --logs --cleanup          # 보존 기간 초과 로그 삭제 (기본 30d)
 ```
 
-## 예제
+`cost.jsonl`과 `validation.jsonl`은 로그 로테이션에서도 보존되어 이력이 사라지지 않는다.
 
-`samples/` 디렉토리에 Ralph 사용 예제가 포함되어 있다.
+## 예시
 
-### samples/PRD.md — CLI 계산기
+`samples/PRD.md` — 작은 Python 계산기를 만드는 병렬 친화적 PRD:
 
-병렬 실행에 최적화된 PRD 예제. Python 사칙연산 계산기를 구현하며, 다음 구조를 보여준다:
-
-- **Phase 1** — 4개 연산 모듈(`add.py`, `subtract.py`, `multiply.py`, `divide.py`)이 각각 독립적이므로 **병렬 실행**
-- **Phase 2** — `main.py`가 4개 모듈을 모두 import하므로 Phase 1 완료 후 **순차 실행**
-- **Phase 3** — 통합 테스트, Phase 2 완료 후 실행
+- **Phase 1** — 연산 모듈 4개 (`add.py`, `subtract.py`, `multiply.py`, `divide.py`)가 병렬로 실행
+- **Phase 2** — `main.py`가 4개를 모두 import → Phase 1 이후 순차 실행
+- **Phase 3** — 통합 테스트, Phase 2 이후
 
 ```bash
-# 예제 실행 방법
 mkdir my-calculator && cd my-calculator
 cp /path/to/ralph/samples/PRD.md .
 
-ralph --plan PRD.md       # 24개 태스크 생성 (4개 병렬 시작점)
-ralph --validate          # 생성된 플랜 sanity check
+ralph --plan PRD.md       # 24 task (병렬 시작점 4개)
+ralph --validate          # 생성된 plan 점검
 ralph --status            # 병렬 배치 구조 확인
-ralph --run               # 실행 (Phase 1은 4개 동시, Phase 2~3은 순차)
+ralph --run               # Phase 1은 4-wide 병렬, Phase 2-3은 순차
 ```
 
-이 PRD의 핵심 포인트:
-- 각 모듈이 **별도 파일**을 수정하므로 머지 충돌 없이 병렬 실행 가능
-- Phase와 의존성을 **명시적으로 기술**하여 plan generator가 정확한 `dependsOn`을 생성
-- `"병렬 실행 가능"` 힌트를 PRD에 포함하여 병렬 구조 유도
+## 고려사항(Things to Consider)
+
+실제 repo에서 Ralph를 돌리기 전에 알아두어야 할 제약, 함정, 설계 선택의 비완결적 목록.
+
+### 저장소 상태
+
+- Ralph는 **commit이 최소 1개 있는 git 저장소**가 필요하다. 없으면 자동으로 초기 commit을 만든다.
+- worktree는 `.ralph-worktrees/{taskId}`, 해당 브랜치는 `ralph/{taskId}`로 생성된다. 아직 안 되어 있으면 `.gitignore`에 둘 다 추가하자.
+- 이전 실행에서 남은 `ralph/*` 브랜치는 감지되어 (깨끗하면) 자동 제거된다. **`ralph/*` 브랜치에 uncommitted 변경이나 미머지 commit이 있으면 Ralph는 중단하고 사용자에게 처리를 맡긴다** — 작업을 조용히 파괴하지 않는다.
+
+### 동시성
+
+- 기본 `maxConcurrent`는 **5**이고 상한은 **10**이다. 더 큰 값을 줘도 잘리는데, 대부분의 repo는 CPU보다 디스크/IO나 Claude API rate limit에 먼저 부딪히기 때문.
+- `--max-parallel N`은 `tasks.json` 포함 모든 설정을 오버라이드한다.
+- `--shared-worktrees`는 worktree가 많을 때 디스크와 `.git` IO를 절약하지만 git 2.10+가 필요하다 — 미지원이면 자동 fallback.
+
+### 머지
+
+- 머지는 배치 내 모든 task가 끝난 **후 순차** 진행. 첫 머지가 base 브랜치를 advance시켜 뒤따르는 worktree들의 base가 바뀐다 — Ralph는 각 worktree를 머지 직전에 새 base로 rebase해 후행 충돌을 줄인다.
+- 충돌 전략 chain은 순서대로 실행된다. 첫 항목은 초기 `git merge -X` 플래그(`auto-*`용), 이후 항목은 직전 단계 실패 시에만 시도된다. 해결 불가 케이스가 조용히 실패하지 않도록 chain은 항상 `claude` 또는 `abort`로 끝내는 것이 안전.
+- `--strict-files`는 **undeclared write**만 잡는다 — declared 파일이 모두 수정됐음을 보장하진 않는다. 그건 verification gate나 smoke test의 몫.
+
+### 비용
+
+- 예산 게이트(`--budget-usd`)는 **이미 실행 중인 task를 죽이지 않는다** — 새 dispatch만 막으므로 이미 실행 중이던 task의 비용만큼 초과 가능.
+- 비용은 Claude가 보고하는 토큰 사용량과 `pricing.json`으로 계산된다. pricing에 모델이 없으면 USD 0으로 기록된다.
+- `--llm-critique`는 `--plan`마다 **추가 Claude 호출 1회**가 발생하며 기본은 off.
+
+### 검증 & smoke test
+
+- 검증 명령은 task의 작업 디렉토리에서 실행된다. 그 디렉토리에서 도구(pytest, dotnet 등)가 사용 가능해야 한다 — worktree는 repo 상태는 상속하지만 셸 alias는 상속하지 않는다.
+- `verifyRetries`는 기본 **1**. flaky 테스트라면 토큰 비용을 감수하고 늘리고, 빠르게 실패하길 원하면 `0`.
+- 머지 후 smoke test는 **opt-out**, opt-in이 아니다. 원치 않으면 `--no-smoke-test` (또는 `RALPH_NO_SMOKE_TEST=true`); 그렇지 않으면 일반 빌드 시스템에 대해 자동 추론된다. 명시적 `workflow.smokeTest`가 항상 우선.
+
+### 민감 경로
+
+- `PlanValidator`는 declared 경로가 `.env`, `*.pem`, `*.key`, `credentials.json`, `id_rsa`, `id_ed25519` 등에 매칭되면 경고하고, auto-commit 단계에서 제외한다.
+- 이는 **best-effort 휴리스틱이지 sandbox가 아니다.** 신뢰할 수 없는 PRD는 호스트 사용자 권한으로 어떤 파일이든 읽고 쓰도록 Claude에게 지시할 수 있다. 신뢰할 수 없는 plan은 실제 자격증명이 없는 VM/컨테이너에서 실행하라.
+
+### 결정성(Determinism)
+
+- Plan 생성은 비결정적(LLM 출력)이다. 같은 PRD에 대해 `ralph --plan`을 두 번 돌리면 약간 다른 `tasks.json`이 나올 수 있다. 재현성이 필요하면 생성된 plan을 version control에 고정하자.
+- `--run` 안의 Claude 실행 역시 비결정적이다. 파이프라인의 신뢰도는 **검증 게이트**가 만든다 — 약한 검증 = 약한 실행.
+
+### 플랫폼 노트
+
+- self-contained 바이너리는 `win-x64`, `osx-x64`, `osx-arm64`, `linux-x64`로 제공된다. 그 외 플랫폼은 `install.sh` / `install.ps1`로 소스에서 빌드.
+- 검증 명령은 POSIX는 `/bin/sh -c`, Windows는 `cmd /c`로 실행된다. 크로스플랫폼 셸 기능(예: POSIX 전용 redirection)은 균일하게 동작하지 않는다.
+- ANSI/Spectre.Console 출력은 UTF-8 콘솔을 가정 — Windows cmd.exe 사용자는 `chcp 65001`이나 Windows Terminal 사용을 권장.
+
+## 트러블슈팅
+
+| 증상 | 원인 / 해결 |
+|---|---|
+| `Error: claude not found` | Claude Code CLI(`https://claude.ai/code`) 설치 후 PATH에 등록. |
+| `Error: git not found` | git 2.10+ 설치. worktree 기반 병렬 실행에 필수. |
+| 실행이 시작되자마자 "no pending tasks"로 종료 | 모든 task가 `done: true`. `ralph --reset` 또는 `tasks.json` 직접 수정. |
+| worktree 생성이 "already exists"로 실패 | 이전 실행에서 남은 worktree. `ralph --worktree-cleanup` (또는 `.ralph-worktrees/{taskId}` 제거 후 `git worktree prune`). |
+| 브랜치에 uncommitted 변경이 있어 worktree 차단 | 내용 확인 후 직접 commit/머지하거나 `ralph --worktree-cleanup`으로 강제 제거. |
+| Claude 호출이 무한히 멈춤 | `--task-timeout 30m` 등 적절한 값 설정. timeout 시 process tree 강제 종료. |
+| `--budget-usd` 초과 사용 | 정상 — 게이트는 새 dispatch만 막고 in-flight는 못 막는다. 더 타이트하게 막으려면 `maxConcurrent`를 낮추자. |
+| 첫 배치 smoke test 실패 | `.ralph-logs/` 확인. 머지 결과를 직접 수정(자동 롤백 없음)하거나, `workflow.smokeTest`를 더 타게팅된 명령으로 바꾸거나, 반복 작업 중에는 `--no-smoke-test`. |
+| 실행 도중 `tasks.json`을 변경했음 | Ralph는 머지 사이에 `tasks.json`을 reload하지만, `--run` 활성 중에는 직접 수정하지 말 것. 깨끗한 상태가 필요하면 `--reset`. |
+| 검증이 계속 재시도됨 | `workflow.verifyRetries`를 낮추자(0이면 즉시 실패). 실제 명령 출력은 `validation.jsonl` 참고. |
 
 ## 보안
 
-커밋 시 다음 패턴의 파일은 자동으로 제외되며 `--validate`에서 경고된다:
+다음 파일 패턴은 auto-commit에서 자동 제외되며 `--validate`에서 경고된다:
 
 `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `credentials.json`, `service-account*.json`, `.secret*`, `*.secrets`, `id_rsa`, `id_ed25519`
 
-제외된 민감 파일이 감지되면 경고 메시지가 출력된다.
+민감 파일이 감지되면 Ralph는 경고를 띄운다. **이 점검은 방어선이 아니라 tripwire로 다뤄야 한다 — Claude는 `--dangerously-skip-permissions`로 실행되며 호스트 사용자가 읽을 수 있는 모든 것을 읽을 수 있다.** 신뢰할 수 없는 plan은 격리 환경에서 실행하라.
+
+## 기여 및 개발
+
+```bash
+# 빌드
+dotnet build ralph.sln
+
+# 테스트
+dotnet test ralph.sln
+
+# 현재 OS용 self-contained 바이너리 publish
+dotnet publish Ralph/Ralph.csproj -c Release -r osx-arm64 --self-contained true
+
+# 릴리스 스크립트 (gh CLI 사용)
+./release-binary.sh v1.1.0
+```
+
+repo 레이아웃:
+
+- `Ralph/` — 메인 프로젝트 (Program.cs + Commands/ + Services/ + Models/).
+- `Ralph.Tests/` — xUnit 테스트 프로젝트.
+- `ralph-schema.json`, `pricing.json` — 임베드 리소스.
+- `samples/PRD.md` — 계산기 데모용 예시 PRD.
+- `bugfix.md`, `enhance1.md` — Ralph로 Ralph를 빌드한 과정에서 사용한 historical PRD.
+
+LLM 기여자를 위한 서비스 단위 아키텍처 맵은 `CLAUDE.md` 참고.
+
+## GitHub Topics
+
+이 저장소를 fork해서 운영한다면 검색성을 위해 다음 GitHub topic을 추가하자. Topic은 저장소 소유자가 GitHub 웹 UI에서 직접 설정해야 한다 (저장소 홈의 "About" 섹션 톱니바퀴 → "Topics" 필드):
+
+- `ralph-loop`
+- `agentic-ai`
+- `ai-coding`
+- `prd`
+- `task-orchestrator`
+- `claude-code`
+- `autonomous-agent`
+- `parallel-execution`
