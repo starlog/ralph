@@ -168,6 +168,7 @@ ralph --run
 | `--max-parallel N` | Cap the number of concurrent tasks |
 | `--force` | Bypass dependency / validation checks (with `--task` or `--run`) |
 | `--strict-files` | Validate declared vs actual `modifiedFiles` after merge; abort on undeclared writes |
+| `--shared-worktrees` | Use `git worktree add --shared` to share `.git` objects across worktrees (saves disk/IO; falls back if unsupported) |
 | `--budget-usd <amt>` | Stop dispatching new tasks once cumulative cost reaches `<amt>` USD |
 | `--task-timeout <dur>` | Per-Claude-call timeout (e.g. `30m`, `1h`, `90s`, `1800`) — kills hung calls |
 | `--model <name>` | Model: `sonnet` or `opus` (default: `opus`) |
@@ -200,6 +201,7 @@ ralph -f my-project-tasks.json --run  # global -f / --file flag
 | `RALPH_MAX_PARALLEL` | 0 (use tasks.json) | Override the maximum number of concurrent tasks |
 | `RALPH_PARALLEL` | true | Set to `false` to disable parallel execution |
 | `RALPH_STRICT_FILES` | false | Set to `true` to enable `--strict-files` by default |
+| `RALPH_SHARED_WORKTREES` | false | Set to `true` to enable `--shared-worktrees` by default |
 | `RALPH_BUDGET_USD` | unset | Cumulative cost ceiling — CLI `--budget-usd` wins |
 | `RALPH_TASK_TIMEOUT_SEC` | unset | Per-Claude-call timeout (seconds) — CLI `--task-timeout` wins |
 | `RALPH_WEBHOOK_URL` | unset | Default session-completion webhook |

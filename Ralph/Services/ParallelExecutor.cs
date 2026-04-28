@@ -13,6 +13,7 @@ public class ParallelExecutor
     private readonly string _tasksFile;
     private readonly string? _model;
     private readonly bool _strictFiles;
+    private readonly bool _sharedWorktrees;
     private readonly CostTracker _cost;
     private readonly BudgetGate _budgetGate;
     private readonly VerificationRunner _verifier = new();
@@ -34,7 +35,8 @@ public class ParallelExecutor
         TaskManager taskManager, IAgentRunner claude, GitService git,
         WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
         bool strictFiles = false, double? budgetUsd = null,
-        CostTracker? cost = null, BudgetGate? budgetGate = null)
+        CostTracker? cost = null, BudgetGate? budgetGate = null,
+        bool sharedWorktrees = false)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -44,6 +46,7 @@ public class ParallelExecutor
         _tasksFile = tasksFile;
         _model = model;
         _strictFiles = strictFiles;
+        _sharedWorktrees = sharedWorktrees;
         _cost = cost ?? new CostTracker();
         _budgetGate = budgetGate ?? new BudgetGate(budgetUsd, _cost, logger);
     }
@@ -228,7 +231,8 @@ public class ParallelExecutor
 
             foreach (var taskId in taskIds)
             {
-                var path = await _worktree.CreateWorktreeAsync(taskId, baseBranch, _logger, ct);
+                var path = await _worktree.CreateWorktreeAsync(
+                    taskId, baseBranch, _logger, sharedObjects: _sharedWorktrees, ct: ct);
                 worktrees[taskId] = path;
 
                 var logFile = Path.GetFullPath(Path.Combine(logDir, $"{taskId}.log"));

@@ -62,9 +62,12 @@ public class WorktreeService
 
     /// <summary>
     /// 태스크를 위한 git worktree를 생성합니다.
+    /// sharedObjects=true이면 `git worktree add --shared`로 .git objects를 공유해 디스크/IO를 절약합니다.
+    /// 일부 환경(오래된 git 또는 비표준 빌드)은 `--shared`를 모를 수 있어, 첫 시도 실패 시 `--shared` 없이 한 번 더 시도합니다.
     /// </summary>
     public async Task<string> CreateWorktreeAsync(
-        string taskId, string baseBranch, RalphLogger? logger = null, CancellationToken ct = default)
+        string taskId, string baseBranch, RalphLogger? logger = null,
+        bool sharedObjects = false, CancellationToken ct = default)
     {
         var branchName = $"ralph/{taskId}";
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
@@ -82,14 +85,31 @@ public class WorktreeService
         await _git.RunAsync(["worktree", "prune"], ct: ct);
         await _git.RunAsync(["branch", "-D", branchName], ct: ct);
 
-        // git worktree add -b ralph/{taskId} .ralph-worktrees/{taskId} {baseBranch}
-        var (exitCode, output) = await _git.RunAsync(
-            ["worktree", "add", "-b", branchName, worktreePath, baseBranch], ct: ct);
+        // git worktree add [--shared] -b ralph/{taskId} .ralph-worktrees/{taskId} {baseBranch}
+        int exitCode;
+        string output;
+        if (sharedObjects)
+        {
+            (exitCode, output) = await _git.RunAsync(
+                ["worktree", "add", "--shared", "-b", branchName, worktreePath, baseBranch], ct: ct);
+
+            if (exitCode != 0)
+            {
+                logger?.Warn($"--shared not supported, falling back ({taskId}): {output.Trim()}");
+                (exitCode, output) = await _git.RunAsync(
+                    ["worktree", "add", "-b", branchName, worktreePath, baseBranch], ct: ct);
+            }
+        }
+        else
+        {
+            (exitCode, output) = await _git.RunAsync(
+                ["worktree", "add", "-b", branchName, worktreePath, baseBranch], ct: ct);
+        }
 
         if (exitCode != 0)
             throw new InvalidOperationException($"Failed to create worktree for {taskId}: {output}");
 
-        logger?.Info($"Worktree created: {worktreePath} (branch: {branchName})");
+        logger?.Info($"Worktree created: {worktreePath} (branch: {branchName}{(sharedObjects ? ", shared" : "")})");
         return worktreePath;
     }
 

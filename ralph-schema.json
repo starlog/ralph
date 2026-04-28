@@ -66,6 +66,11 @@
               },
               "minItems": 1,
               "description": "Ordered fallback chain for merge conflicts. The first entry decides the initial merge -X flag (for auto-*); the remaining entries are tried in order if the merge or previous step fails. Example: ['auto-theirs', 'claude'] auto-merges trivial conflicts and asks Claude only for the cases -X theirs cannot resolve (add/add, rename/delete). Takes precedence over conflictStrategy when present."
+            },
+            "sharedWorktreeObjects": {
+              "type": "boolean",
+              "default": false,
+              "description": "Use 'git worktree add --shared' to share .git objects across worktrees. Requires git 2.10+. Falls back gracefully if unsupported."
             }
           },
           "additionalProperties": false
