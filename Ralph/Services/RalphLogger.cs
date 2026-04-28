@@ -3,6 +3,7 @@ namespace Ralph.Services;
 public sealed class RalphLogger : IDisposable
 {
     private readonly StreamWriter _writer;
+    private readonly object _lockObj = new();
 
     public string LogFile { get; }
 
@@ -16,7 +17,10 @@ public sealed class RalphLogger : IDisposable
 
     public void Log(string level, string message)
     {
-        _writer.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}");
+        lock (_lockObj)
+        {
+            _writer.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}");
+        }
     }
 
     public void Info(string message) => Log("INFO", message);
@@ -29,5 +33,11 @@ public sealed class RalphLogger : IDisposable
     public void TaskEnd(string taskId, string status)
         => Info($"=== Task ended: {taskId} - status: {status} ===");
 
-    public void Dispose() => _writer.Dispose();
+    public void Dispose()
+    {
+        lock (_lockObj)
+        {
+            _writer.Dispose();
+        }
+    }
 }
