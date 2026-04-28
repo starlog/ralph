@@ -111,9 +111,19 @@ public partial class PlanGenerator
                 "[yellow]Warning: No 'implementation' tasks found — feature granularity may be off.[/]");
         }
 
-        // Write validated JSON
+        // Write validated JSON atomically (tmp + rename) to avoid truncation on interrupt
         var formatted = JsonSerializer.Serialize(parsed, TaskManager.JsonOptions);
-        await File.WriteAllTextAsync(tasksFile, formatted, ct);
+        var tmp = tasksFile + ".tmp." + Guid.NewGuid().ToString("N");
+        try
+        {
+            await File.WriteAllTextAsync(tmp, formatted, ct);
+            File.Move(tmp, tasksFile, overwrite: true);
+        }
+        catch
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            throw;
+        }
 
         // Analyze parallelism potential
         var noDeps = parsed.Tasks.Count(t => t.DependsOn is not { Count: > 0 });
