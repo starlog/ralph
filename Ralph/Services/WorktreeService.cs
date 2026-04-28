@@ -472,11 +472,19 @@ public class WorktreeService
 
         foreach (var line in lines)
         {
-            if (line.StartsWith("branch ") && line.Contains("ralph/"))
+            string? branch = null;
+            if (line.StartsWith("branch refs/heads/"))
             {
-                var branch = line["branch refs/heads/".Length..].Trim();
-                stale.Add(branch);
+                branch = line["branch refs/heads/".Length..].Trim();
             }
+            else if (line.StartsWith("branch "))
+            {
+                // git이 "branch ralph/foo"처럼 refs/heads/ 없이 출력하는 경우 fallback.
+                branch = line["branch ".Length..].Trim();
+            }
+
+            if (branch is { Length: > 0 } && branch.StartsWith("ralph/"))
+                stale.Add(branch);
         }
 
         return stale;
