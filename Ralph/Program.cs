@@ -422,7 +422,8 @@ async Task<int> HandleSingleTask()
     using var logger = new RalphLogger();
 
     return await RunTaskAuto(tm, claude, git, logger, taskId,
-        dryRun: false, commitOnComplete: tm.CommitOnComplete, modelArg, cts.Token);
+        dryRun: false, commitOnComplete: tm.CommitOnComplete, modelArg, cts.Token,
+        force: true);
 }
 
 async Task<int> HandleInteractive()
@@ -878,12 +879,13 @@ void DisplayTask(TaskManager tm, string taskId)
 
 async Task<int> RunTaskAuto(
     TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
-    string taskId, bool dryRun, bool commitOnComplete, string? model, CancellationToken ct)
+    string taskId, bool dryRun, bool commitOnComplete, string? model, CancellationToken ct,
+    bool force = false)
 {
     var task = tm.GetTask(taskId)!;
 
-    // Check dependencies
-    if (!tm.CheckDependencies(taskId, out var blockedBy))
+    // Check dependencies (skip when --force was confirmed upstream)
+    if (!force && !tm.CheckDependencies(taskId, out var blockedBy))
     {
         AnsiConsole.MarkupLine("[yellow]Skipping task due to unmet dependencies.[/]");
         foreach (var dep in blockedBy)
