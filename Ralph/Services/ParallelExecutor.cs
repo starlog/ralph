@@ -622,6 +622,8 @@ public class ParallelExecutor
             return; // 변경 없음
 
         var changeCode = statusOut.Length >= 2 ? statusOut[..2] : "";
+        var x = changeCode.Length > 0 ? changeCode[0] : ' ';
+        var y = changeCode.Length > 1 ? changeCode[1] : ' ';
         var msg = $"⚠️  worktree '{taskId}'에서 {tasksFileName}이 수정되었습니다 (status: '{changeCode.Trim()}'). 강제 되돌립니다.";
         _logger.Warn(msg);
         logWriter?.WriteLine($"\n=== {msg} ===");
@@ -629,17 +631,21 @@ public class ParallelExecutor
         // staged 변경이 있으면 unstage
         await _git.RunAsync(["reset", "HEAD", "--", tasksFileName], worktreePath, ct);
 
-        // 추적 중인 파일이면 HEAD 버전으로 복원
-        if (changeCode.Contains('M') || changeCode.Contains('D') || changeCode.Contains('R'))
-        {
-            await _git.RunAsync(["checkout", "HEAD", "--", tasksFileName], worktreePath, ct);
-        }
-        // 새로 추가된 파일이면 (?? 또는 A) 작업트리에서 제거
-        else if (changeCode.Contains('?') || changeCode.Contains('A'))
+        // 새로 추가된 파일(untracked '?' 또는 staged add 'A')이면 HEAD에 없으므로 작업트리에서 제거
+        if (x == 'A' || x == '?')
         {
             var fullPath = Path.Combine(worktreePath, tasksFileName);
             try { if (File.Exists(fullPath)) File.Delete(fullPath); }
             catch (Exception ex) { _logger.Warn($"Failed to delete {fullPath}: {ex.Message}"); }
+        }
+        // 추적 중인 파일의 수정/삭제/이름변경이면 HEAD 버전으로 복원
+        else if (x == 'M' || x == 'D' || x == 'R' || y == 'M' || y == 'D')
+        {
+            await _git.RunAsync(["checkout", "HEAD", "--", tasksFileName], worktreePath, ct);
+        }
+        else
+        {
+            _logger.Warn($"[GuardTasksFile] {taskId}: 알 수 없는 status '{changeCode}' — 무시");
         }
     }
 
