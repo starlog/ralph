@@ -4,7 +4,7 @@
 
 A CLI task orchestrator that generates execution plans from PRD (Product Requirements Document) files and runs them automatically through Claude Code. Built on .NET 8 for cross-platform support (Windows, macOS, Linux).
 
-The first Ralph implementation with **parallel git worktree execution**. Run multiple Claude Code agents simultaneously on independent features, with automatic dependency resolution, conflict-aware merging, and live progress monitoring.
+The first Ralph implementation with **parallel git worktree execution**. Run multiple Claude Code agents simultaneously on independent features, with automatic dependency resolution, conflict-aware merging, exit-code-based verification, cost-budget gating, and live progress monitoring.
 
 ## ⚠️ Security Note
 
@@ -21,7 +21,9 @@ Ralph runs Claude Code directly on the host machine. Untrusted PRDs or external 
 | Parallel execution | ❌ | ❌ | ✅ |
 | Windows support | ❌ | ❌ | ✅ |
 | DAG dependencies | ❌ | partial | ✅ |
-| Cost tracking | ❌ | ❌ | ✅ |
+| Cost tracking & budget gate | ❌ | ❌ | ✅ |
+| Verification gate (exit code) | ❌ | ❌ | ✅ |
+| Webhook notifications | ❌ | ❌ | ✅ |
 | Single binary | ❌ | ❌ | ✅ |
 
 ## How It Works
@@ -48,6 +50,8 @@ payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit ─�
 | v0.1 | `ralph.sh` (Bash) | macOS, Linux | Sequential execution |
 | v0.6 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Parallel execution, worktrees, live logs |
 | v0.7 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `--graph` task dependency visualization |
+| v1.0 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Cost tracker, plan validator, prompt builder, webhook notifications, log rotation |
+| v1.1 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Verification gate, conflict-strategy chain, `--task-timeout`, `--budget-usd`, `--strict-files`, worktree rebase-advance |
 
 ## Requirements
 
@@ -91,8 +95,8 @@ Grab the matching binary from [GitHub Releases](https://github.com/starlog/ralph
 
 ```bash
 # Example: Linux
-curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v0.7.0-linux-x64.tar.gz
-tar -xzf ralph-v0.7.0-linux-x64.tar.gz
+curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.1.0-linux-x64.tar.gz
+tar -xzf ralph-v1.1.0-linux-x64.tar.gz
 sudo mv ralph /usr/local/bin/
 ```
 
@@ -104,13 +108,16 @@ The binary is self-contained, so the .NET runtime is not required.
 # 1. Generate a task plan from a PRD
 ralph --plan docs/PRD.md
 
-# 2. Inspect the generated tasks
+# 2. Validate the generated plan (cycles, deps, file overlaps)
+ralph --validate
+
+# 3. Inspect the generated tasks
 ralph --list
 
-# 3. Preview execution (no changes are made)
+# 4. Preview execution (no changes are made)
 ralph --dry-run
 
-# 4. Run the entire pipeline
+# 5. Run the entire pipeline
 ralph --run
 ```
 
@@ -118,19 +125,24 @@ ralph --run
 
 | Command | Description |
 |---|---|
-| `--plan <file>` | Analyze a PRD file and produce `tasks.json` |
+| `--plan <file>` | Analyze a PRD file and produce `tasks.json` (atomic write) |
+| `--plan-prompt <file>` | Show the full plan prompt without executing |
+| `--validate` | Validate `tasks.json` (cycles, dangling deps, duplicate IDs, file overlaps, sensitive paths) |
 | `--run [file]` | Execute all pending tasks (parallel by default). Defaults to `tasks.json` |
-| `--dry-run` | Simulate execution without modifying `tasks.json` |
-| `--task <id>` | Run a single task by ID |
+| `--dry-run [file]` | Simulate execution; `tasks.json` is restored on exit |
+| `--task <id>` | Run a single task by ID (use `--force` to bypass dependency checks) |
 | `--interactive` | Interactive mode — confirm before each task |
 | `--list`, `-l` | List pending tasks (shows parallel-eligibility) |
 | `--graph`, `-g` | Render the task dependency graph in ASCII |
 | `--prompts`, `-p` | Print the Claude prompt for every task |
+| `--show-prompt <id>` | Print the full prompt sent to Claude for one task |
 | `--status`, `-s` | Progress dashboard with parallel batch info |
+| `--cost` | Cumulative token usage and estimated USD cost |
 | `--reset`, `-r` | Reset all tasks back to pending |
 | `--logs` | List log files (session + per-task) |
 | `--logs <task-id>` | Print a specific task log |
 | `--logs --live <task-id>` | Tail a task log live (like `tail -f`) |
+| `--logs --cleanup` | Delete logs older than the retention period |
 | `--worktree-cleanup` | Remove leftover worktrees |
 | `--help`, `-h` | Show help |
 
@@ -138,15 +150,23 @@ ralph --run
 
 | Option | Description |
 |---|---|
+| `-f`, `--file <path>` | Use a custom tasks file (works with most commands) |
 | `--sequential` | Disable parallel execution; run tasks one at a time |
 | `--max-parallel N` | Cap the number of concurrent tasks |
+| `--force` | Bypass dependency / validation checks (with `--task` or `--run`) |
+| `--strict-files` | Validate declared vs actual `modifiedFiles` after merge; abort on undeclared writes |
+| `--budget-usd <amt>` | Stop dispatching new tasks once cumulative cost reaches `<amt>` USD |
+| `--task-timeout <dur>` | Per-Claude-call timeout (e.g. `30m`, `1h`, `90s`, `1800`) — kills hung calls |
+| `--model <name>` | Model: `sonnet` or `opus` (default: `opus`) |
+| `--debug` | Print Claude stream events for diagnostics |
 
 ### Custom tasks.json
 
-Pass a path to `--run` to use a file other than the default `tasks.json`:
+Two ways to point at a non-default file:
 
 ```bash
-ralph --run my-project-tasks.json
+ralph --run my-project-tasks.json     # positional (run/dry-run/list/graph/etc.)
+ralph -f my-project-tasks.json --run  # global -f / --file flag
 ```
 
 ### Interactive Mode
@@ -166,15 +186,24 @@ ralph --run my-project-tasks.json
 | `RETRY_DELAY` | 5 | Seconds between retries |
 | `RALPH_MAX_PARALLEL` | 0 (use tasks.json) | Override the maximum number of concurrent tasks |
 | `RALPH_PARALLEL` | true | Set to `false` to disable parallel execution |
+| `RALPH_STRICT_FILES` | false | Set to `true` to enable `--strict-files` by default |
+| `RALPH_BUDGET_USD` | unset | Cumulative cost ceiling — CLI `--budget-usd` wins |
+| `RALPH_TASK_TIMEOUT_SEC` | unset | Per-Claude-call timeout (seconds) — CLI `--task-timeout` wins |
+| `RALPH_WEBHOOK_URL` | unset | Default session-completion webhook |
+| `RALPH_LOG_RETENTION_DAYS` | 30 | Auto-delete logs older than N days |
+
+Priority for shared knobs: CLI flag > env var > `workflow` setting in `tasks.json` > built-in default.
 
 ```bash
 # Linux/macOS
 MAX_RETRIES=3 ralph --run
 RALPH_MAX_PARALLEL=4 ralph --run
+RALPH_BUDGET_USD=10.00 ralph --run
+RALPH_TASK_TIMEOUT_SEC=1800 ralph --run
 
 # Windows (PowerShell)
 $env:MAX_RETRIES=3; ralph --run
-$env:RALPH_PARALLEL="false"; ralph --run   # Force sequential mode
+$env:RALPH_PARALLEL="false"; ralph --run    # Force sequential mode
 ```
 
 ## Parallel Execution Flow
@@ -188,21 +217,63 @@ ralph --run
 1. Analyze the dependency DAG and group ready tasks into batches
 2. Create a git worktree per task (`ralph/{taskId}` branch under `.ralph-worktrees/`)
 3. Run Claude Code concurrently in each worktree (live progress dashboard)
-4. Merge completed branches back into the base branch sequentially
-5. Resolve any merge conflicts via the configured strategy
-6. Advance to the next batch (newly unblocked tasks)
-7. Fall back to in-place execution when only one task remains
+4. Run the per-task `verification.command` if defined; one self-fix retry on failure
+5. Rebase the worktree branch onto the latest base (advance) just before merge
+6. Sequentially merge completed branches back into the base branch
+7. Resolve any merge conflicts via the configured strategy chain (`conflictStrategies`)
+8. Optionally validate that the merge wrote only the declared `modifiedFiles` (`--strict-files`)
+9. Advance to the next batch (newly unblocked tasks)
+10. Fall back to in-place execution when only one task remains
 
 ### Conflict Resolution Strategies
 
-Configured under `workflow.parallel.conflictStrategy` in `tasks.json`:
+Configured under `workflow.parallel.conflictStrategies` (chain) or the legacy `workflow.parallel.conflictStrategy` (single) in `tasks.json`. The chain is an **ordered fallback list** — the first entry decides the initial merge `-X` flag (for `auto-*`); the remaining entries are tried in order if the merge or previous step fails.
 
 | Strategy | Behavior |
 |---|---|
-| `claude` | Claude Code analyzes conflict markers and merges both sides (recommended) |
+| `claude` | Claude Code analyzes conflict markers and merges both sides (recommended terminal step) |
 | `abort` | Abort the merge and re-run the task in sequential mode |
 | `auto-theirs` | Use git's `-X theirs` — prefer the worktree branch's changes |
 | `auto-ours` | Use git's `-X ours` — prefer the base branch's changes |
+
+Example — auto-merge trivial conflicts and only escalate to Claude for the cases `-X theirs` cannot resolve (add/add, rename/delete):
+
+```json
+"conflictStrategies": ["auto-theirs", "claude"]
+```
+
+### Verification Gate
+
+Each task can declare a `verification.command` whose exit code is the ground truth — Claude's self-report is ignored. On non-zero exit, Ralph feeds stdout/stderr back to Claude for **one self-fix retry** before failing the task.
+
+```json
+{
+  "id": "math-impl",
+  "verification": { "command": "go test ./...", "timeoutSec": 120 }
+}
+```
+
+Common commands: `pytest tests/`, `go test ./...`, `tsc --noEmit`, `dotnet test`, `npm test --silent`, `cargo test --quiet`.
+
+### Cost Tracking & Budget Gate
+
+Per-call usage from Claude's `stream-json` `result` event is recorded to `.ralph-logs/cost.jsonl`. `--budget-usd <amt>` (or `RALPH_BUDGET_USD`) blocks new dispatches once the cumulative cost reaches the ceiling, with a one-shot warning at 80%.
+
+```bash
+ralph --cost                            # show cumulative tokens and USD
+ralph --run --budget-usd 5.00           # stop dispatching at $5
+```
+
+Pricing is loaded from the embedded `pricing.json`; override at `~/.ralph/pricing.json`.
+
+### Webhook Notifications
+
+A single webhook fires at session end. Resolution priority:
+
+1. `workflow.notifications.onComplete` / `onFailure` in `tasks.json`
+2. `RALPH_WEBHOOK_URL` env (global fallback)
+
+`format` is auto-detected by hostname (`hooks.slack.com` → Slack, `discord(app)?.com` → Discord, else `generic`) and can be forced via `workflow.notifications.format`.
 
 ### Live Monitoring
 
@@ -221,7 +292,7 @@ ralph --logs --live subtract-impl
 
 ## tasks.json Structure
 
-`tasks.json` is generated by `ralph --plan` or written by hand. The full schema lives in `ralph-schema.json`.
+`tasks.json` is generated by `ralph --plan` or written by hand. The full schema lives in `ralph-schema.json` and is embedded in the binary.
 
 ### Minimal Example
 
@@ -255,9 +326,10 @@ ralph --logs --live subtract-impl
 | `category` | | string | Category (`"plan"`, `"implementation"`, `"testing"`, `"commit"`) |
 | `prompt` | | string | Prompt sent to Claude Code; tasks without a prompt skip Claude |
 | `outputFiles` | | string[] | Expected output file paths |
-| `modifiedFiles` | | string[] | Files this task will edit — used for parallel merge-conflict detection |
+| `modifiedFiles` | | string[] | Files this task will edit — used for parallel merge-conflict detection and `--strict-files` |
 | `dependsOn` | | string[] | Predecessor task IDs; missing means parallel-eligible |
 | `subtasks` | | array | Optional subtasks |
+| `verification` | | object | `{ command, timeoutSec? }` — exit-code-based verification (see Verification Gate above) |
 
 ### Workflow Settings
 
@@ -270,9 +342,18 @@ ralph --logs --live subtract-impl
     },
     "parallel": {
       "enabled": true,
-      "maxConcurrent": 3,
-      "conflictStrategy": "claude"
-    }
+      "maxConcurrent": 5,
+      "conflictStrategies": ["auto-theirs", "claude"]
+    },
+    "notifications": {
+      "onComplete": "https://hooks.slack.com/services/XXX",
+      "format": "slack"
+    },
+    "logRetentionDays": 30,
+    "budgetUsd": 10.00,
+    "taskTimeoutSec": 1800,
+    "maxRetries": 2,
+    "retryDelay": 5
   }
 }
 ```
@@ -280,8 +361,16 @@ ralph --logs --live subtract-impl
 | Setting | Default | Description |
 |---|---|---|
 | `parallel.enabled` | true | Enable parallel execution |
-| `parallel.maxConcurrent` | 3 | Maximum concurrent tasks (tune to CPU/memory) |
-| `parallel.conflictStrategy` | `"claude"` | Merge conflict strategy (see above) |
+| `parallel.maxConcurrent` | 5 | Maximum concurrent tasks (capped at 16) |
+| `parallel.conflictStrategy` | `"claude"` | Single legacy strategy (used only when `conflictStrategies` is unset) |
+| `parallel.conflictStrategies` | (unset) | Ordered fallback chain — takes precedence over `conflictStrategy` |
+| `notifications.onComplete` / `onFailure` | (unset) | Session webhook URLs |
+| `notifications.format` | auto | `generic` / `slack` / `discord` |
+| `logRetentionDays` | 30 | Auto-delete old logs in `.ralph-logs/` (preserves `cost.jsonl`, `validation.jsonl`) |
+| `budgetUsd` | (unset) | Cumulative cost ceiling — CLI/env wins |
+| `taskTimeoutSec` | (unset) | Per-Claude-call timeout — CLI/env wins |
+| `maxRetries` | 2 | Retry attempts per Claude call (env `MAX_RETRIES` wins) |
+| `retryDelay` | 5 | Seconds between retries (env `RETRY_DELAY` wins) |
 
 ## Writing PRDs for Parallel Execution
 
@@ -338,13 +427,16 @@ Run logs are written to `.ralph-logs/`:
 ├── ralph-20260219-165209.log   # session log
 ├── add-plan.log                # per-task logs (parallel runs)
 ├── subtract-plan.log
-└── multiply-plan.log
+├── multiply-plan.log
+├── cost.jsonl                  # cumulative token usage / cost ledger (preserved)
+└── validation.jsonl            # verification command ledger (preserved)
 ```
 
 ```bash
 ralph --logs                    # list log files
 ralph --logs add-impl           # print a specific task log
 ralph --logs --live add-impl    # live tail
+ralph --logs --cleanup          # delete logs older than retention (default 30d)
 ```
 
 ## Example
@@ -360,13 +452,14 @@ mkdir my-calculator && cd my-calculator
 cp /path/to/ralph/samples/PRD.md .
 
 ralph --plan PRD.md       # 24 tasks (4 parallel start points)
+ralph --validate          # sanity-check the generated plan
 ralph --status            # inspect the parallel batch structure
 ralph --run               # Phase 1 runs 4-wide; Phase 2-3 sequential
 ```
 
 ## Security
 
-The following file patterns are excluded from auto-commits:
+The following file patterns are excluded from auto-commits and flagged by `--validate`:
 
 `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `credentials.json`, `service-account*.json`, `.secret*`, `*.secrets`, `id_rsa`, `id_ed25519`
 
