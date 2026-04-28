@@ -116,8 +116,9 @@ public class GitService
             logger?.Warn($"Sensitive files excluded: {string.Join(", ", sensitiveLines)}");
         }
 
-        // Commit
-        var fullMsg = $"{commitMsg}\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>";
+        // Commit. 모델명을 attribution에 박지 않음 — sonnet/opus 어떤 모델이든 ralph 사용 시
+        // 동일하게 표기되며, 모델 버전 outdated로 commit 메시지가 잘못되는 것을 방지.
+        var fullMsg = $"{commitMsg}\n\nCo-Authored-By: Claude <noreply@anthropic.com>";
         var (exitCode, _) = await RunAsync(["commit", "-m", fullMsg], workingDirectory, ct);
 
         if (exitCode == 0)
