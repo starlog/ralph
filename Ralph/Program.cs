@@ -64,6 +64,7 @@ var forceFlag = argList.Remove("--force");
 var strictFiles = argList.Remove("--strict-files") || envStrictFiles;
 var cliSharedWorktrees = argList.Remove("--shared-worktrees");
 var noSmokeTest = argList.Remove("--no-smoke-test") || envNoSmokeTest;
+var llmCritique = argList.Remove("--llm-critique");
 var maxParallelArg = 0;
 var maxParallelIdx = argList.IndexOf("--max-parallel");
 if (maxParallelIdx >= 0)
@@ -269,6 +270,11 @@ async Task<int> HandlePlan()
             var critiqueTm = await TaskManager.LoadAsync(tasksFile);
             var suggestions = PrdCritic.Analyze(critiqueTm);
             PrdCritic.PrintReport(suggestions);
+
+            if (llmCritique)
+            {
+                await RunLlmCritiqueAsync(prdFile, critiqueTm, planModel, logger, cts.Token);
+            }
         }
         catch (Exception ex)
         {
@@ -277,6 +283,64 @@ async Task<int> HandlePlan()
     }
 
     return result;
+}
+
+async Task RunLlmCritiqueAsync(
+    string prdFile, TaskManager tm, string model, RalphLogger logger, CancellationToken ct)
+{
+    AnsiConsole.WriteLine();
+    AnsiConsole.Write(new Rule("[blue]LLM Critique[/]").RuleStyle("blue"));
+    AnsiConsole.MarkupLine("[dim]LLM에 PRD + 생성된 plan 요약을 보내 정성 비평을 요청합니다...[/]");
+
+    string prdContent;
+    try
+    {
+        prdContent = await File.ReadAllTextAsync(prdFile, ct);
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[yellow]⚠ PRD 읽기 실패, LLM critique 생략: {Markup.Escape(ex.Message)}[/]");
+        return;
+    }
+
+    var critiqueRunner = NewClaudeService(tm);
+    var critic = new LlmCritic();
+    var cost = new CostTracker();
+    var tasksFileBase = Path.GetFileNameWithoutExtension(tm.FilePath);
+    if (string.IsNullOrEmpty(tasksFileBase)) tasksFileBase = "tasks";
+    var costTaskId = $"critique:{tasksFileBase}";
+
+    ClaudeResult? result = null;
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    try
+    {
+        var prompt = LlmCritic.BuildPrompt(prdContent, tm);
+        result = await critiqueRunner.RunStreamAsync(
+            prompt, model: model, logger: logger, ct: ct, allowedTools: "");
+        sw.Stop();
+
+        var output = result?.Output?.Trim();
+        if (result?.Success == true && !string.IsNullOrWhiteSpace(output))
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.WriteLine(output);
+            AnsiConsole.Write(new Rule().RuleStyle("blue"));
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[yellow]⚠ LLM critique 응답이 비어있거나 실패했습니다 (exit={result?.ExitCode ?? -1}).[/]");
+        }
+    }
+    catch (OperationCanceledException) { throw; }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[yellow]⚠ LLM critique 실패: {Markup.Escape(ex.Message)}[/]");
+        logger.Warn($"LLM critique error: {ex.Message}");
+    }
+    finally
+    {
+        await cost.RecordAsync(costTaskId, model, result, CancellationToken.None);
+    }
 }
 
 async Task<int> HandleCritique()
@@ -965,6 +1029,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  [green]--strict-files[/]       Validate declared vs actual files at merge; abort on undeclared");
     AnsiConsole.MarkupLine("  [green]--shared-worktrees[/]   Use 'git worktree add --shared' to share .git objects across worktrees");
     AnsiConsole.MarkupLine("  [green]--no-smoke-test[/]      Disable post-merge smoke test (auto-inferred or explicit)");
+    AnsiConsole.MarkupLine("  [green]--llm-critique[/]       --plan 직후 LLM 기반 PRD/plan 비평 추가 1회 실행 (기본 off, 추가 비용)");
     AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
     AnsiConsole.MarkupLine("  [green]--task-timeout[/] <dur> Per-Claude-call timeout (예: 30m, 1h, 90s, 1800). hang 방지");
     AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
