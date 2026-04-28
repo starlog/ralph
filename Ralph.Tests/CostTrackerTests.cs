@@ -78,4 +78,32 @@ public class CostTrackerTests : IDisposable
         var u = new TokenUsage(0, 0, 0, 0);
         Assert.Equal(0.0, CostTracker.EstimateUsd("opus", u));
     }
+
+    [Theory]
+    [InlineData("claude-opus-4-7", "opus-4-7")]
+    [InlineData("claude-opus-4-7-20251101", "opus-4-7")]
+    [InlineData("claude-opus-4", "opus-4")]
+    [InlineData("claude-opus", "opus")]
+    [InlineData("claude-sonnet-4-6", "sonnet-4-6")]
+    [InlineData("claude-sonnet-4", "sonnet-4")]
+    [InlineData("claude-haiku-4-5", "haiku-4-5")]
+    [InlineData("", "opus")]
+    [InlineData("totally-unknown-model-x", "totally-unknown-model-x")]
+    [InlineData("CLAUDE-OPUS-4-7", "opus-4-7")]
+    public static void NormalizeModel_returns_longest_matching_pricing_key(
+        string input, string expected)
+    {
+        Assert.Equal(expected, CostTracker.NormalizeModel(input));
+    }
+
+    [Fact]
+    public static void NormalizeModel_with_empty_pricing_falls_back_to_family_fold()
+    {
+        var empty = new Dictionary<string, PricingEntry>();
+        Assert.Equal("opus", CostTracker.NormalizeModel("claude-opus-4-7", empty));
+        Assert.Equal("sonnet", CostTracker.NormalizeModel("claude-sonnet-4", empty));
+        Assert.Equal("haiku", CostTracker.NormalizeModel("haiku-4-5", empty));
+        Assert.Equal("opus", CostTracker.NormalizeModel("", empty));
+        Assert.Equal("foo-bar", CostTracker.NormalizeModel("foo-bar", empty));
+    }
 }
