@@ -14,6 +14,9 @@ tasks.json
 # Published binaries
 Ralph/publish/
 
+# Release packaging staging area (cross-RID self-contained binaries + tarballs)
+dist/
+
 # IDE
 .vs/
 .vscode/

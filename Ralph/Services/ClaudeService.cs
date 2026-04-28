@@ -36,7 +36,7 @@ public record TokenUsage(
     public long TotalInput => InputTokens + CacheReadTokens + CacheCreationTokens;
 }
 
-public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
+public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunner
 {
     public bool Debug { get; set; }
 

@@ -6,7 +6,7 @@ namespace Ralph.Services;
 public class ParallelExecutor
 {
     private readonly TaskManager _taskManager;
-    private readonly ClaudeService _claude;
+    private readonly IAgentRunner _claude;
     private readonly GitService _git;
     private readonly WorktreeService _worktree;
     private readonly RalphLogger _logger;
@@ -31,7 +31,7 @@ public class ParallelExecutor
     public bool BudgetReached => _budgetGate.Reached;
 
     public ParallelExecutor(
-        TaskManager taskManager, ClaudeService claude, GitService git,
+        TaskManager taskManager, IAgentRunner claude, GitService git,
         WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
         bool strictFiles = false, double? budgetUsd = null,
         CostTracker? cost = null, BudgetGate? budgetGate = null)
@@ -217,6 +217,7 @@ public class ParallelExecutor
         var primaryStrategy = strategyChain[0]; // 첫 항목으로 merge -X 결정
         var worktrees = new Dictionary<string, string>(); // taskId → worktreePath
         var tracker = new TaskProgressTracker();
+        tracker.AttachCostTracker(_cost, _budgetGate.BudgetUsd);
 
         try
         {
@@ -251,6 +252,7 @@ public class ParallelExecutor
                         while (await refreshTimer.WaitForNextTickAsync(ct))
                         {
                             tracker.RefreshAllOutputSizes();
+                            await tracker.RefreshCostAsync(ct);
                             ctx.UpdateTarget(tracker.BuildTable());
                         }
                     }, ct);

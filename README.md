@@ -102,6 +102,19 @@ sudo mv ralph /usr/local/bin/
 
 The binary is self-contained, so the .NET runtime is not required.
 
+### Option 3: Package Manager
+
+```bash
+# macOS / Linux — Homebrew tap
+brew tap starlog/ralph https://github.com/starlog/ralph
+brew install ralph
+
+# Windows — Scoop (custom manifest)
+scoop install https://raw.githubusercontent.com/starlog/ralph/main/scoop/ralph.json
+```
+
+Manifests live under [`Formula/ralph.rb`](Formula/ralph.rb) and [`scoop/ralph.json`](scoop/ralph.json) and track the latest GitHub release.
+
 ## Quick Start
 
 ```bash
@@ -224,6 +237,25 @@ ralph --run
 8. Optionally validate that the merge wrote only the declared `modifiedFiles` (`--strict-files`)
 9. Advance to the next batch (newly unblocked tasks)
 10. Fall back to in-place execution when only one task remains
+
+### Failure Handling & Resume
+
+What happens when a parallel batch partially fails:
+
+| Event | Behavior |
+|---|---|
+| Claude fails for one task in a batch | The other tasks in the same batch **continue and merge normally**. The failed task's worktree is cleaned up; its `done` flag stays `false`. |
+| `verification.command` fails | One self-fix retry (configurable via `workflow.verifyRetries`). If still failing, the task is marked failed and **excluded from merge**. |
+| Pre-commit scope violation (`--strict-files`) | Worktree fails fast before merge — saves cleanup cost. Other tasks in the batch are not affected. |
+| Merge conflict unresolvable by the strategy chain | Remaining unmerged worktrees are cleaned up; already-merged tasks **stay merged** (no rollback). |
+| Post-merge `workflow.smokeTest` fails | Run stops with exit code 1. No merges are reverted; the smoke-test failure is logged and surfaced. |
+
+**Resume after interruption:**
+- `done: true` is written atomically per-task — re-running `ralph --run` picks up exactly where it left off (only `done: false` tasks dispatch).
+- If a worktree has uncommitted changes or commits ahead of base when `--run` starts, Ralph **does not silently delete it**. It prints the worktree path and asks you to merge/clean manually (or run `ralph --worktree-cleanup` to force-remove).
+- Stale worktrees that are clean (cleanup was missed but no work was lost) are auto-removed.
+
+**Already-merged tasks are not rolled back.** Ralph's design treats merge as the commit point — undoing requires a human-driven `git revert` or `git reset`. Use `--strict-files` and `workflow.smokeTest` to catch problems before the merge becomes durable.
 
 ### Conflict Resolution Strategies
 

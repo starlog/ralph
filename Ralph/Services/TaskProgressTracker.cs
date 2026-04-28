@@ -27,6 +27,28 @@ public class TaskProgressEntry
 public class TaskProgressTracker
 {
     private readonly ConcurrentDictionary<string, TaskProgressEntry> _entries = new();
+    private CostTracker? _cost;
+    private double? _budgetUsd;
+    private double _cachedTotalUsd;
+
+    /// <summary>
+    /// 진행 중인 batch의 누적 cost를 헤더에 표시하기 위해 CostTracker를 연결한다.
+    /// budgetUsd가 설정되어 있으면 "$used / $budget (NN%)" 형태로 표시.
+    /// 미설정 시 호출 안 하면 헤더에 cost 줄이 안 나타나서 기존 동작과 동일.
+    /// </summary>
+    public void AttachCostTracker(CostTracker cost, double? budgetUsd = null)
+    {
+        _cost = cost;
+        _budgetUsd = budgetUsd;
+    }
+
+    /// <summary>periodic refresh tick에서 호출 — async를 fire-and-forget으로 처리해 BuildTable은 sync 유지.</summary>
+    public async Task RefreshCostAsync(CancellationToken ct = default)
+    {
+        if (_cost is null) return;
+        try { _cachedTotalUsd = await _cost.GetTotalUsdAsync(ct); }
+        catch { /* best-effort: cost 조회 실패가 progress 표시를 깨뜨리면 안 됨 */ }
+    }
 
     public void Register(string taskId, string title, string? logFile = null)
     {
@@ -74,9 +96,26 @@ public class TaskProgressTracker
 
     public Table BuildTable()
     {
+        var titleMarkup = "[bold blue]Parallel Execution[/]";
+        if (_cost is not null)
+        {
+            var costStr = $"${_cachedTotalUsd:F4}";
+            if (_budgetUsd is { } b && b > 0)
+            {
+                var pct = Math.Min(999, (int)Math.Round(_cachedTotalUsd / b * 100));
+                var color = pct >= 80 ? "red" : pct >= 60 ? "yellow" : "green";
+                costStr = $"[{color}]${_cachedTotalUsd:F4}[/] / ${b:F2} ([{color}]{pct}%[/])";
+            }
+            else
+            {
+                costStr = $"[cyan]${_cachedTotalUsd:F4}[/]";
+            }
+            titleMarkup += $"  [dim]·[/]  cost: {costStr}";
+        }
+
         var table = new Table()
             .Border(TableBorder.Rounded)
-            .Title("[bold blue]Parallel Execution[/]")
+            .Title(titleMarkup)
             .AddColumn("[bold]Task ID[/]")
             .AddColumn("[bold]Status[/]")
             .AddColumn(new TableColumn("[bold]Elapsed[/]").RightAligned())

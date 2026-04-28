@@ -91,6 +91,19 @@ sudo mv ralph /usr/local/bin/
 
 바이너리는 자체 포함(self-contained)이므로 .NET 런타임 설치가 필요 없다.
 
+### 방법 3: 패키지 매니저
+
+```bash
+# macOS / Linux — Homebrew tap
+brew tap starlog/ralph https://github.com/starlog/ralph
+brew install ralph
+
+# Windows — Scoop (custom manifest)
+scoop install https://raw.githubusercontent.com/starlog/ralph/main/scoop/ralph.json
+```
+
+매니페스트는 [`Formula/ralph.rb`](Formula/ralph.rb), [`scoop/ralph.json`](scoop/ralph.json)에 위치하며 최신 GitHub Release를 가리킨다.
+
 ## 사용법
 
 ### 기본 워크플로우
@@ -472,6 +485,25 @@ ralph --run ────────┤                                         
 → 이 경우 Ralph가 `dependsOn`을 걸거나, 병렬 실행 후 머지 충돌이 발생한다.
 
 **개선:** 각 기능을 별도 파일/모듈로 분리하도록 PRD를 작성한다.
+
+### 실패 처리와 재개
+
+병렬 배치 일부가 실패했을 때 동작:
+
+| 상황 | 동작 |
+|---|---|
+| 배치 안 한 task의 Claude 실행 실패 | 같은 배치의 **다른 task는 계속 진행하고 머지**된다. 실패한 task의 worktree만 정리되고 `done` 플래그는 그대로 `false`. |
+| `verification.command` 실패 | 1회 self-fix 재시도 (`workflow.verifyRetries`로 횟수 조정 가능). 재시도도 실패하면 task 실패로 마킹되며 **머지에서 제외**. |
+| pre-commit scope 위반 (`--strict-files`) | 머지 전 worktree 단계에서 fail-fast — 정리 비용 절감. 같은 배치의 다른 task는 영향 없음. |
+| 전략 chain으로도 풀지 못한 머지 충돌 | 미머지 worktree만 정리되고 **이미 머지된 task는 그대로 유지**된다 (자동 rollback 없음). |
+| 머지 후 `workflow.smokeTest` 실패 | 종료 코드 1로 중단. 이미 머지된 변경은 되돌리지 않으며 실패가 로그·콘솔에 표시. |
+
+**중단 후 재개:**
+- `done: true`는 task 단위 atomic write이므로 `ralph --run`을 다시 실행하면 미완료(`done: false`)인 task만 dispatch된다 — 정확히 멈춘 지점부터 이어진다.
+- `--run` 시작 시 worktree에 uncommitted 변경 또는 base 위 커밋이 있으면 Ralph는 **자동으로 삭제하지 않는다**. worktree 경로를 보여주고 사용자가 머지/회수 또는 `ralph --worktree-cleanup`으로 강제 삭제하도록 안내한다.
+- 변경이 없는(clean) 잔존 worktree는 자동 정리.
+
+**이미 머지된 task는 자동으로 되돌리지 않는다.** 머지를 commit point로 보는 설계 — 되돌리려면 사용자가 직접 `git revert` / `git reset` 해야 한다. 머지가 영구화되기 전에 잡으려면 `--strict-files`와 `workflow.smokeTest`를 활용.
 
 ### 충돌 해결 전략
 

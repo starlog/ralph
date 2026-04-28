@@ -18,7 +18,7 @@ public partial class PlanGenerator
 
     public async Task<int> GenerateAsync(
         string prdFile, string schemaContent, string tasksFile,
-        ClaudeService claude, string model = "opus", RalphLogger? logger = null,
+        IAgentRunner claude, string model = "opus", RalphLogger? logger = null,
         IReadOnlyList<string>? categories = null,
         CancellationToken ct = default)
     {

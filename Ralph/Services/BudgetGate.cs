@@ -25,6 +25,9 @@ public class BudgetGate
     /// <summary>budget(USD) 임계값 도달로 새 dispatch가 차단되었는지 여부.</summary>
     public bool Reached => _reached;
 
+    /// <summary>설정된 budget 값(USD). null이면 무제한. 진행률 표시 등 외부 표시 용도.</summary>
+    public double? BudgetUsd => _budgetUsd;
+
     /// <summary>새 task/batch dispatch 직전 호출. true=계속 진행, false=차단.</summary>
     public async Task<bool> CheckAsync(CancellationToken ct = default)
     {

@@ -1,0 +1,19 @@
+{
+  "version": "1.2",
+  "description": "Parallel CLI task orchestrator for Claude Code (git-worktree based)",
+  "homepage": "https://github.com/starlog/ralph",
+  "license": "MIT",
+  "url": "https://github.com/starlog/ralph/releases/download/v1.2/ralph-v1.2-win-x64.zip",
+  "hash": "a5215b8b567f4d3addcc0b879aa306ddb23d5ae33f9dcb23496869e02ccd0a17",
+  "bin": "ralph.exe",
+  "checkver": {
+    "github": "https://github.com/starlog/ralph"
+  },
+  "autoupdate": {
+    "url": "https://github.com/starlog/ralph/releases/download/v$version/ralph-v$version-win-x64.zip",
+    "hash": {
+      "url": "$baseurl/ralph-v$version-SHA256SUMS.txt",
+      "regex": "(?<sha>[A-Fa-f0-9]{64})\\s+ralph-v$version-win-x64\\.zip"
+    }
+  }
+}

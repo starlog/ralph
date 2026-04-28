@@ -1048,7 +1048,7 @@ void DisplayTask(TaskManager tm, string taskId)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async Task<int> RunTaskAuto(
-    TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
+    TaskManager tm, IAgentRunner claude, GitService git, RalphLogger logger,
     string taskId, bool dryRun, bool commitOnComplete, string? model,
     CostTracker cost, CancellationToken ct,
     bool force = false)
@@ -1145,7 +1145,7 @@ async Task<int> RunTaskAuto(
 }
 
 async Task<int> RunAutoLoop(
-    TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
+    TaskManager tm, IAgentRunner claude, GitService git, RalphLogger logger,
     bool dryRun, bool commitOnComplete, string? model, double? budgetUsd,
     CostTracker cost, CancellationToken ct)
 {
@@ -1203,7 +1203,7 @@ async Task<int> RunAutoLoop(
 }
 
 async Task<int> RunInteractiveLoop(
-    TaskManager tm, ClaudeService claude, GitService git, RalphLogger logger,
+    TaskManager tm, IAgentRunner claude, GitService git, RalphLogger logger,
     string? model, CostTracker cost, CancellationToken ct)
 {
     ShowProgress(tm, logger);
@@ -1349,7 +1349,7 @@ async Task<int> RunInteractiveLoop(
 // Workflow setting resolution — CLI > env > workflow > default
 // ═══════════════════════════════════════════════════════════════════════════════
 
-ClaudeService NewClaudeService(TaskManager? tm)
+IAgentRunner NewClaudeService(TaskManager? tm)
 {
     var w = tm?.Data.Workflow;
     var resolvedRetries = envMaxRetries ?? w?.MaxRetries ?? 2;
@@ -1370,7 +1370,7 @@ double? EffectiveBudgetUsd(TaskManager tm) =>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async Task<bool> RunClaudeWithVerification(
-    ClaudeService claude, CostTracker cost, VerificationRunner verifier,
+    IAgentRunner claude, CostTracker cost, VerificationRunner verifier,
     TaskItem task, string basePrompt, string workingDirectory,
     string? model, RalphLogger logger, CancellationToken ct,
     int maxVerifyRetries = 1)
