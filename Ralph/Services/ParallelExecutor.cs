@@ -265,6 +265,15 @@ public class ParallelExecutor
             {
                 tracker.UpdateStatus(taskId, TaskProgressStatus.Merging);
 
+                // F2: 머지 직전 worktree의 tasks.json이 baseBranch와 다르면 강제 정규화.
+                // 1차 방어(GuardTasksFileAsync)는 working-tree만 보지만, 본 단계는
+                // worktree HEAD까지 검사하여 commit-tree 위반을 잡는다.
+                await _worktree.NormalizeTasksJsonAsync(
+                    taskId, baseBranch,
+                    tasksFileName: Path.GetFileName(_tasksFile),
+                    logger: _logger,
+                    ct: ct);
+
                 var mergeResult = await _worktree.MergeWorktreeAsync(
                     taskId, baseBranch, conflictStrategy, _logger, ct);
 
