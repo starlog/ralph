@@ -34,6 +34,9 @@ jobs:
       - name: Publish linux-x64
         run: dotnet publish Ralph/Ralph.csproj -c Release -r linux-x64
 
+      - name: Publish linux-arm64
+        run: dotnet publish Ralph/Ralph.csproj -c Release -r linux-arm64
+
       - name: Package archives
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
@@ -48,6 +51,11 @@ jobs:
 
           tar -czf "ralph-${VERSION}-linux-x64.tar.gz" -C Ralph/bin/Release/net8.0/linux-x64/publish ralph
 
+          tar -czf "ralph-${VERSION}-linux-arm64.tar.gz" -C Ralph/bin/Release/net8.0/linux-arm64/publish ralph
+
+          # Generate SHA256 checksums for all archives
+          sha256sum ralph-*.zip ralph-*.tar.gz > "ralph-${VERSION}-SHA256SUMS.txt"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -55,3 +63,4 @@ jobs:
           files: |
             ralph-*.zip
             ralph-*.tar.gz
+            ralph-*-SHA256SUMS.txt

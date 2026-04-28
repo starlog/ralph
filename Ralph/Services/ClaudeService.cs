@@ -12,6 +12,17 @@ public class ClaudeResult
     public string Stderr { get; init; } = "";
     public string ErrorMessages { get; init; } = "";
     public int ExitCode { get; init; }
+    public TokenUsage? Usage { get; init; }
+    public TimeSpan Duration { get; init; }
+}
+
+public record TokenUsage(
+    long InputTokens,
+    long OutputTokens,
+    long CacheReadTokens,
+    long CacheCreationTokens)
+{
+    public long TotalInput => InputTokens + CacheReadTokens + CacheCreationTokens;
 }
 
 public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
@@ -101,6 +112,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         var outputBuf = new StringBuilder();
         var streamedOutput = new StringBuilder();
         var debugSw = Stopwatch.StartNew();
+        var totalSw = Stopwatch.StartNew();
+        TokenUsage? capturedUsage = null;
 
         void DebugLog(string msg)
         {
@@ -265,12 +278,31 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
                         }
                     }
                 }
-                else if (type == "result" && root.TryGetProperty("result", out var resultText))
+                else if (type == "result")
                 {
                     DebugLog("result message received");
-                    var resultStr = resultText.GetString();
-                    if (!string.IsNullOrWhiteSpace(resultStr) && outputBuf.Length == 0)
-                        outputBuf.Append(resultStr);
+                    if (root.TryGetProperty("result", out var resultText))
+                    {
+                        var resultStr = resultText.GetString();
+                        if (!string.IsNullOrWhiteSpace(resultStr) && outputBuf.Length == 0)
+                            outputBuf.Append(resultStr);
+                    }
+
+                    // Token usage 파싱 (Claude Code stream-json의 result 메시지에 포함)
+                    if (root.TryGetProperty("usage", out var usageObj)
+                        && usageObj.ValueKind == JsonValueKind.Object)
+                    {
+                        long inTok = usageObj.TryGetProperty("input_tokens", out var it)
+                            && it.ValueKind == JsonValueKind.Number ? it.GetInt64() : 0;
+                        long outTok = usageObj.TryGetProperty("output_tokens", out var ot)
+                            && ot.ValueKind == JsonValueKind.Number ? ot.GetInt64() : 0;
+                        long cacheRead = usageObj.TryGetProperty("cache_read_input_tokens", out var cr)
+                            && cr.ValueKind == JsonValueKind.Number ? cr.GetInt64() : 0;
+                        long cacheCreate = usageObj.TryGetProperty("cache_creation_input_tokens", out var cc)
+                            && cc.ValueKind == JsonValueKind.Number ? cc.GetInt64() : 0;
+                        capturedUsage = new TokenUsage(inTok, outTok, cacheRead, cacheCreate);
+                        DebugLog($"usage: in={inTok} out={outTok} cacheR={cacheRead} cacheC={cacheCreate}");
+                    }
                 }
                 else
                 {
@@ -322,6 +354,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         // Use assistant/result message if available, otherwise fall back to streamed deltas
         var finalOutput = outputBuf.Length > 0 ? outputBuf.ToString() : streamedOutput.ToString();
 
+        totalSw.Stop();
+
         return new ClaudeResult
         {
             Success = process.ExitCode == 0,
@@ -329,6 +363,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
             Stderr = stderr,
             ErrorMessages = errorMessages.ToString(),
             ExitCode = process.ExitCode,
+            Usage = capturedUsage,
+            Duration = totalSw.Elapsed,
         };
     }
 
@@ -338,28 +374,47 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         string? workingDirectory = null,
         RalphLogger? logger = null,
         TextWriter? output = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Func<ClaudeResult, string?>? buildRetryContext = null,
+        string? allowedTools = null)
     {
+        var currentPrompt = prompt;
+        ClaudeResult? lastResult = null;
+
         for (var attempt = 1; attempt <= maxRetries; attempt++)
         {
-            if (attempt > 1)
+            if (attempt > 1 && lastResult != null)
             {
+                // 이전 실패 컨텍스트를 다음 시도 prompt에 prepend
+                var retryContext = buildRetryContext?.Invoke(lastResult) ?? DefaultFailureContext(lastResult);
+                currentPrompt = $"""
+                    {retryContext}
+
+                    ---
+
+                    {prompt}
+                    """;
+
                 if (output == null)
                     AnsiConsole.MarkupLine(
                         $"[yellow]Retry attempt {attempt}/{maxRetries} (waiting {retryDelay}s)...[/]");
-                logger?.Info($"Retry attempt {attempt}/{maxRetries}");
+                logger?.Info($"Retry attempt {attempt}/{maxRetries} with failure context (exit={lastResult.ExitCode})");
+                output?.WriteLine($"\n=== Retry {attempt}/{maxRetries} (previous exit={lastResult.ExitCode}) ===");
                 await Task.Delay(retryDelay * 1000, ct);
             }
+            else
+            {
+                logger?.Info($"Running Claude Code (attempt {attempt})");
+            }
 
-            logger?.Info($"Running Claude Code (attempt {attempt})");
-
-            var result = await RunStreamAsync(prompt, model, workingDirectory, logger, output, ct);
+            var result = await RunStreamAsync(currentPrompt, model, workingDirectory, logger, output, ct, allowedTools);
             if (result.Success)
             {
                 logger?.Info("Claude Code execution successful");
                 return result;
             }
 
+            lastResult = result;
             logger?.Error($"Claude Code failed with exit code {result.ExitCode} (attempt {attempt})");
             if (output == null)
                 AnsiConsole.MarkupLine($"[red]Claude Code failed (exit code: {result.ExitCode})[/]");
@@ -368,6 +423,36 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5)
         logger?.Error($"Claude Code failed after {maxRetries} attempts");
         if (output == null)
             AnsiConsole.MarkupLine($"[red]Claude Code failed after {maxRetries} attempts[/]");
-        return new ClaudeResult { Success = false, ExitCode = 1 };
+        return lastResult ?? new ClaudeResult { Success = false, ExitCode = 1 };
+    }
+
+    private static string DefaultFailureContext(ClaudeResult lastResult)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# 이전 시도 실패 보고");
+        sb.AppendLine();
+        sb.AppendLine($"Exit code: {lastResult.ExitCode}");
+
+        if (!string.IsNullOrWhiteSpace(lastResult.Stderr))
+        {
+            sb.AppendLine();
+            sb.AppendLine("Stderr:");
+            sb.AppendLine("```");
+            sb.AppendLine(lastResult.Stderr.Trim());
+            sb.AppendLine("```");
+        }
+
+        if (!string.IsNullOrWhiteSpace(lastResult.ErrorMessages))
+        {
+            sb.AppendLine();
+            sb.AppendLine("Error messages:");
+            sb.AppendLine("```");
+            sb.AppendLine(lastResult.ErrorMessages.Trim());
+            sb.AppendLine("```");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("위 실패 원인을 먼저 분석한 뒤 다른 접근으로 시도하세요. 동일한 방법을 단순 반복하면 같은 실패를 유발합니다.");
+        return sb.ToString();
     }
 }

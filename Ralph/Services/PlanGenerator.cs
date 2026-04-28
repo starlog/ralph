@@ -99,16 +99,16 @@ public partial class PlanGenerator
             return 1;
         }
 
-        // Validate 4-phase pattern (warn only)
+        // Validate phase distribution (informational — flexible granularity is allowed)
         var planCount = parsed.Tasks.Count(t => t.Category == "plan");
         var implCount = parsed.Tasks.Count(t => t.Category == "implementation");
         var testCount = parsed.Tasks.Count(t => t.Category == "testing");
         var commitCount = parsed.Tasks.Count(t => t.Category == "commit");
 
-        if (planCount != implCount || implCount != testCount || testCount != commitCount)
+        if (implCount == 0 && parsed.Tasks.Count > 0)
         {
             AnsiConsole.MarkupLine(
-                $"[yellow]Warning: Uneven task phases — plan:{planCount} impl:{implCount} test:{testCount} commit:{commitCount}[/]");
+                "[yellow]Warning: No 'implementation' tasks found — feature granularity may be off.[/]");
         }
 
         // Write validated JSON
@@ -158,35 +158,49 @@ public partial class PlanGenerator
 
             ## Task Generation Rules
 
-            1. **Break down the PRD into logical features or components.** Each feature becomes a "group" of 4 sequential tasks.
+            1. **Break down the PRD into logical features or components.** Each feature becomes a group of 1~4 sequential tasks depending on the feature's complexity.
 
-            2. **For every feature/component, generate exactly 4 tasks in this order:**
+            2. **Choose the right granularity per feature.** Default to the smallest split that still ensures quality:
 
-               Step A - **Plan** (category: "plan")
-                  - id: `{feature}-plan`
+               - **Trivial change** (single-file edit, doc tweak, config bump, version bump):
+                 → 1 task only (`category: "implementation"`). Skip plan/test/commit split entirely.
+
+               - **Small feature** (1~3 files, no new module/architecture):
+                 → 2 tasks: implementation → commit. Skip plan if the PRD itself is specific enough; skip test if the change is mechanical (e.g. doc/config).
+
+               - **Standard feature** (multiple files, new module or non-trivial logic):
+                 → Full 4-phase: plan → impl → test → commit.
+
+               - **Complex feature** (cross-cutting, schema migration, architectural):
+                 → Split into multiple sub-features, each handled with its own appropriate granularity.
+
+               Do NOT force the 4-phase pattern when the feature does not need it. Forcing 4 tasks on a trivial PRD wastes tokens and time. Pick granularity per feature based on actual scope.
+
+            3. **Task definitions** (use as appropriate based on chosen granularity):
+
+               **Plan task** (category: "plan", id: `{feature}-plan`)
                   - The prompt must instruct Claude to: analyze requirements for this feature, examine the existing codebase, identify files to create/modify, design the architecture, and write a detailed implementation plan as a markdown file.
 
-               Step B - **Implementation** (category: "implementation")
-                  - id: `{feature}-impl`
-                  - dependsOn: [`{feature}-plan`]
-                  - The prompt must instruct Claude to: implement the feature according to the plan created in the plan step, create all necessary files, and follow project conventions.
+               **Implementation task** (category: "implementation", id: `{feature}-impl` or `{feature}` for trivial/small)
+                  - dependsOn: [`{feature}-plan`] if a plan task exists for this feature, otherwise `[]`.
+                  - The prompt must instruct Claude to: implement the feature (according to the plan if one exists), create all necessary files, follow project conventions.
 
-               Step C - **Testing** (category: "testing")
-                  - id: `{feature}-test`
+               **Testing task** (category: "testing", id: `{feature}-test`)
                   - dependsOn: [`{feature}-impl`]
                   - The prompt must instruct Claude to: write and run tests for the implemented feature, ensure all tests pass, fix any issues found.
+                  - Skip this task if the feature is mechanical (doc, config, single-line edit) where tests provide no value.
 
-               Step D - **Commit** (category: "commit")
-                  - id: `{feature}-commit`
-                  - dependsOn: [`{feature}-test`]
-                  - The prompt must instruct Claude to create a **pure commit** that contains ONLY the files this feature's processor (plan/impl/test steps) created, modified, or deleted — never files changed by unrelated or parallel work. The prompt MUST require Claude to:
+               **Commit task** (category: "commit", id: `{feature}-commit`)
+                  - dependsOn: previous task in this feature's chain (test → impl → plan, whichever is the last that exists)
+                  - The prompt must instruct Claude to create a **pure commit** that contains ONLY the files this feature's processor created, modified, or deleted — never files changed by unrelated or parallel work. The prompt MUST require Claude to:
                     a. Run `git status` and `git diff --name-status HEAD` to see all changed files.
-                    b. Cross-check against this feature's planned scope: the union of `outputFiles` and `modifiedFiles` declared on `{feature}-plan`, `{feature}-impl`, and `{feature}-test` (plus any files those steps actually created/modified/deleted in this run).
+                    b. Cross-check against this feature's planned scope: the union of `outputFiles` and `modifiedFiles` declared on the feature's tasks (plus any files those steps actually created/modified/deleted in this run).
                     c. Stage ONLY those in-scope files explicitly by path with `git add <path>` (one path per file, or a precise pathspec). Do NOT use `git add .`, `git add -A`, `git add -u`, or wildcard globs that could sweep in unrelated changes.
                     d. If the working tree contains changes that are NOT part of this feature's scope, leave them unstaged — do not stash, revert, or restore them; they belong to other work.
                     e. Never stage sensitive files (.env, *.pem, *.key, credentials.json, secrets.*, *.p12, *.pfx) even if they appear in scope — abort and report instead.
                     f. Run `git diff --cached --name-only` to verify the staged set equals the intended in-scope set; if extra files leaked in, unstage them with `git restore --staged <path>` before committing.
                     g. Create a single `git commit` with a descriptive message in Korean summarizing this feature's changes.
+                  - The commit task can be skipped entirely if `workflow.onTaskComplete.commitChanges` is `true` (Ralph auto-commits after each task) AND the feature is small enough that one commit suffices.
 
             3. **Cross-feature dependencies (IMPORTANT for parallel execution):**
                - Features that are **independent** (don't share files or code dependencies) should have NO cross-feature dependencies. This allows Ralph to execute them in parallel using git worktrees.

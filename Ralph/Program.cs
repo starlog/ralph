@@ -38,6 +38,7 @@ CheckCommand("git", "Git", "https://git-scm.com");
 var argList = args.ToList();
 var debug = argList.Remove("--debug");
 var sequential = argList.Remove("--sequential");
+var forceFlag = argList.Remove("--force");
 var maxParallelArg = 0;
 var maxParallelIdx = argList.IndexOf("--max-parallel");
 if (maxParallelIdx >= 0 && maxParallelIdx + 1 < argList.Count)
@@ -102,6 +103,9 @@ try
         "--status" or "-s" => HandleStatus(),
         "--reset" or "-r" => HandleReset(),
         "--logs" => HandleLogs(),
+        "--cost" => HandleCost(),
+        "--show-prompt" => HandleShowPrompt(),
+        "--validate" => HandleValidate(),
         "--worktree-cleanup" => HandleWorktreeCleanup(),
         "--help" or "-h" => Task.FromResult(ShowHelp()),
         "" => Task.FromResult(ShowHelp()),
@@ -201,6 +205,33 @@ async Task<int> HandleRun()
     using var logger = new RalphLogger();
     logger.Info($"Tasks file: {tasksFile}");
 
+    // 세션 시작 시 자동 로그 rotation (silent)
+    LogRotator.Rotate(retentionDays: tm.Data.Workflow?.LogRetentionDays, quiet: true);
+
+    // 실행 전 plan 검증 — error가 있으면 중단 (--force 시 우회)
+    var preReport = PlanValidator.Validate(tm);
+    if (preReport.HasErrors)
+    {
+        AnsiConsole.MarkupLine($"[red]✗ Plan 검증 실패 ({preReport.Errors.Count}개 error):[/]");
+        foreach (var e in preReport.Errors)
+            AnsiConsole.MarkupLine($"  [red]•[/] {Markup.Escape(e)}");
+        if (!forceFlag)
+        {
+            AnsiConsole.MarkupLine("\n[yellow]계속하려면 --force 플래그를 추가하거나 'ralph --validate'로 자세히 보세요.[/]");
+            return 1;
+        }
+        AnsiConsole.MarkupLine("[yellow]--force 지정됨 — error 무시하고 진행합니다.[/]\n");
+    }
+    if (preReport.HasWarnings)
+    {
+        AnsiConsole.MarkupLine($"[yellow]⚠ Plan 검증 경고 {preReport.Warnings.Count}개 (실행은 계속됨, 자세히는 'ralph --validate')[/]");
+        foreach (var w in preReport.Warnings.Take(3))
+            AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(w)}");
+        if (preReport.Warnings.Count > 3)
+            AnsiConsole.MarkupLine($"  [dim]... 외 {preReport.Warnings.Count - 3}개[/]");
+        AnsiConsole.WriteLine();
+    }
+
     // 병렬 실행 여부 결정
     var parallelConfig = tm.ParallelConfig;
     var useParallel = !sequential && !envParallelDisabled && parallelConfig.Enabled;
@@ -227,6 +258,11 @@ async Task<int> HandleRun()
             $"[cyan]그래프 스캔:[/] 최대 동시 실행 가능 태스크 {maxLayerWidth}개 → {concurrency}개로 설정 (상한 {hardCap})");
     }
 
+    var sessionStart = DateTime.UtcNow;
+    var sessionStopwatch = System.Diagnostics.Stopwatch.StartNew();
+    var totalAtStart = tm.GetPendingTasks().Count;
+    int exitCode;
+
     if (useParallel)
     {
         logger.Info($"Exec mode: parallel (max concurrent: {concurrency})");
@@ -236,15 +272,72 @@ async Task<int> HandleRun()
 
         var worktree = new WorktreeService(git);
         var executor = new ParallelExecutor(tm, claude, git, worktree, logger, tasksFile, modelArg);
-        return await executor.RunAsync(concurrency, cts.Token);
+        exitCode = await executor.RunAsync(concurrency, cts.Token);
     }
     else
     {
         logger.Info("Exec mode: sequential");
         AnsiConsole.MarkupLine("[yellow]순차 실행 모드[/]");
 
-        return await RunAutoLoop(tm, claude, git, logger, dryRun: false, commitOnComplete: true, modelArg, cts.Token);
+        exitCode = await RunAutoLoop(tm, claude, git, logger, dryRun: false, commitOnComplete: true, modelArg, cts.Token);
     }
+
+    sessionStopwatch.Stop();
+
+    // 세션 종료 알림 (webhook 설정 있을 때만 발화)
+    try
+    {
+        await tm.ReloadAsync();
+        var stillPending = tm.GetPendingTasks().Count;
+        var completedNow = Math.Max(0, totalAtStart - stillPending);
+        var success = exitCode == 0;
+        var costSummary = await ReadCostSummaryAsync();
+
+        var notifier = new NotificationService();
+        await notifier.NotifyAsync(
+            success: success,
+            sessionId: sessionStart.ToString("yyyyMMdd-HHmmss"),
+            totalTasks: totalAtStart,
+            completedTasks: completedNow,
+            failedTasks: success ? 0 : Math.Max(0, totalAtStart - completedNow),
+            durationSec: sessionStopwatch.Elapsed.TotalSeconds,
+            estimatedCostUsd: costSummary,
+            settings: tm.Data.Workflow?.Notifications,
+            logger: logger,
+            ct: cts.Token);
+    }
+    catch (Exception ex)
+    {
+        logger.Warn($"Notification post-processing failed: {ex.Message}");
+    }
+
+    return exitCode;
+}
+
+async Task<double> ReadCostSummaryAsync()
+{
+    var path = Path.Combine(".ralph-logs", "cost.jsonl");
+    if (!File.Exists(path)) return 0.0;
+    var total = 0.0;
+    try
+    {
+        await foreach (var line in File.ReadLinesAsync(path, cts.Token))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(line);
+                if (doc.RootElement.TryGetProperty("estimatedUsd", out var usd)
+                    && usd.ValueKind == System.Text.Json.JsonValueKind.Number)
+                {
+                    total += usd.GetDouble();
+                }
+            }
+            catch (System.Text.Json.JsonException) { }
+        }
+    }
+    catch { /* best effort */ }
+    return total;
 }
 
 async Task<int> HandleDryRun()
@@ -280,10 +373,36 @@ async Task<int> HandleSingleTask()
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
 
-    if (tm.GetTask(taskId) == null)
+    var task = tm.GetTask(taskId);
+    if (task == null)
     {
         AnsiConsole.MarkupLine($"[red]Error: Task '{Markup.Escape(taskId)}' not found.[/]");
         return 1;
+    }
+
+    // 의존성 검사 — 미완료 의존이 있으면 경고 + 확인 (--force 시 우회)
+    if (!tm.CheckDependencies(taskId, out var blockedBy))
+    {
+        AnsiConsole.MarkupLine(
+            $"\n[yellow]⚠️  태스크 '{Markup.Escape(taskId)}'의 의존성이 완료되지 않았습니다:[/]");
+        foreach (var depId in blockedBy)
+        {
+            var dep = tm.GetTask(depId);
+            var depTitle = dep?.Title ?? "(unknown)";
+            var status = dep == null ? "missing" : (dep.Done ? "done" : "pending");
+            AnsiConsole.MarkupLine($"  - {Markup.Escape(depId)}: {Markup.Escape(depTitle)} [dim]({status})[/]");
+        }
+
+        if (forceFlag)
+        {
+            AnsiConsole.MarkupLine("[yellow]--force 지정됨 — 의존성 무시하고 진행합니다.[/]\n");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("\n계속하려면 [green]--force[/] 플래그를 추가하거나 의존성을 먼저 완료하세요.");
+            AnsiConsole.MarkupLine($"  예: [cyan]ralph --task {Markup.Escape(taskId)} --force[/]");
+            return 1;
+        }
     }
 
     var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug };
@@ -389,6 +508,77 @@ async Task<int> HandleReset()
     return 0;
 }
 
+async Task<int> HandleCost()
+{
+    var tracker = new CostTracker();
+    await tracker.PrintSummaryAsync(cts.Token);
+    return 0;
+}
+
+async Task<int> HandleValidate()
+{
+    RequireFile(tasksFile);
+    var tm = await TaskManager.LoadAsync(tasksFile);
+
+    AnsiConsole.Write(new Rule($"[green]Validating {Markup.Escape(tasksFile)}[/]").RuleStyle("blue"));
+    AnsiConsole.MarkupLine($"태스크 수: [cyan]{tm.Data.Tasks.Count}[/]");
+    AnsiConsole.WriteLine();
+
+    var report = PlanValidator.Validate(tm);
+    return PlanValidator.PrintReport(report, failOnWarning: forceFlag);
+}
+
+async Task<int> HandleShowPrompt()
+{
+    if (argList.Count < 2)
+    {
+        AnsiConsole.MarkupLine("[red]Error: Task ID required. Usage: ralph --show-prompt <task-id>[/]");
+        return 1;
+    }
+
+    var taskId = argList[1];
+    RequireFile(tasksFile);
+    var tm = await TaskManager.LoadAsync(tasksFile);
+
+    var task = tm.GetTask(taskId);
+    if (task == null)
+    {
+        AnsiConsole.MarkupLine($"[red]Error: Task '{Markup.Escape(taskId)}' not found.[/]");
+        return 1;
+    }
+
+    // 같은 ready batch에 있는 sibling task를 자동 추정 (실제 실행 시와 동일한 prompt를 보기 위해)
+    var siblings = new List<TaskItem>();
+    var batches = tm.GetParallelBatches();
+    var myBatch = batches.FirstOrDefault(b => b.Contains(taskId));
+    if (myBatch != null)
+    {
+        siblings = myBatch
+            .Where(id => id != taskId)
+            .Select(tm.GetTask)
+            .Where(t => t != null)
+            .Select(t => t!)
+            .ToList();
+    }
+
+    var fullPrompt = PromptBuilder.Build(task, tm, tasksFile, siblings);
+
+    AnsiConsole.Write(new Rule($"[green]Full prompt for {Markup.Escape(taskId)}[/]").RuleStyle("blue"));
+    AnsiConsole.WriteLine();
+    AnsiConsole.WriteLine(fullPrompt);
+    AnsiConsole.Write(new Rule().RuleStyle("blue"));
+
+    if (siblings.Count > 0)
+    {
+        AnsiConsole.MarkupLine($"[dim]siblings: {Markup.Escape(string.Join(", ", siblings.Select(s => s.Id)))}[/]");
+    }
+    else
+    {
+        AnsiConsole.MarkupLine("[dim]siblings: (none — runs alone or no other ready tasks in same batch)[/]");
+    }
+    return 0;
+}
+
 async Task<int> HandleWorktreeCleanup()
 {
     var git = new GitService();
@@ -420,9 +610,18 @@ async Task<int> HandleLogs()
         return 0;
     }
 
+    // --cleanup 플래그 처리: 오래된 로그 파일 정리
+    if (argList.Contains("--cleanup"))
+    {
+        var deleted = LogRotator.Rotate(quiet: false);
+        if (deleted == 0)
+            AnsiConsole.MarkupLine("[green]정리할 오래된 로그가 없습니다.[/]");
+        return 0;
+    }
+
     // --live 플래그 파싱
     var liveMode = argList.Contains("--live");
-    var logArgs = argList.Skip(1).Where(a => a != "--live").ToList();
+    var logArgs = argList.Skip(1).Where(a => a is not "--live" and not "--cleanup").ToList();
 
     // ralph --logs [--live] {taskId} → 특정 태스크 로그 출력
     if (logArgs.Count >= 1 && !logArgs[0].StartsWith("--"))
@@ -548,15 +747,19 @@ int ShowHelp()
     table.AddRow("[green]--plan-prompt[/] <file>", "Show full plan prompt without executing");
     table.AddRow("[green]--run[/] [[file]]", "Run all pending tasks (parallel by default)");
     table.AddRow("[green]--dry-run[/] [[file]]", "Preview execution without changes");
-    table.AddRow("[green]--task[/] <id>", "Run a specific task by ID");
+    table.AddRow("[green]--task[/] <id>", "Run a specific task by ID (use --force to bypass deps)");
     table.AddRow("[green]--interactive[/]", "Run tasks interactively (confirm each)");
     table.AddRow("[green]--list[/], -l", "List all pending tasks");
     table.AddRow("[green]--graph[/], -g", "Show ASCII task dependency graph");
     table.AddRow("[green]--prompts[/], -p", "Show all task prompts");
+    table.AddRow("[green]--show-prompt[/] <id>", "Show the full prompt sent to Claude for a task");
+    table.AddRow("[green]--validate[/]", "Validate tasks.json (cycles, deps, file overlaps, etc.)");
     table.AddRow("[green]--status[/], -s", "Show progress status (with parallel batch info)");
     table.AddRow("[green]--reset[/], -r", "Reset all tasks to pending");
     table.AddRow("[green]--logs[/] [[task-id]]", "Show logs (task log or session log list)");
     table.AddRow("[green]--logs --live[/] <task-id>", "Live tail a task log (like tail -f)");
+    table.AddRow("[green]--logs --cleanup[/]", "Delete logs older than retention period");
+    table.AddRow("[green]--cost[/]", "Show cumulative token usage and estimated cost");
     table.AddRow("[green]--worktree-cleanup[/]", "Clean up stale worktrees");
     table.AddRow("[green]--help[/], -h", "Show this help message");
     AnsiConsole.Write(table);
@@ -565,6 +768,7 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  [green]-f[/], [green]--file[/] <path>    Use custom tasks file (default: tasks.json)");
     AnsiConsole.MarkupLine("  [green]--sequential[/]         Force sequential execution (disable parallel)");
     AnsiConsole.MarkupLine("  [green]--max-parallel[/] N     Maximum concurrent tasks (default: 5)");
+    AnsiConsole.MarkupLine("  [green]--force[/]              Bypass dependency/validation checks (--task, --run)");
     AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
     AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
@@ -575,10 +779,12 @@ int ShowHelp()
     AnsiConsole.MarkupLine("  4. ralph --run\n");
 
     AnsiConsole.MarkupLine("[blue]Environment variables:[/]");
-    AnsiConsole.MarkupLine("  MAX_RETRIES          Max retry attempts (default: 2)");
-    AnsiConsole.MarkupLine("  RETRY_DELAY          Seconds between retries (default: 5)");
-    AnsiConsole.MarkupLine("  RALPH_MAX_PARALLEL   Max concurrent worktrees (default: 3)");
-    AnsiConsole.MarkupLine("  RALPH_PARALLEL       Set to 'false' to disable parallel execution\n");
+    AnsiConsole.MarkupLine("  MAX_RETRIES                 Max retry attempts (default: 2)");
+    AnsiConsole.MarkupLine("  RETRY_DELAY                 Seconds between retries (default: 5)");
+    AnsiConsole.MarkupLine("  RALPH_MAX_PARALLEL          Max concurrent worktrees (default: 3)");
+    AnsiConsole.MarkupLine("  RALPH_PARALLEL              Set to 'false' to disable parallel execution");
+    AnsiConsole.MarkupLine("  RALPH_WEBHOOK_URL           Default webhook for session completion notifications");
+    AnsiConsole.MarkupLine("  RALPH_LOG_RETENTION_DAYS    Auto-delete logs older than N days (default: 30)\n");
     return 0;
 }
 

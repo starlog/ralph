@@ -144,6 +144,15 @@ public class GitService
     }
 
     /// <summary>
+    /// repo 루트 절대경로를 반환합니다 (worktree가 아닌 main worktree 기준).
+    /// </summary>
+    public async Task<string> GetRepoRootAsync(string? workingDirectory = null, CancellationToken ct = default)
+    {
+        var (exitCode, output) = await RunAsync(["rev-parse", "--show-toplevel"], workingDirectory, ct);
+        return exitCode == 0 ? output.Trim() : Directory.GetCurrentDirectory();
+    }
+
+    /// <summary>
     /// 커밋이 하나라도 존재하는지 확인합니다.
     /// </summary>
     public async Task<bool> HasCommitsAsync(CancellationToken ct = default)

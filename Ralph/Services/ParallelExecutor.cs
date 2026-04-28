@@ -12,6 +12,7 @@ public class ParallelExecutor
     private readonly RalphLogger _logger;
     private readonly string _tasksFile;
     private readonly string? _model;
+    private readonly CostTracker _cost;
     private readonly SemaphoreSlim _taskFileLock = new(1, 1);
 
     public ParallelExecutor(
@@ -25,6 +26,7 @@ public class ParallelExecutor
         _logger = logger;
         _tasksFile = tasksFile;
         _model = model;
+        _cost = new CostTracker();
     }
 
     public async Task<int> RunAsync(int maxConcurrent, CancellationToken ct)
@@ -138,6 +140,7 @@ public class ParallelExecutor
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
             var result = await _claude.RunWithRetryAsync(fullPrompt, model: _model, logger: _logger, ct: ct);
+            await _cost.RecordAsync(taskId, _model ?? "opus", result, ct);
             if (!result.Success)
             {
                 AnsiConsole.MarkupLine("\n[red]Claude Code 실행 실패[/]");
@@ -210,10 +213,17 @@ public class ParallelExecutor
                         }
                     }, ct);
 
-                    // 병렬 실행
+                    // 병렬 실행 — 각 태스크에 같은 batch의 sibling 정보 전달
                     var execTasks = taskIds.Select(async taskId =>
                     {
-                        var success = await RunInWorktreeWithLogAsync(taskId, worktrees[taskId], tracker, ct);
+                        var siblings = taskIds
+                            .Where(id => id != taskId)
+                            .Select(id => _taskManager.GetTask(id))
+                            .Where(t => t != null)
+                            .Select(t => t!)
+                            .ToList();
+                        var success = await RunInWorktreeWithLogAsync(
+                            taskId, worktrees[taskId], siblings, tracker, ct);
                         lock (taskResults)
                             taskResults[taskId] = success;
                     }).ToList();
@@ -309,7 +319,8 @@ public class ParallelExecutor
     /// worktree 안에서 태스크를 실행하며 출력을 로그 파일에 기록합니다.
     /// </summary>
     private async Task<bool> RunInWorktreeWithLogAsync(
-        string taskId, string worktreePath, TaskProgressTracker tracker, CancellationToken ct)
+        string taskId, string worktreePath, IReadOnlyList<TaskItem> siblings,
+        TaskProgressTracker tracker, CancellationToken ct)
     {
         var task = _taskManager.GetTask(taskId)!;
         _logger.TaskStart(taskId, task.Title);
@@ -326,11 +337,12 @@ public class ParallelExecutor
 
             if (!string.IsNullOrEmpty(task.Prompt))
             {
-                var fullPrompt = BuildPrompt(task);
+                var fullPrompt = BuildPrompt(task, siblings);
 
                 var result = await _claude.RunWithRetryAsync(
                     fullPrompt, model: _model, workingDirectory: worktreePath, logger: _logger,
                     output: logWriter, ct: ct);
+                await _cost.RecordAsync(taskId, _model ?? "opus", result, ct);
 
                 if (!result.Success)
                 {
@@ -340,6 +352,10 @@ public class ParallelExecutor
                     return false;
                 }
             }
+
+            // tasks.json worktree 보호: Claude가 실수로 또는 prompt를 무시하고
+            // tasks.json을 수정했을 가능성을 방어. 머지 충돌의 가장 흔한 원인.
+            await GuardTasksFileAsync(taskId, worktreePath, logWriter, ct);
 
             // worktree 안에서 커밋
             if (_taskManager.CommitOnComplete)
@@ -359,6 +375,45 @@ public class ParallelExecutor
             tracker.UpdateStatus(taskId, TaskProgressStatus.Failed);
             _logger.Error($"Task {taskId} failed in worktree: {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// worktree에서 tasks.json이 수정되었으면 강제로 되돌립니다.
+    /// Claude가 prompt 지시를 무시하거나 보조 작업으로 tasks.json을 건드린 경우의 안전망.
+    /// 머지 단계에서 tasks.json 충돌(가장 흔한 충돌 케이스)을 사전 차단합니다.
+    /// </summary>
+    private async Task GuardTasksFileAsync(
+        string taskId, string worktreePath, TextWriter? logWriter, CancellationToken ct)
+    {
+        var tasksFileName = Path.GetFileName(_tasksFile);
+
+        // worktree 내 tasks.json 변경 여부 검사
+        var (statusExit, statusOut) = await _git.RunAsync(
+            ["status", "--porcelain", "--", tasksFileName], worktreePath, ct);
+
+        if (statusExit != 0 || string.IsNullOrWhiteSpace(statusOut))
+            return; // 변경 없음
+
+        var changeCode = statusOut.Length >= 2 ? statusOut[..2] : "";
+        var msg = $"⚠️  worktree '{taskId}'에서 {tasksFileName}이 수정되었습니다 (status: '{changeCode.Trim()}'). 강제 되돌립니다.";
+        _logger.Warn(msg);
+        logWriter?.WriteLine($"\n=== {msg} ===");
+
+        // staged 변경이 있으면 unstage
+        await _git.RunAsync(["reset", "HEAD", "--", tasksFileName], worktreePath, ct);
+
+        // 추적 중인 파일이면 HEAD 버전으로 복원
+        if (changeCode.Contains('M') || changeCode.Contains('D') || changeCode.Contains('R'))
+        {
+            await _git.RunAsync(["checkout", "HEAD", "--", tasksFileName], worktreePath, ct);
+        }
+        // 새로 추가된 파일이면 (?? 또는 A) 작업트리에서 제거
+        else if (changeCode.Contains('?') || changeCode.Contains('A'))
+        {
+            var fullPath = Path.Combine(worktreePath, tasksFileName);
+            try { if (File.Exists(fullPath)) File.Delete(fullPath); }
+            catch (Exception ex) { _logger.Warn($"Failed to delete {fullPath}: {ex.Message}"); }
         }
     }
 
@@ -407,37 +462,65 @@ public class ParallelExecutor
             return false;
         }
 
+        // base repo 루트를 작업 디렉토리로 명시 (Claude가 ralph 호출 위치가 아닌
+        // 머지가 진행 중인 repo 루트에서 충돌 마커를 찾도록 보장)
+        var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+
         var conflictList = string.Join("\n", mergeResult.ConflictFiles.Select(f => $"  - {f}"));
         var prompt = $"""
             다음 git merge 충돌을 해결해주세요.
 
+            작업 디렉토리: {repoRoot}
             태스크: {taskId}
-            충돌 파일:
+            충돌 파일 (repo 루트 기준 상대 경로):
             {conflictList}
 
-            각 충돌 파일을 열어서 충돌 마커(<<<<<<< HEAD, =======, >>>>>>> branch)를 찾고,
-            양쪽의 변경사항을 모두 살리는 방향으로 해결해주세요.
-            해결 후 파일을 저장해주세요.
+            지시:
+            1. `git status`로 현재 충돌 상태를 확인하세요.
+            2. 위 각 파일을 열어 충돌 마커(<<<<<<< HEAD, =======, >>>>>>> branch)를 모두 제거하세요.
+            3. 양쪽 변경사항을 모두 살리는 방향으로 통합하세요.
+            4. 마커가 남아있는지 검증한 뒤 파일을 저장하세요. (마커가 남아있으면 빌드/실행이 깨집니다)
+
+            staging과 commit은 ralph가 처리하므로 git add/commit은 실행하지 마세요.
             """;
 
-        AnsiConsole.MarkupLine($"[cyan]Claude Code로 충돌 해결 중 ({mergeResult.ConflictFiles.Count}개 파일)...[/]");
+        AnsiConsole.MarkupLine($"[cyan]Claude Code로 충돌 해결 중 ({mergeResult.ConflictFiles.Count}개 파일, repo: {Markup.Escape(repoRoot)})...[/]");
 
-        var result = await _claude.RunWithRetryAsync(prompt, model: _model, logger: _logger, ct: ct);
+        var result = await _claude.RunWithRetryAsync(
+            prompt, model: _model, workingDirectory: repoRoot, logger: _logger, ct: ct);
+        await _cost.RecordAsync($"conflict:{taskId}", _model ?? "opus", result, ct);
         if (!result.Success)
         {
             await _worktree.AbortMergeAsync(ct);
             return false;
         }
 
-        // 해결된 파일 staging
+        // 해결된 파일에 충돌 마커가 남아있는지 검증
         foreach (var file in mergeResult.ConflictFiles)
         {
-            await _git.RunAsync(["add", file], ct: ct);
+            var fullPath = Path.IsPathRooted(file) ? file : Path.Combine(repoRoot, file);
+            if (File.Exists(fullPath))
+            {
+                var content = await File.ReadAllTextAsync(fullPath, ct);
+                if (content.Contains("<<<<<<<") || content.Contains(">>>>>>>"))
+                {
+                    AnsiConsole.MarkupLine($"[red]충돌 마커가 여전히 남아있음: {Markup.Escape(file)}[/]");
+                    _logger.Error($"Conflict markers remain in {file} after Claude resolution");
+                    await _worktree.AbortMergeAsync(ct);
+                    return false;
+                }
+            }
+        }
+
+        // 해결된 파일 staging (repo 루트 기준)
+        foreach (var file in mergeResult.ConflictFiles)
+        {
+            await _git.RunAsync(["add", "--", file], workingDirectory: repoRoot, ct: ct);
         }
 
         // merge commit 완료
         var (exitCode, _) = await _git.RunAsync(
-            ["commit", "--no-edit"], ct: ct);
+            ["commit", "--no-edit"], workingDirectory: repoRoot, ct: ct);
 
         if (exitCode == 0)
         {
@@ -507,18 +590,8 @@ public class ParallelExecutor
         }
     }
 
-    private string BuildPrompt(TaskItem task)
-    {
-        return $"""
-            Task ID: {task.Id}
-            Task: {task.Title}
-
-            {task.Prompt}
-
-            참고: {_tasksFile} 파일에서 apiSpecs, samplePages 등 추가 정보를 확인할 수 있습니다.
-            완료 후 생성된 파일 목록을 알려주세요.
-            """;
-    }
+    private string BuildPrompt(TaskItem task, IReadOnlyList<TaskItem>? siblings = null)
+        => PromptBuilder.Build(task, _taskManager, _tasksFile, siblings);
 
     private void DisplayTaskInfo(string taskId)
     {

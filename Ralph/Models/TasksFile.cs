@@ -86,6 +86,24 @@ public class WorkflowSettings
     [JsonPropertyName("parallel")]
     public ParallelSettings? Parallel { get; set; }
 
+    [JsonPropertyName("notifications")]
+    public NotificationSettings? Notifications { get; set; }
+
+    [JsonPropertyName("logRetentionDays")]
+    public int? LogRetentionDays { get; set; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+public class NotificationSettings
+{
+    [JsonPropertyName("onComplete")]
+    public string? OnComplete { get; set; }
+
+    [JsonPropertyName("onFailure")]
+    public string? OnFailure { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
