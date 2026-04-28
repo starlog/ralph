@@ -395,13 +395,19 @@ async Task<int> HandleDryRun()
     // Backup for restore after dry-run
     var backupJson = await File.ReadAllTextAsync(tasksFile, cts.Token);
 
-    var result = await RunAutoLoop(tm, claude, git, logger,
-        dryRun: true, commitOnComplete: false, modelArg, budgetUsd: null,
-        cost: new CostTracker(), cts.Token);
-
-    // Restore original
-    await File.WriteAllTextAsync(tasksFile, backupJson, cts.Token);
-    AnsiConsole.MarkupLine($"[cyan][[DRY-RUN]] {Markup.Escape(tasksFile)} restored to original state.[/]");
+    int result;
+    try
+    {
+        result = await RunAutoLoop(tm, claude, git, logger,
+            dryRun: true, commitOnComplete: false, modelArg, budgetUsd: null,
+            cost: new CostTracker(), cts.Token);
+    }
+    finally
+    {
+        // Restore original — must run even if RunAutoLoop threw or was cancelled
+        await File.WriteAllTextAsync(tasksFile, backupJson, CancellationToken.None);
+        AnsiConsole.MarkupLine($"[cyan][[DRY-RUN]] {Markup.Escape(tasksFile)} restored to original state.[/]");
+    }
 
     return result;
 }
