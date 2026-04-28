@@ -514,6 +514,38 @@ async Task<int> HandleStatus()
         }
     }
 
+    // P3-1: 현재 실행 중인 worktree를 fs로 검출 (다른 터미널의 ralph --run 가시성 확보)
+    const string worktreeBase = ".ralph-worktrees";
+    const string logDir = ".ralph-logs";
+    if (Directory.Exists(worktreeBase))
+    {
+        var threshold = DateTime.Now.AddSeconds(-30);
+        var active = Directory.GetDirectories(worktreeBase)
+            .Select(d => new DirectoryInfo(d))
+            .Select(d =>
+            {
+                var logFile = Path.Combine(logDir, $"{d.Name}.log");
+                DateTime? logMtime = File.Exists(logFile) ? File.GetLastWriteTime(logFile) : null;
+                return new { TaskId = d.Name, Created = d.CreationTime, LogMtime = logMtime };
+            })
+            .OrderByDescending(x => x.LogMtime ?? x.Created)
+            .ToList();
+
+        if (active.Count > 0)
+        {
+            AnsiConsole.MarkupLine($"\n[yellow]현재 worktree: {active.Count}개[/]");
+            foreach (var w in active)
+            {
+                var fresh = w.LogMtime is { } m && m >= threshold ? "[green]live[/]" : "[dim]idle[/]";
+                var lastLog = w.LogMtime?.ToString("HH:mm:ss") ?? "(no log)";
+                AnsiConsole.MarkupLine(
+                    $"  {fresh} {Markup.Escape(w.TaskId)} [dim](last log: {lastLog})[/]");
+            }
+            AnsiConsole.MarkupLine(
+                "[dim]idle 상태가 오래 지속되면 [cyan]ralph --worktree-cleanup[/]로 정리 가능[/]");
+        }
+    }
+
     return 0;
 }
 
@@ -938,9 +970,17 @@ async Task<int> RunTaskAuto(
             AnsiConsole.Write(new Panel(Markup.Escape(task.Prompt)).Border(BoxBorder.Rounded));
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
-            var result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
-            await new CostTracker().RecordAsync(taskId, model ?? "opus", result, ct);
-            if (!result.Success)
+            // P0-1: 예외 경로에서도 cost 기록 보장
+            ClaudeResult? result = null;
+            try
+            {
+                result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
+            }
+            finally
+            {
+                await new CostTracker().RecordAsync(taskId, model ?? "opus", result, CancellationToken.None);
+            }
+            if (result == null || !result.Success)
             {
                 AnsiConsole.MarkupLine("\n[red]Claude Code execution failed[/]");
                 logger.TaskEnd(taskId, "failed");
@@ -995,36 +1035,16 @@ async Task<int> RunAutoLoop(
 {
     ShowProgress(tm, logger);
 
+    // P1-1: 단일 BudgetGate가 80%/100% 분기와 메시지를 통합 관리.
     var costTracker = new CostTracker();
-    var budgetWarned = false;
+    var budgetGate = new BudgetGate(budgetUsd, costTracker, logger);
 
     while (true)
     {
         ct.ThrowIfCancellationRequested();
 
         // F5: budget 게이트 — 새 task 시작 직전 검사. 차단 시 종료 코드 2 반환.
-        // 미설정/0/음수는 미설정과 동일 처리(기존 동작 보존).
-        if (budgetUsd is { } b && b > 0.0)
-        {
-            var total = await costTracker.GetTotalUsdAsync(ct);
-            if (!budgetWarned && total >= b * 0.8)
-            {
-                budgetWarned = true;
-                AnsiConsole.MarkupLine(
-                    $"[yellow]⚠ 예산 80% 도달[/] (${total:F2} / ${b:F2}, " +
-                    $"{(total / b * 100):F0}%)");
-                logger.Warn($"[budget] 80% threshold hit: ${total:F4} / ${b:F4}");
-            }
-            if (total >= b)
-            {
-                AnsiConsole.MarkupLine(
-                    $"[red]✗ budget reached[/] (${total:F2} / ${b:F2}). 새 태스크 시작을 중단합니다.");
-                AnsiConsole.MarkupLine(
-                    "[dim]다음 실행: 예산을 늘리거나 예산 없이 재개 가능합니다.[/]");
-                logger.Error($"[budget] reached: ${total:F4} / ${b:F4}");
-                return 2;
-            }
-        }
+        if (!await budgetGate.CheckAsync(ct)) return 2;
 
         var nextId = tm.GetNextReadyTask();
         if (nextId == null)
@@ -1135,10 +1155,18 @@ async Task<int> RunInteractiveLoop(
                             $"Task ID: {nextId}\nTask: {task.Title}\n\n{task.Prompt}\n\n참고: {tasksFile} 파일에서 apiSpecs, samplePages 등 추가 정보를 확인할 수 있습니다.\n완료 후 생성된 파일 목록을 알려주세요.";
 
                         AnsiConsole.MarkupLine("[cyan]Running Claude Code...[/]\n");
-                        var result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
-                        await new CostTracker().RecordAsync(nextId, model ?? "opus", result, ct);
+                        // P0-1: 예외 경로에서도 cost 기록 보장
+                        ClaudeResult? result = null;
+                        try
+                        {
+                            result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
+                        }
+                        finally
+                        {
+                            await new CostTracker().RecordAsync(nextId, model ?? "opus", result, CancellationToken.None);
+                        }
 
-                        if (!result.Success)
+                        if (result == null || !result.Success)
                         {
                             AnsiConsole.MarkupLine("\n[red]Claude Code execution failed[/]");
                             if (!AnsiConsole.Confirm("Continue anyway?", defaultValue: false))

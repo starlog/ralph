@@ -13,22 +13,22 @@ public class ParallelExecutor
     private readonly string _tasksFile;
     private readonly string? _model;
     private readonly bool _strictFiles;
-    private readonly double? _budgetUsd;
     private readonly CostTracker _cost;
+    private readonly BudgetGate _budgetGate;
     private readonly SemaphoreSlim _taskFileLock = new(1, 1);
-    private bool _budgetWarningEmitted;
-    private bool _budgetReached;
+    private int _cleanupFailures;
 
     /// <summary>
     /// budget(USD) 임계값 도달로 새 dispatch를 차단했는지 여부.
     /// 호출자가 확인해 종료 코드 2를 결정할 수 있다.
     /// </summary>
-    public bool BudgetReached => _budgetReached;
+    public bool BudgetReached => _budgetGate.Reached;
 
     public ParallelExecutor(
         TaskManager taskManager, ClaudeService claude, GitService git,
         WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
-        bool strictFiles = false, double? budgetUsd = null)
+        bool strictFiles = false, double? budgetUsd = null,
+        CostTracker? cost = null, BudgetGate? budgetGate = null)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -38,8 +38,8 @@ public class ParallelExecutor
         _tasksFile = tasksFile;
         _model = model;
         _strictFiles = strictFiles;
-        _budgetUsd = budgetUsd;
-        _cost = new CostTracker();
+        _cost = cost ?? new CostTracker();
+        _budgetGate = budgetGate ?? new BudgetGate(budgetUsd, _cost, logger);
     }
 
     public async Task<int> RunAsync(int maxConcurrent, CancellationToken ct)
@@ -72,7 +72,7 @@ public class ParallelExecutor
             ct.ThrowIfCancellationRequested();
 
             // F5: budget 게이트 — 새 dispatch 직전에 검사. 차단 시 break (호출자가 종료 코드 2로 변환).
-            if (!await CheckBudgetAsync(ct)) break;
+            if (!await _budgetGate.CheckAsync(ct)) break;
 
             var readyTasks = _taskManager.GetAllReadyTasks();
 
@@ -137,40 +137,6 @@ public class ParallelExecutor
     }
 
     /// <summary>
-    /// 새 task/batch dispatch 직전 호출. budget 미설정/0/음수면 통과.
-    /// 80% 도달 시 1회 경고. 100% 도달 시 _budgetReached=true 설정 후 false 반환 — 호출자가 break.
-    /// </summary>
-    private async Task<bool> CheckBudgetAsync(CancellationToken ct)
-    {
-        if (_budgetUsd is not { } budget || budget <= 0.0) return true;
-
-        var total = await _cost.GetTotalUsdAsync(ct);
-
-        if (!_budgetWarningEmitted && total >= budget * 0.8)
-        {
-            _budgetWarningEmitted = true;
-            var pct = total / budget * 100.0;
-            AnsiConsole.MarkupLine(
-                $"[yellow]⚠ 예산 80% 도달[/] (${total:F2} / ${budget:F2}, {pct:F0}%)");
-            _logger.Warn($"[budget] 80% threshold hit: ${total:F4} / ${budget:F4}");
-        }
-
-        if (total >= budget)
-        {
-            _budgetReached = true;
-            AnsiConsole.MarkupLine(
-                $"[red]✗ budget reached[/] (${total:F2} / ${budget:F2}). " +
-                "새 태스크 시작을 중단합니다. 진행 중 태스크는 완료까지 대기합니다.");
-            AnsiConsole.MarkupLine(
-                "[dim]다음 실행: 예산을 늘리거나(--budget-usd <larger>) 예산 없이(`ralph --run`) 재개 가능합니다.[/]");
-            _logger.Error($"[budget] reached: ${total:F4} / ${budget:F4}");
-            return false;
-        }
-
-        return true;
-    }
-
-    /// <summary>
     /// worktree 없이 단일 태스크를 직접 실행합니다.
     /// </summary>
     private async Task<int> RunSingleTaskAsync(string taskId, CancellationToken ct)
@@ -189,9 +155,17 @@ public class ParallelExecutor
             AnsiConsole.Write(new Panel(Markup.Escape(task.Prompt)).Border(BoxBorder.Rounded));
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
-            var result = await _claude.RunWithRetryAsync(fullPrompt, model: _model, logger: _logger, ct: ct);
-            await _cost.RecordAsync(taskId, _model ?? "opus", result, ct);
-            if (!result.Success)
+            // P0-1: 예외 경로에서도 cost 기록 보장
+            ClaudeResult? result = null;
+            try
+            {
+                result = await _claude.RunWithRetryAsync(fullPrompt, model: _model, logger: _logger, ct: ct);
+            }
+            finally
+            {
+                await _cost.RecordAsync(taskId, _model ?? "opus", result, CancellationToken.None);
+            }
+            if (result == null || !result.Success)
             {
                 AnsiConsole.MarkupLine("\n[red]Claude Code 실행 실패[/]");
                 _logger.TaskEnd(taskId, "failed");
@@ -299,9 +273,12 @@ public class ParallelExecutor
                     AnsiConsole.MarkupLine($"    [dim]로그 확인: ralph --logs {Markup.Escape(f)}[/]");
                 }
 
-                // 실패한 worktree 정리
+                // 실패한 worktree 정리 (실패는 _cleanupFailures로 누적)
                 foreach (var f in failed)
-                    await _worktree.CleanupWorktreeAsync(f, _logger, ct);
+                {
+                    if (!await _worktree.CleanupWorktreeAsync(f, _logger, ct))
+                        _cleanupFailures++;
+                }
 
                 // 성공한 것만 merge 진행
                 taskIds = taskIds.Except(failed).ToList();
@@ -331,6 +308,17 @@ public class ParallelExecutor
                     taskId, baseBranch, declared, _logger, ct: ct);
 
                 ReportValidation(taskId, validation);
+
+                // P0-3: strict 모드에서 diff 자체가 실패하면 검증 우회되는 효과를 주지 않도록 머지 차단.
+                if (_strictFiles && validation.DiffFailed)
+                {
+                    AnsiConsole.MarkupLine(
+                        $"  [red]✗[/] {Markup.Escape(taskId)} diff 실패로 검증 불가. " +
+                        $"머지 중단 (strict-files).");
+                    _logger.Error(
+                        $"[validate:files][strict] {taskId} diff failed: {validation.DiffError}");
+                    return 1;
+                }
 
                 if (_strictFiles && validation.HasUndeclared)
                 {
@@ -366,19 +354,33 @@ public class ParallelExecutor
                         _logger.Error($"Merge conflict unresolved for {taskId}");
                         // 나머지 태스크 정리
                         foreach (var remaining in taskIds)
-                            await _worktree.CleanupWorktreeAsync(remaining, _logger, ct);
+                        {
+                            if (!await _worktree.CleanupWorktreeAsync(remaining, _logger, ct))
+                                _cleanupFailures++;
+                        }
                         return 1;
                     }
                 }
             }
 
-            // 4. 상태 업데이트 (thread-safe)
+            // 4. 상태 업데이트 (thread-safe). P1-3: 개별 태스크의 ReloadAsync/Save 예외가 전체
+            //    배치를 폭파시키지 않도록 격리 — 머지는 이미 성공했으므로 다음 태스크 마킹은 계속 시도.
             foreach (var taskId in taskIds)
             {
-                await MarkTaskDoneThreadSafe(taskId, ct);
-                var task = _taskManager.GetTask(taskId)!;
-                AnsiConsole.MarkupLine($"[green]태스크 완료: {Markup.Escape(task.Title)}[/]");
-                _logger.TaskEnd(taskId, "completed");
+                try
+                {
+                    await MarkTaskDoneThreadSafe(taskId, ct);
+                    var task = _taskManager.GetTask(taskId)!;
+                    AnsiConsole.MarkupLine($"[green]태스크 완료: {Markup.Escape(task.Title)}[/]");
+                    _logger.TaskEnd(taskId, "completed");
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    AnsiConsole.MarkupLine(
+                        $"[red]✗[/] {Markup.Escape(taskId)} done 마킹 실패: {Markup.Escape(ex.Message)}");
+                    _logger.Error($"MarkTaskDone failed for {taskId}: {ex.Message}");
+                }
             }
 
             // 5. tasks.json 변경사항 커밋 (다음 배치 병합 시 충돌 방지)
@@ -390,7 +392,17 @@ public class ParallelExecutor
             AnsiConsole.MarkupLine("\n[dim]Worktree 정리 중...[/]");
             foreach (var taskId in worktrees.Keys)
             {
-                await _worktree.CleanupWorktreeAsync(taskId, _logger, ct);
+                if (!await _worktree.CleanupWorktreeAsync(taskId, _logger, CancellationToken.None))
+                    _cleanupFailures++;
+            }
+
+            // P1-4: 정리 실패가 누적되면 사용자에게 명시적으로 안내
+            if (_cleanupFailures > 0)
+            {
+                AnsiConsole.MarkupLine(
+                    $"[yellow]⚠ worktree 정리 실패 {_cleanupFailures}건. " +
+                    $"다음 명령으로 강제 정리하세요: [cyan]ralph --worktree-cleanup[/][/]");
+                _logger.Warn($"Cleanup failures accumulated: {_cleanupFailures}");
             }
         }
 
@@ -421,15 +433,25 @@ public class ParallelExecutor
             {
                 var fullPrompt = BuildPrompt(task, siblings);
 
-                var result = await _claude.RunWithRetryAsync(
-                    fullPrompt, model: _model, workingDirectory: worktreePath, logger: _logger,
-                    output: logWriter, ct: ct);
-                await _cost.RecordAsync(taskId, _model ?? "opus", result, ct);
+                // P0-1: RunWithRetryAsync가 예외(취소 등)로 throw해도 cost는 try/finally로 기록.
+                // 예외 경로에서는 ct가 이미 cancel된 상태일 수 있으므로 RecordAsync에는 None 전달.
+                ClaudeResult? result = null;
+                try
+                {
+                    result = await _claude.RunWithRetryAsync(
+                        fullPrompt, model: _model, workingDirectory: worktreePath, logger: _logger,
+                        output: logWriter, ct: ct);
+                }
+                finally
+                {
+                    await _cost.RecordAsync(taskId, _model ?? "opus", result, CancellationToken.None);
+                }
 
-                if (!result.Success)
+                if (result == null || !result.Success)
                 {
                     tracker.UpdateStatus(taskId, TaskProgressStatus.Failed);
-                    await logWriter.WriteLineAsync($"\n=== FAILED (exit code: {result.ExitCode}) ===");
+                    var exitInfo = result?.ExitCode.ToString() ?? "?";
+                    await logWriter.WriteLineAsync($"\n=== FAILED (exit code: {exitInfo}) ===");
                     _logger.TaskEnd(taskId, "failed");
                     return false;
                 }
@@ -568,19 +590,28 @@ public class ParallelExecutor
 
         AnsiConsole.MarkupLine($"[cyan]Claude Code로 충돌 해결 중 ({mergeResult.ConflictFiles.Count}개 파일, repo: {Markup.Escape(repoRoot)})...[/]");
 
-        var result = await _claude.RunWithRetryAsync(
-            prompt, model: _model, workingDirectory: repoRoot, logger: _logger, ct: ct);
-        await _cost.RecordAsync($"conflict:{taskId}", _model ?? "opus", result, ct);
-        if (!result.Success)
+        // P0-1 패턴: 예외 경로에서도 cost 기록 보장 (CT.None으로 cancel과 분리).
+        ClaudeResult? result = null;
+        try
+        {
+            result = await _claude.RunWithRetryAsync(
+                prompt, model: _model, workingDirectory: repoRoot, logger: _logger, ct: ct);
+        }
+        finally
+        {
+            await _cost.RecordAsync($"conflict:{taskId}", _model ?? "opus", result, CancellationToken.None);
+        }
+        if (result == null || !result.Success)
         {
             await _worktree.AbortMergeAsync(ct);
             return false;
         }
 
-        // 해결된 파일에 충돌 마커가 남아있는지 검증
+        // 해결된 파일에 충돌 마커가 남아있는지 1차 검증 (P2-2: Path.Combine은 file이 절대경로면
+        // file을 그대로 반환하므로 IsPathRooted 분기 불필요).
         foreach (var file in mergeResult.ConflictFiles)
         {
-            var fullPath = Path.IsPathRooted(file) ? file : Path.Combine(repoRoot, file);
+            var fullPath = Path.Combine(repoRoot, file);
             if (File.Exists(fullPath))
             {
                 var content = await File.ReadAllTextAsync(fullPath, ct);
@@ -598,6 +629,20 @@ public class ParallelExecutor
         foreach (var file in mergeResult.ConflictFiles)
         {
             await _git.RunAsync(["add", "--", file], workingDirectory: repoRoot, ct: ct);
+        }
+
+        // P1-2: 1차 검증이 ConflictFiles만 보았다면, staged 영역 전체를 git diff --check --cached로
+        // 한 번 더 검증한다. Claude가 다른 파일을 건드리거나 새 충돌 마커를 만들었을 가능성을 포착.
+        var (checkExit, checkOut) = await _git.RunAsync(
+            ["diff", "--check", "--cached"], workingDirectory: repoRoot, ct: ct);
+        if (checkExit != 0)
+        {
+            AnsiConsole.MarkupLine($"[red]staged 영역에 충돌 마커/문제 감지:[/]");
+            if (!string.IsNullOrWhiteSpace(checkOut))
+                AnsiConsole.WriteLine(checkOut.Trim());
+            _logger.Error($"git diff --check --cached failed for {taskId}: {checkOut.Trim()}");
+            await _worktree.AbortMergeAsync(ct);
+            return false;
         }
 
         // merge commit 완료

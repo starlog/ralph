@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="..\ralph-schema.json" LogicalName="ralph-schema.json" />
+    <EmbeddedResource Include="..\pricing.json" LogicalName="pricing.json" />
   </ItemGroup>
 
 </Project>

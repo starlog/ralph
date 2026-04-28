@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using Spectre.Console;
 
@@ -14,26 +15,37 @@ public class CostEntry
     public long CacheCreationTokens { get; set; }
     public double EstimatedUsd { get; set; }
     public double DurationSec { get; set; }
+    /// <summary>true이면 stream-json result에 usage 정보가 누락된 placeholder 기록.</summary>
+    public bool UsageMissing { get; set; }
+}
+
+internal sealed class PricingEntry
+{
+    public double Input { get; set; }
+    public double Output { get; set; }
+    public double CacheRead { get; set; }
+    public double CacheCreate { get; set; }
+}
+
+internal sealed class PricingFile
+{
+    public Dictionary<string, PricingEntry> Models { get; set; }
+        = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>
 /// Claude Code 호출별 token 사용량과 추정 비용을 .ralph-logs/cost.jsonl에 누적 기록합니다.
 /// stream-json의 result 메시지에 포함된 usage 데이터를 파싱해서 사용합니다.
+/// 누적 합계는 프로세스 단일 캐시(_cumulativeUsd)에 유지되어 dispatch 마다 jsonl 전체를
+/// 다시 read-parse하지 않습니다.
 /// </summary>
 public class CostTracker
 {
     private const string LogDir = ".ralph-logs";
     private const string LogFileName = "cost.jsonl";
 
-    // 추정 단가 (USD per 1M tokens) — 2026 기준 대략값. 정확한 값은 Anthropic 공식가 참조.
-    // input/output을 model별로 구분.
-    private static readonly Dictionary<string, (double input, double output, double cacheRead, double cacheCreate)>
-        Pricing = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["opus"]   = (15.0, 75.0, 1.5, 18.75),
-            ["sonnet"] = (3.0, 15.0, 0.30, 3.75),
-            ["haiku"]  = (0.80, 4.0, 0.08, 1.0),
-        };
+    // 단가는 EmbeddedResource pricing.json에서 1회 로드. ~/.ralph/pricing.json이 있으면 override.
+    private static readonly Dictionary<string, PricingEntry> Pricing = LoadPricing();
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -41,15 +53,46 @@ public class CostTracker
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
+    // 프로세스 단일 누적 캐시. 첫 호출 시 cost.jsonl로부터 hydrate.
+    private static readonly SemaphoreSlim HydrateLock = new(1, 1);
+    private static readonly object IncrementLock = new();
+    private static double _cumulativeUsd;
+    private static bool _hydrated;
+
     public string LogFilePath => Path.Combine(LogDir, LogFileName);
 
-    public async Task RecordAsync(string taskId, string model, ClaudeResult result, CancellationToken ct = default)
+    /// <summary>
+    /// 호출 결과를 jsonl에 1줄 기록하고 누적 캐시를 갱신합니다. result가 null이거나
+    /// usage 정보가 없으면 placeholder(estimatedUsd=0, usageMissing=true)로 기록 + 경고합니다.
+    /// </summary>
+    public async Task RecordAsync(
+        string taskId, string model, ClaudeResult? result, CancellationToken ct = default)
     {
-        if (result.Usage == null) return; // usage 정보가 없으면 기록할 게 없음
-
+        await EnsureHydratedAsync(ct);
         Directory.CreateDirectory(LogDir);
 
+        if (result?.Usage == null)
+        {
+            // P0-2: usage 누락은 silent miss하지 않고 placeholder 기록
+            var placeholder = new CostEntry
+            {
+                TaskId = taskId,
+                Model = model,
+                TimestampUtc = DateTime.UtcNow,
+                EstimatedUsd = 0.0,
+                DurationSec = result?.Duration.TotalSeconds ?? 0.0,
+                UsageMissing = true,
+            };
+            var ph = JsonSerializer.Serialize(placeholder, JsonOpts) + "\n";
+            await File.AppendAllTextAsync(LogFilePath, ph, ct);
+            AnsiConsole.MarkupLine(
+                $"[yellow]⚠ usage 누락 (taskId={Markup.Escape(taskId)}, " +
+                $"exit={result?.ExitCode.ToString() ?? "?"}). 비용 추정 0 처리.[/]");
+            return;
+        }
+
         var u = result.Usage;
+        var estimated = EstimateUsd(model, u);
         var entry = new CostEntry
         {
             TaskId = taskId,
@@ -59,12 +102,14 @@ public class CostTracker
             OutputTokens = u.OutputTokens,
             CacheReadTokens = u.CacheReadTokens,
             CacheCreationTokens = u.CacheCreationTokens,
-            EstimatedUsd = EstimateUsd(model, u),
+            EstimatedUsd = estimated,
             DurationSec = result.Duration.TotalSeconds,
         };
 
         var line = JsonSerializer.Serialize(entry, JsonOpts) + "\n";
         await File.AppendAllTextAsync(LogFilePath, line, ct);
+
+        lock (IncrementLock) _cumulativeUsd += estimated;
     }
 
     public static double EstimateUsd(string model, TokenUsage u)
@@ -72,10 +117,10 @@ public class CostTracker
         var key = NormalizeModel(model);
         if (!Pricing.TryGetValue(key, out var p))
             return 0.0;
-        return (u.InputTokens * p.input
-                + u.OutputTokens * p.output
-                + u.CacheReadTokens * p.cacheRead
-                + u.CacheCreationTokens * p.cacheCreate) / 1_000_000.0;
+        return (u.InputTokens * p.Input
+                + u.OutputTokens * p.Output
+                + u.CacheReadTokens * p.CacheRead
+                + u.CacheCreationTokens * p.CacheCreate) / 1_000_000.0;
     }
 
     private static string NormalizeModel(string model)
@@ -88,14 +133,69 @@ public class CostTracker
         return lower;
     }
 
-    /// <summary>
-    /// cost.jsonl의 모든 entry usd를 합산해 누적 비용(USD)을 반환합니다.
-    /// 파일이 없거나 비었으면 0.0. 손상된 라인은 skip.
-    /// </summary>
-    public async Task<double> GetTotalUsdAsync(CancellationToken ct = default)
+    private static Dictionary<string, PricingEntry> LoadPricing()
+    {
+        var caseInsensitive = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        // 1) 사용자 override (~/.ralph/pricing.json)
+        try
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var userPath = Path.Combine(home, ".ralph", "pricing.json");
+            if (File.Exists(userPath))
+            {
+                var json = File.ReadAllText(userPath);
+                var pf = JsonSerializer.Deserialize<PricingFile>(json, caseInsensitive);
+                if (pf?.Models is { Count: > 0 })
+                    return new Dictionary<string, PricingEntry>(pf.Models, StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch { /* fallback to embedded */ }
+
+        // 2) Embedded pricing.json
+        try
+        {
+            var asm = Assembly.GetExecutingAssembly();
+            using var stream = asm.GetManifestResourceStream("pricing.json");
+            if (stream != null)
+            {
+                using var sr = new StreamReader(stream);
+                var json = sr.ReadToEnd();
+                var pf = JsonSerializer.Deserialize<PricingFile>(json, caseInsensitive);
+                if (pf?.Models is { Count: > 0 })
+                    return new Dictionary<string, PricingEntry>(pf.Models, StringComparer.OrdinalIgnoreCase);
+            }
+        }
+        catch { /* hardcoded fallback */ }
+
+        // 3) Hardcoded fallback (embedded resource 누락 시)
+        return new Dictionary<string, PricingEntry>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["opus"]   = new() { Input = 15.0, Output = 75.0, CacheRead = 1.5,  CacheCreate = 18.75 },
+            ["sonnet"] = new() { Input = 3.0,  Output = 15.0, CacheRead = 0.30, CacheCreate = 3.75 },
+            ["haiku"]  = new() { Input = 0.80, Output = 4.0,  CacheRead = 0.08, CacheCreate = 1.0 },
+        };
+    }
+
+    private async Task EnsureHydratedAsync(CancellationToken ct)
+    {
+        if (_hydrated) return;
+        await HydrateLock.WaitAsync(ct);
+        try
+        {
+            if (_hydrated) return;
+            _cumulativeUsd = await ReadTotalFromDiskAsync(ct);
+            _hydrated = true;
+        }
+        finally
+        {
+            HydrateLock.Release();
+        }
+    }
+
+    private async Task<double> ReadTotalFromDiskAsync(CancellationToken ct)
     {
         if (!File.Exists(LogFilePath)) return 0.0;
-
         var total = 0.0;
         await foreach (var line in File.ReadLinesAsync(LogFilePath, ct))
         {
@@ -108,6 +208,15 @@ public class CostTracker
             catch (JsonException) { /* skip malformed line */ }
         }
         return total;
+    }
+
+    /// <summary>
+    /// 누적 비용(USD)을 반환합니다. 캐시된 값을 사용해 jsonl을 매번 재읽지 않습니다.
+    /// </summary>
+    public async Task<double> GetTotalUsdAsync(CancellationToken ct = default)
+    {
+        await EnsureHydratedAsync(ct);
+        lock (IncrementLock) return _cumulativeUsd;
     }
 
     /// <summary>
@@ -145,10 +254,14 @@ public class CostTracker
         var totalCacheC = entries.Sum(e => e.CacheCreationTokens);
         var totalUsd = entries.Sum(e => e.EstimatedUsd);
         var totalSec = entries.Sum(e => e.DurationSec);
+        var missingCount = entries.Count(e => e.UsageMissing);
 
         AnsiConsole.Write(new Rule("[green]Ralph Cost Summary[/]").RuleStyle("blue"));
         AnsiConsole.MarkupLine($"기록 수: [cyan]{entries.Count}[/]개 호출");
         AnsiConsole.MarkupLine($"기간: [cyan]{entries.Min(e => e.TimestampUtc):yyyy-MM-dd HH:mm}[/] ~ [cyan]{entries.Max(e => e.TimestampUtc):yyyy-MM-dd HH:mm}[/] UTC");
+        if (missingCount > 0)
+            AnsiConsole.MarkupLine(
+                $"[yellow]usage 누락 placeholder: {missingCount}개[/] (실제 토큰은 추정 비용에 반영되지 않음)");
         AnsiConsole.WriteLine();
 
         var table = new Table().Border(TableBorder.Rounded);

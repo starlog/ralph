@@ -337,28 +337,44 @@ public class WorktreeService
 
     /// <summary>
     /// 특정 태스크의 worktree를 정리합니다.
+    /// 디렉터리/브랜치를 모두 정리하면 true, 한 단계라도 실패하면 false (호출자가
+    /// 누적 카운트해서 최종 안내 메시지에 사용).
     /// </summary>
-    public async Task CleanupWorktreeAsync(
+    public async Task<bool> CleanupWorktreeAsync(
         string taskId, RalphLogger? logger = null, CancellationToken ct = default)
     {
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
         var branchName = $"ralph/{taskId}";
+        var ok = true;
 
         // git worktree remove
         if (Directory.Exists(worktreePath))
         {
-            var (exitCode, _) = await _git.RunAsync(["worktree", "remove", worktreePath, "--force"], ct: ct);
+            var (exitCode, output) = await _git.RunAsync(["worktree", "remove", worktreePath, "--force"], ct: ct);
             if (exitCode != 0)
             {
+                logger?.Warn($"git worktree remove 실패 ({taskId}): {output.Trim()}");
                 // 수동 삭제 시도
                 try { Directory.Delete(worktreePath, true); }
-                catch { /* best effort */ }
+                catch (Exception ex)
+                {
+                    logger?.Warn($"수동 디렉터리 삭제 실패 ({taskId}): {ex.Message}");
+                    ok = false;
+                }
             }
         }
 
-        // 브랜치 삭제
-        await _git.RunAsync(["branch", "-D", branchName], ct: ct);
-        logger?.Info($"Cleaned up worktree for {taskId}");
+        // 브랜치 삭제 (이미 머지된 후에도 -D는 성공)
+        var (branchExit, branchOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
+        if (branchExit != 0 && Directory.Exists(worktreePath))
+        {
+            // 디렉터리가 여전히 남아 있고 브랜치도 못 지우면 명백한 실패
+            logger?.Warn($"git branch -D 실패 ({taskId}): {branchOut.Trim()}");
+            ok = false;
+        }
+
+        if (ok) logger?.Info($"Cleaned up worktree for {taskId}");
+        return ok;
     }
 
     /// <summary>

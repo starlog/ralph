@@ -1,0 +1,8 @@
+{
+  "_comment": "USD per 1M tokens. Override at ~/.ralph/pricing.json. Update when Anthropic pricing changes.",
+  "models": {
+    "opus":   { "input": 15.0, "output": 75.0, "cacheRead": 1.5,  "cacheCreate": 18.75 },
+    "sonnet": { "input": 3.0,  "output": 15.0, "cacheRead": 0.30, "cacheCreate": 3.75 },
+    "haiku":  { "input": 0.80, "output": 4.0,  "cacheRead": 0.08, "cacheCreate": 1.0 }
+  }
+}
