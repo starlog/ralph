@@ -113,6 +113,22 @@ public class WorkflowSettings
     [JsonPropertyName("logRetentionDays")]
     public int? LogRetentionDays { get; set; }
 
+    /// <summary>누적 비용 임계값(USD). CLI --budget-usd > env > 이 값 > 미적용.</summary>
+    [JsonPropertyName("budgetUsd")]
+    public double? BudgetUsd { get; set; }
+
+    /// <summary>Per-attempt Claude 호출 timeout(초). CLI --task-timeout > env > 이 값 > 미적용.</summary>
+    [JsonPropertyName("taskTimeoutSec")]
+    public int? TaskTimeoutSec { get; set; }
+
+    /// <summary>Claude 호출 최대 시도 횟수. env MAX_RETRIES > 이 값 > 2.</summary>
+    [JsonPropertyName("maxRetries")]
+    public int? MaxRetries { get; set; }
+
+    /// <summary>Claude 호출 retry 간 대기(초). env RETRY_DELAY > 이 값 > 5.</summary>
+    [JsonPropertyName("retryDelay")]
+    public int? RetryDelay { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }

@@ -25,8 +25,9 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 // ─── Environment variables ───────────────────────────────────────────────────
-var maxRetries = int.TryParse(Environment.GetEnvironmentVariable("MAX_RETRIES"), out var mr) ? mr : 2;
-var retryDelay = int.TryParse(Environment.GetEnvironmentVariable("RETRY_DELAY"), out var rd) ? rd : 5;
+// 우선순위 적용을 위해 nullable로 보관: CLI > env > workflow > default. 핸들러에서 합쳐짐.
+int? envMaxRetries = int.TryParse(Environment.GetEnvironmentVariable("MAX_RETRIES"), out var mr) ? mr : null;
+int? envRetryDelay = int.TryParse(Environment.GetEnvironmentVariable("RETRY_DELAY"), out var rd) ? rd : null;
 var envMaxParallel = int.TryParse(Environment.GetEnvironmentVariable("RALPH_MAX_PARALLEL"), out var mp) ? mp : 0;
 var envParallelDisabled = Environment.GetEnvironmentVariable("RALPH_PARALLEL")?.ToLower() == "false";
 var envStrictFiles = Environment.GetEnvironmentVariable("RALPH_STRICT_FILES")?.ToLower() == "true";
@@ -201,7 +202,8 @@ async Task<int> HandlePlan()
     }
 
     var schemaContent = LoadEmbeddedSchema();
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
+    // HandlePlan은 tasks.json이 아직 없을 수 있으므로 workflow 적용 없이 cli/env/default만.
+    var claude = NewClaudeService(tm: null);
     var git = new GitService();
     using var logger = new RalphLogger();
 
@@ -254,7 +256,7 @@ async Task<int> HandleRun()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
+    var claude = NewClaudeService(tm);
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info($"Tasks file: {tasksFile}");
@@ -330,7 +332,7 @@ async Task<int> HandleRun()
         var worktree = new WorktreeService(git);
         var executor = new ParallelExecutor(
             tm, claude, git, worktree, logger, tasksFile, modelArg,
-            strictFiles: strictFiles, budgetUsd: budgetUsd, cost: costTracker);
+            strictFiles: strictFiles, budgetUsd: EffectiveBudgetUsd(tm), cost: costTracker);
         exitCode = await executor.RunAsync(concurrency, cts.Token);
         if (exitCode == 0 && executor.BudgetReached) exitCode = 2;
     }
@@ -340,7 +342,8 @@ async Task<int> HandleRun()
         AnsiConsole.MarkupLine("[yellow]순차 실행 모드[/]");
 
         exitCode = await RunAutoLoop(tm, claude, git, logger,
-            dryRun: false, commitOnComplete: true, modelArg, budgetUsd, costTracker, cts.Token);
+            dryRun: false, commitOnComplete: true, modelArg,
+            EffectiveBudgetUsd(tm), costTracker, cts.Token);
     }
 
     sessionStopwatch.Stop();
@@ -384,7 +387,7 @@ async Task<int> HandleDryRun()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
+    var claude = NewClaudeService(tm);
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info("Exec mode: dry-run");
@@ -459,7 +462,7 @@ async Task<int> HandleSingleTask()
         }
     }
 
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
+    var claude = NewClaudeService(tm);
     var git = new GitService();
     using var logger = new RalphLogger();
 
@@ -473,7 +476,7 @@ async Task<int> HandleInteractive()
 {
     RequireFile(tasksFile);
     var tm = await TaskManager.LoadAsync(tasksFile);
-    var claude = new ClaudeService(maxRetries, retryDelay) { Debug = debug, TaskTimeoutSec = taskTimeoutSec };
+    var claude = NewClaudeService(tm);
     var git = new GitService();
     using var logger = new RalphLogger();
     logger.Info("Exec mode: interactive");
@@ -994,15 +997,10 @@ async Task<int> RunTaskAuto(
 
     if (!string.IsNullOrEmpty(task.Prompt))
     {
-        var basePrompt = $"""
-            Task ID: {taskId}
-            Task: {task.Title}
-
-            {task.Prompt}
-
-            참고: {tasksFile} 파일에서 apiSpecs, samplePages 등 추가 정보를 확인할 수 있습니다.
-            완료 후 생성된 파일 목록을 알려주세요.
-            """;
+        // 모든 실행 경로(parallel/sequential/single/interactive)가 동일한 PromptBuilder를 사용해
+        // Scope·금지 사항·의존 산출물 등의 컨텍스트가 누락 없이 적용되도록 통일.
+        // 순차 실행에는 sibling task가 없으므로 빈 list 전달.
+        var basePrompt = PromptBuilder.Build(task, tm, tasksFile, siblings: null);
 
         if (dryRun)
         {
@@ -1191,8 +1189,8 @@ async Task<int> RunInteractiveLoop(
 
                     if (!string.IsNullOrEmpty(task.Prompt))
                     {
-                        var basePrompt =
-                            $"Task ID: {nextId}\nTask: {task.Title}\n\n{task.Prompt}\n\n참고: {tasksFile} 파일에서 apiSpecs, samplePages 등 추가 정보를 확인할 수 있습니다.\n완료 후 생성된 파일 목록을 알려주세요.";
+                        // PromptBuilder 통일 — Scope/금지/의존 산출물 컨텍스트 적용
+                        var basePrompt = PromptBuilder.Build(task, tm, tasksFile, siblings: null);
 
                         AnsiConsole.MarkupLine("[cyan]Running Claude Code...[/]\n");
                         var ok = await RunClaudeWithVerification(
@@ -1268,6 +1266,26 @@ async Task<int> RunInteractiveLoop(
 
     return 0;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Workflow setting resolution — CLI > env > workflow > default
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ClaudeService NewClaudeService(TaskManager? tm)
+{
+    var w = tm?.Data.Workflow;
+    var resolvedRetries = envMaxRetries ?? w?.MaxRetries ?? 2;
+    var resolvedDelay = envRetryDelay ?? w?.RetryDelay ?? 5;
+    var resolvedTimeout = cliTaskTimeoutSec ?? envTaskTimeoutSec ?? w?.TaskTimeoutSec;
+    return new ClaudeService(resolvedRetries, resolvedDelay)
+    {
+        Debug = debug,
+        TaskTimeoutSec = resolvedTimeout,
+    };
+}
+
+double? EffectiveBudgetUsd(TaskManager tm) =>
+    cliBudgetUsd ?? envBudgetUsd ?? tm.Data.Workflow?.BudgetUsd;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Verification-aware execution helper (sequential / interactive)

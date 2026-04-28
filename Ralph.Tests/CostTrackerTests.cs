@@ -54,4 +54,28 @@ public class CostTrackerTests : IDisposable
         var u = new TokenUsage(1000, 1000, 0, 0);
         Assert.Equal(0.0, CostTracker.EstimateUsd("nonexistent-model-2099", u));
     }
+
+    [Theory]
+    // pricing.json: opus(15/75/1.5/18.75), sonnet(3/15/0.30/3.75), haiku(0.80/4/0.08/1.0) per 1M
+    [InlineData("opus", 1_000_000, 0, 0, 0, 15.0)]               // input only
+    [InlineData("opus", 0, 1_000_000, 0, 0, 75.0)]              // output only
+    [InlineData("opus", 0, 0, 1_000_000, 0, 1.5)]               // cache read
+    [InlineData("opus", 0, 0, 0, 1_000_000, 18.75)]             // cache create
+    [InlineData("sonnet", 1_000_000, 1_000_000, 0, 0, 18.0)]    // 3 + 15
+    [InlineData("haiku", 1_000_000, 1_000_000, 0, 0, 4.8)]      // 0.80 + 4.0
+    [InlineData("opus-4-7", 1_000_000, 0, 0, 0, 15.0)]          // 모델 변형 → opus 매칭
+    [InlineData("claude-sonnet-4-5", 0, 1_000_000, 0, 0, 15.0)] // sonnet 매칭
+    public static void EstimateUsd_known_models_apply_correct_pricing(
+        string model, long input, long output, long cacheRead, long cacheCreate, double expected)
+    {
+        var u = new TokenUsage(input, output, cacheRead, cacheCreate);
+        Assert.Equal(expected, CostTracker.EstimateUsd(model, u), 4);
+    }
+
+    [Fact]
+    public static void EstimateUsd_zero_tokens_returns_zero()
+    {
+        var u = new TokenUsage(0, 0, 0, 0);
+        Assert.Equal(0.0, CostTracker.EstimateUsd("opus", u));
+    }
 }

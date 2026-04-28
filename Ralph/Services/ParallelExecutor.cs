@@ -276,12 +276,17 @@ public class ParallelExecutor
                 if (taskIds.Count == 0) return 1;
             }
 
-            // 3. 순차적으로 메인에 병합
-            AnsiConsole.MarkupLine("\n[blue]메인 브랜치에 병합 중...[/]");
+            // 3. 순차적으로 메인에 병합. Live scope는 이미 종료되었으므로 tracker.UpdateStatus는
+            //    화면에 반영되지 않는다. 머지는 본질적으로 sequential이므로 진행률만 콘솔로 표시.
+            AnsiConsole.MarkupLine(
+                $"\n[blue]메인 브랜치에 병합 중...[/] [dim]({taskIds.Count}개 태스크)[/]");
 
+            var mergeIdx = 0;
             foreach (var taskId in taskIds)
             {
-                tracker.UpdateStatus(taskId, TaskProgressStatus.Merging);
+                mergeIdx++;
+                AnsiConsole.MarkupLine(
+                    $"  [dim][[{mergeIdx}/{taskIds.Count}]][/] {Markup.Escape(taskId)}");
 
                 // F2: 머지 직전 worktree의 tasks.json이 baseBranch와 다르면 강제 정규화.
                 // 1차 방어(GuardTasksFileAsync)는 working-tree만 보지만, 본 단계는

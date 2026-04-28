@@ -98,6 +98,28 @@
           "minimum": 1,
           "default": 30,
           "description": "Auto-delete logs in .ralph-logs older than N days at the start of each --run session. Overridden by RALPH_LOG_RETENTION_DAYS env."
+        },
+        "budgetUsd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cumulative cost ceiling (USD). New tasks are blocked once total >= this. Priority: CLI --budget-usd > env RALPH_BUDGET_USD > this > unlimited."
+        },
+        "taskTimeoutSec": {
+          "type": "integer",
+          "minimum": 5,
+          "description": "Per-attempt Claude invocation timeout (seconds). Process tree is killed on timeout. Priority: CLI --task-timeout > env RALPH_TASK_TIMEOUT_SEC > this > unlimited."
+        },
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2,
+          "description": "Max retry attempts per Claude call. Priority: env MAX_RETRIES > this > 2."
+        },
+        "retryDelay": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Delay (seconds) between retries. Priority: env RETRY_DELAY > this > 5."
         }
       },
       "additionalProperties": false
