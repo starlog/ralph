@@ -190,10 +190,31 @@ public class CostTracker
                 + u.CacheCreationTokens * p.CacheCreate) / 1_000_000.0;
     }
 
-    private static string NormalizeModel(string model)
+    internal static string NormalizeModel(string model)
+        => NormalizeModel(model, Pricing);
+
+    internal static string NormalizeModel(
+        string model, IReadOnlyDictionary<string, PricingEntry> pricing)
     {
         if (string.IsNullOrEmpty(model)) return "opus";
         var lower = model.ToLowerInvariant();
+
+        if (pricing.Count > 0)
+        {
+            string? best = null;
+            foreach (var key in pricing.Keys)
+            {
+                var keyLower = key.ToLowerInvariant();
+                if (lower.Contains(keyLower)
+                    && (best is null || keyLower.Length > best.Length))
+                {
+                    best = keyLower;
+                }
+            }
+            if (best is not null) return best;
+            return lower;
+        }
+
         if (lower.Contains("opus")) return "opus";
         if (lower.Contains("sonnet")) return "sonnet";
         if (lower.Contains("haiku")) return "haiku";
