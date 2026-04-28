@@ -60,8 +60,10 @@ public class GitService
             psi.ArgumentList.Add(arg);
 
         using var process = Process.Start(psi)!;
-        var stdout = await process.StandardOutput.ReadToEndAsync(ct);
-        var stderr = await process.StandardError.ReadToEndAsync(ct);
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+        var stderrTask = process.StandardError.ReadToEndAsync(ct);
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
         await process.WaitForExitAsync(ct);
 
         return (process.ExitCode, process.ExitCode == 0 ? stdout : stderr);
