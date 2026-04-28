@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Ralph.Models;
 using Spectre.Console;
 
@@ -22,6 +23,15 @@ public static class PlanValidator
 {
     private static readonly string[] SensitivePatterns =
         [".env", ".pem", ".key", ".p12", ".pfx", "credentials.json", "id_rsa", "id_ed25519"];
+
+    /// <summary>
+    /// `<interpreter> <eval-flag> "..."` 또는 `'...'` 패턴을 잡아 quoted body를 캡처합니다.
+    /// 인터프리터: python/python3, node/nodejs, bun, ruby, perl, php, lua, Rscript.
+    /// 평가 flag: `-c`, `-e`, `-E`, `-r`(php), `-p`/`--print`(node), `--eval`.
+    /// </summary>
+    private static readonly Regex InlineScriptPattern = new(
+        @"(?<!\w)(python3?|node|nodejs|bun|ruby|perl|php|lua|Rscript)\b\s+(?:-c|-e|-E|-r|-p|--eval|--print)\s+(?:""(?<dq>[^""]*)""|'(?<sq>[^']*)')",
+        RegexOptions.Compiled);
 
     public static PlanValidationReport Validate(TaskManager tm)
     {
@@ -117,7 +127,49 @@ public static class PlanValidator
             }
         }
 
-        // 7. 민감 파일이 modifiedFiles/outputFiles에 명시되어 있으면 error
+        // 7. verification.command anti-pattern: `\n`/`\t`/`\r` 리터럴이 다음 두 위치 중 하나에 있는 경우 error.
+        //    (a) shell 레벨 — 명령 전체가 `set -e\ncd ...\n...` 처럼 multi-line shell script로 작성된 경우.
+        //        ralph가 `/bin/sh -c "<command>"`로 실행하므로 shell은 backslash+n을 LF로 변환하지 않음.
+        //    (b) 인터프리터 레벨 — `<lang> -c "...\n..."` 안의 quoted body. 같은 이유로 인터프리터가 SyntaxError.
+        //    두 스캔 모두 string-literal-aware하여 정상적인 string literal 안의 `\n`은 false positive 없이 통과.
+        foreach (var task in tasks)
+        {
+            var cmd = task.Verification?.Command;
+            if (string.IsNullOrWhiteSpace(cmd)) continue;
+
+            // (a) shell-level scan — quoted string 밖의 top-level `\n`을 잡음
+            if (ContainsBadEscape(cmd))
+            {
+                report.Errors.Add(
+                    $"'{task.Id}' verification.command에 top-level `\\n`/`\\t`/`\\r` 이스케이프가 있습니다 " +
+                    "(예: `set -e\\ncd ...\\nout=...`). ralph는 명령을 `/bin/sh -c`로 실행하는데, " +
+                    "shell은 backslash+n을 개행으로 변환하지 않습니다. multi-line script가 필요하면 " +
+                    "별도 `.sh` 파일로 저장 후 `bash path/to/script.sh`로 호출하거나, 명령 전체를 " +
+                    "`bash -c $'set -e\\ncd ...'` 처럼 ANSI-C quoting으로 감싸세요.");
+                continue; // shell-level error가 이미 있으면 인터프리터 레벨까지 보고할 필요 없음
+            }
+
+            // (b) interpreter-level scan — `<lang> -c|-e|--eval "..."` 본문
+            foreach (Match m in InlineScriptPattern.Matches(cmd))
+            {
+                // bash ANSI-C quoting `$'...'` 은 \n을 실제 개행으로 확장하므로 안전 — skip.
+                var quoteGroup = m.Groups["dq"].Success ? m.Groups["dq"] : m.Groups["sq"];
+                var quoteStart = quoteGroup.Index - 1; // 여는 따옴표 위치
+                if (quoteStart > 0 && cmd[quoteStart - 1] == '$') continue;
+
+                var body = quoteGroup.Value;
+                if (ContainsBadEscape(body))
+                {
+                    var lang = m.Groups[1].Value;
+                    report.Errors.Add(
+                        $"'{task.Id}' verification.command: `{lang} -c/-e/--eval` 안에 `\\n`/`\\t`/`\\r` 이스케이프가 있습니다. " +
+                        "shell은 따옴표 안의 `\\n`을 개행으로 변환하지 않아 인터프리터가 SyntaxError를 일으킵니다. " +
+                        "단일 statement(`;` 구분)나 프로젝트 표준 테스트 러너(예: `pytest -q`, `npm test`)를 사용하세요.");
+                }
+            }
+        }
+
+        // 8. 민감 파일이 modifiedFiles/outputFiles에 명시되어 있으면 error
         foreach (var task in tasks)
         {
             var files = new List<string>();
@@ -135,6 +187,46 @@ public static class PlanValidator
         }
 
         return report;
+    }
+
+    /// <summary>
+    /// 인터프리터 inline script body에 statement separator로 사용된 `\n`/`\t`/`\r`이
+    /// 있는지 확인합니다. shell의 single/double quote는 `\n`을 LF로 변환하지 않으므로
+    /// top-level에 있는 backslash-n은 거의 항상 SyntaxError를 일으킵니다.
+    ///
+    /// 단, 인터프리터의 string literal 내부(`"..."`, `'...'`, `` `...` ``)에 들어간 `\n`은
+    /// 해당 언어가 자체 escape rule로 처리하므로 안전 → false positive 방지를 위해 건너뜁니다.
+    /// `\\n`(escaped backslash) 도 단일 backslash로 전달되므로 안전.
+    /// </summary>
+    private static bool ContainsBadEscape(string body)
+    {
+        char? inString = null;
+        for (var i = 0; i < body.Length; i++)
+        {
+            var c = body[i];
+
+            if (inString.HasValue)
+            {
+                // string literal 내부 — 어떤 escape도 안전 (인터프리터가 처리)
+                if (c == '\\' && i + 1 < body.Length) { i++; continue; }
+                if (c == inString.Value) inString = null;
+                continue;
+            }
+
+            if (c == '"' || c == '\'' || c == '`')
+            {
+                inString = c;
+                continue;
+            }
+
+            if (c == '\\' && i + 1 < body.Length)
+            {
+                var next = body[i + 1];
+                if (next == '\\') { i++; continue; }     // \\ → 단일 backslash, 안전
+                if (next == 'n' || next == 't' || next == 'r') return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>

@@ -161,4 +161,124 @@ public class PlanValidatorTests
         var r = PlanValidator.Validate(tm);
         Assert.DoesNotContain(r.Warnings, w => w.Contains("commit/커밋"));
     }
+
+    [Theory]
+    [InlineData("python3 -c \"from m import f\\nimport sys\\nprint(f(1,2))\"")]
+    [InlineData("python -c \"from m import f\\nprint('ok')\"")]
+    [InlineData("node -e \"const m = require('./m')\\nconsole.log(m.f(1,2))\"")]
+    [InlineData("nodejs --eval \"const m=require('./m')\\nconsole.log(m.f(1))\"")]
+    [InlineData("node -p \"const m=require('./m')\\nm.f(1)\"")]
+    [InlineData("bun -e \"import m from './m'\\nconsole.log(m)\"")]
+    [InlineData("ruby -e \"require 'm'\\nputs M.f(1,2)\"")]
+    [InlineData("perl -e \"use M;\\nprint M::f(1)\"")]
+    [InlineData("php -r \"require 'm.php';\\necho m::f(1);\"")]
+    [InlineData("lua -e \"require 'm'\\nprint(m.f(1))\"")]
+    [InlineData("python3 -c 'from m import f\\nprint(f(1))'")] // single-quoted form — same problem
+    public async Task Verification_inline_script_with_newline_escape_is_error(string command)
+    {
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","done":false,"prompt":"p",
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.True(r.HasErrors, $"expected error for command: {command}\nactual errors: {string.Join("; ", r.Errors)}");
+        Assert.Contains(r.Errors, e => e.Contains("verification.command") && e.Contains("이스케이프"));
+    }
+
+    [Theory]
+    [InlineData("pytest -q tests/")]
+    [InlineData("dotnet test")]
+    [InlineData("go test ./...")]
+    [InlineData("npm test --silent")]
+    [InlineData("cargo test --quiet")]
+    [InlineData("tsc --noEmit")]
+    [InlineData("python3 -c \"from m import f; assert f(10,3)==3.5; print('OK')\"")]
+    [InlineData("node -e \"const m=require('./m'); console.log(m.f(1,2))\"")]
+    [InlineData("python3 path/to/check.py")]
+    [InlineData("ruby -e 'require \"m\"; puts M.f(1)'")]
+    // \n inside a string literal is the interpreter's own escape — valid:
+    [InlineData("python3 -c \"print('hello\\nworld')\"")]
+    [InlineData("node -e \"console.log('a\\nb')\"")]
+    [InlineData("ruby -e 'puts \"line1\\nline2\"'")]
+    public async Task Verification_safe_command_is_clean(string command)
+    {
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","done":false,"prompt":"p",
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command"));
+    }
+
+    [Fact]
+    public async Task Verification_ansi_c_quoting_dollar_quote_is_clean()
+    {
+        // bash ANSI-C quoting $'...' 은 \n을 실제 LF로 확장 → 안전
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","done":false,"prompt":"p",
+          "verification":{"command":"python3 -c $'from m import f\nprint(f(1,2))'"}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command"));
+    }
+
+    [Theory]
+    [InlineData("set -e\\ncd /tmp\\necho hello")]
+    [InlineData("out=$(python3 main.py '3+2')\\n[ \"$out\" = \"5\" ] || exit 1\\necho OK")]
+    [InlineData("cmd1\\ncmd2 && cmd3")]
+    [InlineData("echo a\\techo b")]
+    public async Task Verification_shell_level_multiline_escape_is_error(string command)
+    {
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","done":false,"prompt":"p",
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.True(r.HasErrors, $"expected error for command: {command}\nactual errors: {string.Join("; ", r.Errors)}");
+        Assert.Contains(r.Errors, e => e.Contains("verification.command") && e.Contains("top-level"));
+    }
+
+    [Theory]
+    [InlineData("bash scripts/check.sh")]
+    [InlineData("cmd1 && cmd2 || cmd3")]
+    [InlineData("for f in *.py; do python3 \"$f\"; done")]
+    public async Task Verification_normal_shell_command_is_clean(string command)
+    {
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","done":false,"prompt":"p",
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command"));
+    }
+
+    [Fact]
+    public async Task Verification_escaped_backslash_n_is_clean()
+    {
+        // `\\n` (escaped backslash + n) — 인터프리터에 단일 backslash가 전달되므로 SyntaxError 아님
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","done":false,"prompt":"p",
+          "verification":{"command":"python3 -c \"print('a\\\\nb')\""}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command"));
+    }
 }

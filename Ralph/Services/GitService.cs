@@ -71,6 +71,7 @@ public class GitService
         string taskId, string title, string commitTemplate,
         RalphLogger? logger = null, string? workingDirectory = null,
         bool silent = false,
+        IReadOnlyCollection<string>? declaredFiles = null,
         CancellationToken ct = default)
     {
         var commitMsg = commitTemplate
@@ -81,8 +82,20 @@ public class GitService
             AnsiConsole.MarkupLine("[blue]Committing changes...[/]");
         logger?.Info($"Committing: {commitMsg}");
 
-        // Stage all files
-        await RunAsync(["add", "-A"], workingDirectory, ct);
+        // Staging 전략:
+        // - declaredFiles가 비어있지 않으면 그 경로만 명시적으로 staging.
+        //   (병렬 worktree 격리 — task가 선언하지 않은 파일은 머지 표면에서 제외해
+        //    의도하지 않은 cross-task 충돌을 방지.)
+        // - declaredFiles가 null/빈 배열이면 fallback으로 -A 사용 (legacy 동작 유지).
+        var declaredCount = declaredFiles?.Count ?? 0;
+        if (declaredCount > 0)
+        {
+            await StageDeclaredFilesAsync(declaredFiles!, workingDirectory, logger, taskId, ct);
+        }
+        else
+        {
+            await RunAsync(["add", "-A"], workingDirectory, ct);
+        }
 
         // Unstage sensitive file patterns
         foreach (var pattern in SensitivePatterns)
@@ -133,6 +146,111 @@ public class GitService
                 AnsiConsole.MarkupLine("[yellow]No changes to commit or commit failed.[/]");
             logger?.Warn("Commit failed or no changes");
         }
+    }
+
+    /// <summary>
+    /// declared 경로(상대/절대 모두 허용)를 worktree 기준으로 정규화하여 staging.
+    /// 디스크에 없는 항목은 silently skip (task가 OutputFiles에 선언했지만 실제로 만들지 않은 경우 흔함).
+    /// 민감 파일 패턴은 staging 자체를 건너뜀.
+    /// </summary>
+    private async Task StageDeclaredFilesAsync(
+        IReadOnlyCollection<string> declaredFiles,
+        string? workingDirectory,
+        RalphLogger? logger,
+        string taskId,
+        CancellationToken ct)
+    {
+        var rootDir = workingDirectory is { Length: > 0 }
+            ? Path.GetFullPath(workingDirectory)
+            : Directory.GetCurrentDirectory();
+
+        var staged = new List<string>();
+        var skippedMissing = new List<string>();
+        var skippedSensitive = new List<string>();
+
+        foreach (var raw in declaredFiles)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            var trimmed = raw.Trim().Replace('\\', '/');
+
+            // 민감 파일 패턴은 declared 였더라도 staging 안 함
+            if (IsSensitivePath(trimmed))
+            {
+                skippedSensitive.Add(trimmed);
+                continue;
+            }
+
+            // 절대 경로면 worktree 루트 기준 상대 경로로 변환 (불가능하면 skip)
+            string relative;
+            if (Path.IsPathRooted(trimmed))
+            {
+                var fullDeclared = Path.GetFullPath(trimmed);
+                if (!fullDeclared.StartsWith(rootDir, StringComparison.Ordinal))
+                {
+                    logger?.Warn($"[stage] {taskId}: {raw} is outside worktree — skipped");
+                    continue;
+                }
+                relative = Path.GetRelativePath(rootDir, fullDeclared).Replace('\\', '/');
+            }
+            else
+            {
+                relative = trimmed.TrimStart('/');
+            }
+
+            // 디스크 존재 확인 (deleted 파일은 git add가 처리하므로 staging 시도해도 무방하지만,
+            // 존재하지 않고 git에서도 모르는 경로는 git add가 fatal을 던져 commit 흐름이 깨짐.
+            // 따라서 git ls-files로 tracked 여부를 확인하여 둘 중 하나면 staging 시도, 모두 아니면 skip).
+            var fullPath = Path.Combine(rootDir, relative);
+            var existsOnDisk = File.Exists(fullPath) || Directory.Exists(fullPath);
+
+            bool tracked = false;
+            if (!existsOnDisk)
+            {
+                var (lsExit, lsOut) = await RunAsync(
+                    ["ls-files", "--error-unmatch", "--", relative], workingDirectory, ct);
+                tracked = lsExit == 0 && !string.IsNullOrWhiteSpace(lsOut);
+            }
+
+            if (!existsOnDisk && !tracked)
+            {
+                skippedMissing.Add(relative);
+                continue;
+            }
+
+            var (exit, output) = await RunAsync(["add", "--", relative], workingDirectory, ct);
+            if (exit == 0)
+            {
+                staged.Add(relative);
+            }
+            else
+            {
+                logger?.Warn($"[stage] {taskId}: git add 실패 ({relative}): {output.Trim()}");
+            }
+        }
+
+        if (staged.Count > 0)
+            logger?.Info($"[stage] {taskId}: {staged.Count}건 staged — {string.Join(", ", staged.Take(5))}{(staged.Count > 5 ? "..." : "")}");
+        if (skippedMissing.Count > 0)
+            logger?.Info($"[stage] {taskId}: {skippedMissing.Count}건 declared지만 disk/index에 없음 — skipped");
+        if (skippedSensitive.Count > 0)
+            logger?.Warn($"[stage] {taskId}: {skippedSensitive.Count}건 민감 파일 패턴 — staging 거부: {string.Join(", ", skippedSensitive)}");
+    }
+
+    private static bool IsSensitivePath(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrEmpty(name)) name = path;
+        foreach (var ext in SensitiveExtensions)
+        {
+            if (name.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        // 명시적 파일명 매칭 (e.g., credentials.json, id_rsa)
+        if (name.Equals("credentials.json", StringComparison.OrdinalIgnoreCase)) return true;
+        if (name.Equals("id_rsa", StringComparison.OrdinalIgnoreCase)) return true;
+        if (name.Equals("id_ed25519", StringComparison.OrdinalIgnoreCase)) return true;
+        if (name.StartsWith(".env", StringComparison.OrdinalIgnoreCase)) return true;
+        if (name.StartsWith(".secret", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 
     /// <summary>

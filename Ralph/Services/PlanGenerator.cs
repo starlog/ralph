@@ -249,6 +249,22 @@ public partial class PlanGenerator
                - Skip on documentation/config-only tasks
                First, **detect the stack from the codebase** (presence of `package.json`, `*.csproj`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`, etc.) and choose the appropriate command. Prefer commands that are quiet (`-q`, `--silent`, `-nologo`) so logs stay readable.
 
+            13. **Verification command must be a single safe shell invocation.** The command runs through `/bin/sh -c` (POSIX) or `cmd /c` (Windows). It MUST NOT embed multi-line interpreter scripts inside flag arguments — the shell does not turn `\n` into a newline inside `"..."` or `'...'`, so the interpreter receives a literal backslash-n and crashes with a syntax error. This applies to every interpreter that has a `-c` / `-e` / `--eval` / `-E` flag (python, python3, node, deno, bun, ruby, perl, php, lua, R, tclsh, etc.).
+
+               STRONGLY PREFERRED — invoke the project's standard test/build runner; it always works:
+               - `pytest -q tests/` · `dotnet test` · `go test ./...` · `npm test --silent` · `cargo test --quiet` · `tsc --noEmit` · `dotnet build -nologo`
+
+               If a one-off ad-hoc check is genuinely needed, ALLOWED forms are:
+               - **Single-statement inline** (use `;` separators, no `\n`): `python3 -c "from m import f; assert f(10, 3) == 3.5; print('OK')"`
+               - **Saved script file**: `python3 path/to/check.py` (the implementation task writes the file)
+               - **Heredoc to stdin** with a quoted delimiter: `python3 - <<'PY'\\nimport m\\nassert m.f(1,2)==3\\nPY` — and only when the JSON encoder will produce real `\n` characters in the command string (NOT the two-character `\` + `n` escape).
+
+               FORBIDDEN forms (these will fail at run time across every interpreter):
+               - `python3 -c "from m import f\\nimport sys\\ntry: ..."` — `\\n` inside double quotes → literal backslash-n → SyntaxError
+               - `node -e "const m = require('./m')\\nconsole.log(m.f(1,2))"` — same problem
+               - `ruby -e "require 'm'\\nputs M.f(1,2)"` — same problem
+               Any `<lang> -c|-e|--eval "..."` whose body contains a `\\n`, `\\t`, or `\\r` escape is wrong.
+
             ## JSON Schema
             """);
 

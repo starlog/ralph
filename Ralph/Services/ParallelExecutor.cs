@@ -441,12 +441,16 @@ public class ParallelExecutor
             // tasks.json을 수정했을 가능성을 방어. 머지 충돌의 가장 흔한 원인.
             await GuardTasksFileAsync(taskId, worktreePath, logWriter, ct);
 
-            // worktree 안에서 커밋
+            // worktree 안에서 커밋. declared 파일만 staging해서 격리 보장
+            // (선언 안 된 worktree 변경 — 예: __pycache__, 다른 task의 파일 — 머지 표면에서 제외).
+            // declared가 비어있으면 fallback으로 -A 사용 (legacy 동작).
             if (_taskManager.CommitOnComplete)
             {
+                var declared = BuildDeclaredSet(task);
                 await _git.CommitChangesAsync(
                     taskId, task.Title, _taskManager.CommitTemplate,
-                    _logger, worktreePath, silent: true, ct: ct);
+                    _logger, worktreePath, silent: true,
+                    declaredFiles: declared, ct: ct);
             }
 
             tracker.UpdateStatus(taskId, TaskProgressStatus.Completed);
