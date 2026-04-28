@@ -160,6 +160,20 @@ public class WorktreeService
                 logger?.Warn(
                     $"[guard:pre-merge] NormalizeTasksJson({taskId}): " +
                     $"git checkout 실패. 머지는 계속 진행됩니다. detail: {checkoutOut.Trim()}");
+                return true;
+            }
+
+            // checkout만으로는 worktree HEAD가 갱신되지 않아 머지 시 여전히 충돌이 발생한다.
+            // 정규화 결과를 새 커밋으로 고정해 ralph/{taskId} tip의 tasksFile이 baseRef와 동일해지도록 한다.
+            var (commitExit, commitOut) = await _git.RunAsync(
+                ["commit", "-m", $"guard: {tasksFileName}을 {baseRef} 버전으로 정규화", "--", tasksFileName],
+                worktreePath, ct);
+
+            if (commitExit != 0)
+            {
+                logger?.Warn(
+                    $"[guard:pre-merge] NormalizeTasksJson({taskId}): " +
+                    $"정규화 커밋 실패. 머지에서 충돌이 발생할 수 있습니다. detail: {commitOut.Trim()}");
             }
 
             return true;
