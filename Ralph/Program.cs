@@ -55,9 +55,21 @@ var forceFlag = argList.Remove("--force");
 var strictFiles = argList.Remove("--strict-files") || envStrictFiles;
 var maxParallelArg = 0;
 var maxParallelIdx = argList.IndexOf("--max-parallel");
-if (maxParallelIdx >= 0 && maxParallelIdx + 1 < argList.Count)
+if (maxParallelIdx >= 0)
 {
-    int.TryParse(argList[maxParallelIdx + 1], out maxParallelArg);
+    if (maxParallelIdx + 1 >= argList.Count)
+    {
+        AnsiConsole.MarkupLine(
+            "[red]Error: --max-parallel 값이 누락되었습니다 (양의 정수 필요).[/]");
+        return 1;
+    }
+    var raw = argList[maxParallelIdx + 1];
+    if (!int.TryParse(raw, out maxParallelArg) || maxParallelArg <= 0)
+    {
+        AnsiConsole.MarkupLine(
+            $"[red]Error: --max-parallel 값을 파싱할 수 없습니다: '{Markup.Escape(raw)}' (양의 정수 필요)[/]");
+        return 1;
+    }
     argList.RemoveRange(maxParallelIdx, 2);
 }
 
