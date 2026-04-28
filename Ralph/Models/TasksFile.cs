@@ -198,6 +198,14 @@ public class ParallelSettings
     [JsonPropertyName("conflictStrategies")]
     public List<string>? ConflictStrategies { get; set; }
 
+    /// <summary>
+    /// `git worktree add --shared`로 .git objects를 공유해 디스크/IO를 절약하는 옵트인 옵션.
+    /// CLI `--shared-worktrees` > env `RALPH_SHARED_WORKTREES` > 이 값 > false. 일부 git 환경은
+    /// `--shared`를 모를 수 있어 첫 시도 실패 시 자동으로 fallback한다.
+    /// </summary>
+    [JsonPropertyName("sharedWorktreeObjects")]
+    public bool? SharedWorktreeObjects { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 

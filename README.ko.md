@@ -159,6 +159,7 @@ ralph --run
 | `--max-parallel N` | 최대 동시 실행 태스크 수 지정 |
 | `--force` | 의존성 / 검증 우회 (`--task` 또는 `--run`과 함께) |
 | `--strict-files` | 머지 후 declared `modifiedFiles` 외 파일 변경이 있으면 abort |
+| `--shared-worktrees` | `git worktree add --shared`로 `.git` objects를 공유해 디스크/IO 절약 (미지원 시 자동 fallback) |
 | `--budget-usd <amt>` | 누적 비용이 amt(USD) 도달 시 새 태스크 dispatch 중단 |
 | `--task-timeout <기간>` | Claude 호출당 timeout (예: `30m`, `1h`, `90s`, `1800`) — hang 방지 |
 | `--model <name>` | 모델 선택 (`sonnet`, `opus`; 기본: `opus`) |
@@ -191,6 +192,7 @@ ralph -f my-project-tasks.json --run  # 글로벌 -f / --file 플래그
 | `RALPH_MAX_PARALLEL` | 0 (tasks.json 설정 사용) | 최대 동시 실행 태스크 수 오버라이드 |
 | `RALPH_PARALLEL` | true | `false`로 설정 시 병렬 실행 비활성화 |
 | `RALPH_STRICT_FILES` | false | `true`로 설정 시 `--strict-files` 기본 활성화 |
+| `RALPH_SHARED_WORKTREES` | false | `true`로 설정 시 `--shared-worktrees` 기본 활성화 |
 | `RALPH_BUDGET_USD` | (없음) | 누적 비용 임계값 — CLI `--budget-usd`가 우선 |
 | `RALPH_TASK_TIMEOUT_SEC` | (없음) | Claude 호출당 timeout(초) — CLI `--task-timeout`가 우선 |
 | `RALPH_WEBHOOK_URL` | (없음) | 세션 종료 webhook 기본 URL |
