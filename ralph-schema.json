@@ -213,6 +213,33 @@
           "items": {
             "$ref": "#/$defs/subtask"
           }
+        },
+        "verification": {
+          "type": "object",
+          "description": "External verification command run AFTER Claude finishes the task. Exit code 0 = pass; non-zero = task failed (with stdout/stderr fed back to Claude for one self-fix retry). Use this on testing/build tasks so success is determined by tools (pytest, go test, tsc --noEmit, dotnet test, eslint, ...) rather than Claude's self-report.",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Shell command to execute in the task working directory (worktree for parallel mode, repo root for sequential). Run via /bin/sh -c on POSIX, cmd /c on Windows.",
+              "minLength": 1,
+              "examples": [
+                "pytest tests/",
+                "go test ./...",
+                "tsc --noEmit",
+                "dotnet test",
+                "npm test --silent",
+                "cargo test --quiet"
+              ]
+            },
+            "timeoutSec": {
+              "type": "integer",
+              "default": 120,
+              "minimum": 5,
+              "description": "Kill the verification process if it exceeds this many seconds. Treated as failure with TIMEOUT marker."
+            }
+          },
+          "required": ["command"],
+          "additionalProperties": false
         }
       },
       "additionalProperties": true

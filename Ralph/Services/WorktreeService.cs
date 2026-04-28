@@ -231,6 +231,44 @@ public class WorktreeService
     }
 
     /// <summary>
+    /// 머지 직전 worktree의 브랜치를 현재 baseRef HEAD 위로 rebase합니다.
+    ///
+    /// 같은 batch에서 앞선 머지가 baseRef를 advance시켰는데 후속 worktree들은 여전히
+    /// 옛 분기점에서 시작 — 3-way merge의 LCA가 옛 base가 되어 공유 파일(CLAUDE.md,
+    /// 자동 생성 파일 등)에 불필요한 충돌이 발생합니다. 머지 직전에 rebase하면 LCA가
+    /// 현재 base가 되어 깨끗한 fast-forward로 머지됩니다.
+    ///
+    /// rebase가 충돌하면 abort로 worktree를 깨끗하게 복원하고 false를 반환합니다 —
+    /// 호출자는 기존 3-way merge 경로로 fallback해 동작 회귀를 막을 수 있습니다.
+    /// </summary>
+    public async Task<bool> AdvanceWorktreeOntoBaseAsync(
+        string taskId, string baseRef, RalphLogger? logger = null, CancellationToken ct = default)
+    {
+        var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
+
+        var (exitCode, output) = await _git.RunAsync(
+            ["rebase", baseRef], worktreePath, ct);
+
+        if (exitCode == 0)
+        {
+            logger?.Info($"[merge:advance] {taskId} rebased onto current {baseRef}");
+            return true;
+        }
+
+        logger?.Warn(
+            $"[merge:advance] {taskId} rebase 실패 — 3-way merge로 fallback. " +
+            $"detail: {output.Trim()}");
+
+        // rebase 중단으로 worktree를 깨끗한 상태로 복원 (다음 단계의 직접 머지가 가능하도록)
+        var (abortExit, abortOut) = await _git.RunAsync(
+            ["rebase", "--abort"], worktreePath, ct);
+        if (abortExit != 0)
+            logger?.Warn($"[merge:advance] {taskId} rebase --abort도 실패: {abortOut.Trim()}");
+
+        return false;
+    }
+
+    /// <summary>
     /// 머지 직전 worktree HEAD와 baseRef 사이의 실제 변경 파일 집합을 declared 집합과
     /// 대조합니다. F2의 NormalizeTasksJsonAsync "이후"에 호출되어야 tasks.json
     /// 정규화 결과가 actual에서 빠지고, 진짜 undeclared만 남습니다.

@@ -15,6 +15,7 @@ public class ParallelExecutor
     private readonly bool _strictFiles;
     private readonly CostTracker _cost;
     private readonly BudgetGate _budgetGate;
+    private readonly VerificationRunner _verifier = new();
     private readonly SemaphoreSlim _taskFileLock = new(1, 1);
     private int _cleanupFailures;
 
@@ -149,25 +150,14 @@ public class ParallelExecutor
 
         if (!string.IsNullOrEmpty(task.Prompt))
         {
-            var fullPrompt = BuildPrompt(task);
-
             AnsiConsole.MarkupLine("[cyan]Prompt:[/]");
             AnsiConsole.Write(new Panel(Markup.Escape(task.Prompt)).Border(BoxBorder.Rounded));
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
-            // P0-1: 예외 경로에서도 cost 기록 보장
-            ClaudeResult? result = null;
-            try
+            // verification까지 포함한 retry 루프. cwd는 repo 루트(worktree 없음).
+            var ok = await RunSingleWithVerificationAsync(task, ct);
+            if (!ok)
             {
-                result = await _claude.RunWithRetryAsync(fullPrompt, model: _model, logger: _logger, ct: ct);
-            }
-            finally
-            {
-                await _cost.RecordAsync(taskId, _model ?? "opus", result, CancellationToken.None);
-            }
-            if (result == null || !result.Success)
-            {
-                AnsiConsole.MarkupLine("\n[red]Claude Code 실행 실패[/]");
                 _logger.TaskEnd(taskId, "failed");
                 return 1;
             }
@@ -335,6 +325,11 @@ public class ParallelExecutor
                     return 1;
                 }
 
+                // 머지 직전 worktree를 현재 baseBranch 위로 rebase. 같은 batch의 앞선 머지로
+                // baseBranch가 advance되어 후속 worktree가 옛 분기점에서 머지될 때 발생하는
+                // 공유 파일 충돌을 줄인다. 실패 시 abort 후 기존 3-way merge로 fallback(회귀 없음).
+                await _worktree.AdvanceWorktreeOntoBaseAsync(taskId, baseBranch, _logger, ct);
+
                 var mergeResult = await _worktree.MergeWorktreeAsync(
                     taskId, baseBranch, conflictStrategy, _logger, ct);
 
@@ -431,30 +426,9 @@ public class ParallelExecutor
 
             if (!string.IsNullOrEmpty(task.Prompt))
             {
-                var fullPrompt = BuildPrompt(task, siblings);
-
-                // P0-1: RunWithRetryAsync가 예외(취소 등)로 throw해도 cost는 try/finally로 기록.
-                // 예외 경로에서는 ct가 이미 cancel된 상태일 수 있으므로 RecordAsync에는 None 전달.
-                ClaudeResult? result = null;
-                try
-                {
-                    result = await _claude.RunWithRetryAsync(
-                        fullPrompt, model: _model, workingDirectory: worktreePath, logger: _logger,
-                        output: logWriter, ct: ct);
-                }
-                finally
-                {
-                    await _cost.RecordAsync(taskId, _model ?? "opus", result, CancellationToken.None);
-                }
-
-                if (result == null || !result.Success)
-                {
-                    tracker.UpdateStatus(taskId, TaskProgressStatus.Failed);
-                    var exitInfo = result?.ExitCode.ToString() ?? "?";
-                    await logWriter.WriteLineAsync($"\n=== FAILED (exit code: {exitInfo}) ===");
-                    _logger.TaskEnd(taskId, "failed");
-                    return false;
-                }
+                var ok = await RunPromptWithVerificationAsync(
+                    task, siblings, worktreePath, logWriter, tracker, ct);
+                if (!ok) return false;
             }
 
             // tasks.json worktree 보호: Claude가 실수로 또는 prompt를 무시하고
@@ -488,6 +462,136 @@ public class ParallelExecutor
             _logger.Error($"Task {taskId} failed in worktree: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// 단일 태스크용(no worktree, console output) verification retry 루프.
+    /// </summary>
+    private async Task<bool> RunSingleWithVerificationAsync(TaskItem task, CancellationToken ct)
+    {
+        const int maxVerifyRetries = 1;
+        var basePrompt = BuildPrompt(task);
+        string? failureCtx = null;
+
+        for (var attempt = 0; attempt <= maxVerifyRetries; attempt++)
+        {
+            var fullPrompt = failureCtx == null
+                ? basePrompt
+                : $"{failureCtx}\n\n---\n\n{basePrompt}";
+
+            ClaudeResult? result = null;
+            try
+            {
+                result = await _claude.RunWithRetryAsync(
+                    fullPrompt, model: _model, logger: _logger, ct: ct);
+            }
+            finally
+            {
+                await _cost.RecordAsync(task.Id, _model ?? "opus", result, CancellationToken.None);
+            }
+
+            if (result == null || !result.Success)
+            {
+                AnsiConsole.MarkupLine("\n[red]Claude Code 실행 실패[/]");
+                return false;
+            }
+
+            if (task.Verification is not { } spec || string.IsNullOrWhiteSpace(spec.Command))
+                return true;
+
+            AnsiConsole.MarkupLine($"\n[cyan]검증 명령 실행:[/] [dim]{Markup.Escape(spec.Command)}[/]");
+            var verify = await _verifier.RunAsync(spec, Directory.GetCurrentDirectory(), _logger, output: null, ct);
+
+            if (verify.Success)
+            {
+                AnsiConsole.MarkupLine($"[green]✓ 검증 통과[/] ({verify.Duration.TotalSeconds:F1}s)");
+                return true;
+            }
+
+            if (attempt >= maxVerifyRetries)
+            {
+                AnsiConsole.MarkupLine(
+                    $"[red]✗ 검증 실패[/] (exit={verify.ExitCode}{(verify.TimedOut ? ", TIMEOUT" : "")}, {attempt + 1}회 시도)");
+                if (!string.IsNullOrWhiteSpace(verify.Stderr))
+                    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(verify.Stderr.Trim())}[/]");
+                return false;
+            }
+
+            AnsiConsole.MarkupLine(
+                $"[yellow]⚠ 검증 실패, Claude에게 수정 요청 (1회 retry)[/]");
+            failureCtx = VerificationRunner.BuildFailureContext(spec.Command, verify);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Claude 실행 + (선택) 외부 verification 명령 실행. verification 실패 시 stdout/stderr를
+    /// 다음 시도 prompt에 prepend해 1회 self-fix 시도. 모두 실패하면 false 반환.
+    /// </summary>
+    private async Task<bool> RunPromptWithVerificationAsync(
+        TaskItem task, IReadOnlyList<TaskItem> siblings, string workingDirectory,
+        TextWriter logWriter, TaskProgressTracker tracker, CancellationToken ct)
+    {
+        const int maxVerifyRetries = 1; // Claude self-fix 1회만 허용
+        string? failureCtx = null;
+
+        for (var attempt = 0; attempt <= maxVerifyRetries; attempt++)
+        {
+            var basePrompt = BuildPrompt(task, siblings);
+            var fullPrompt = failureCtx == null
+                ? basePrompt
+                : $"{failureCtx}\n\n---\n\n{basePrompt}";
+
+            // P0-1: RunWithRetryAsync가 예외(취소 등)로 throw해도 cost는 try/finally로 기록.
+            ClaudeResult? result = null;
+            try
+            {
+                result = await _claude.RunWithRetryAsync(
+                    fullPrompt, model: _model, workingDirectory: workingDirectory, logger: _logger,
+                    output: logWriter, ct: ct);
+            }
+            finally
+            {
+                await _cost.RecordAsync(task.Id, _model ?? "opus", result, CancellationToken.None);
+            }
+
+            if (result == null || !result.Success)
+            {
+                tracker.UpdateStatus(task.Id, TaskProgressStatus.Failed);
+                var exitInfo = result?.ExitCode.ToString() ?? "?";
+                await logWriter.WriteLineAsync($"\n=== FAILED (exit code: {exitInfo}) ===");
+                _logger.TaskEnd(task.Id, "failed");
+                return false;
+            }
+
+            // verification 미설정 → Claude success로 통과
+            if (task.Verification is not { } spec || string.IsNullOrWhiteSpace(spec.Command))
+                return true;
+
+            var verify = await _verifier.RunAsync(spec, workingDirectory, _logger, logWriter, ct);
+            if (verify.Success) return true;
+
+            if (attempt >= maxVerifyRetries)
+            {
+                AnsiConsole.MarkupLine(
+                    $"  [red]✗[/] {Markup.Escape(task.Id)} verification 실패 " +
+                    $"(exit={verify.ExitCode}{(verify.TimedOut ? ", TIMEOUT" : "")}, {attempt + 1}회 시도)");
+                tracker.UpdateStatus(task.Id, TaskProgressStatus.Failed);
+                _logger.Error(
+                    $"[verification] {task.Id} failed exit={verify.ExitCode} timedOut={verify.TimedOut} " +
+                    $"after {attempt + 1} attempt(s)");
+                return false;
+            }
+
+            AnsiConsole.MarkupLine(
+                $"  [yellow]⚠[/] {Markup.Escape(task.Id)} verification 실패 → Claude에게 수정 요청 (1회 retry)");
+            _logger.Warn(
+                $"[verification] {task.Id} failed (attempt {attempt + 1}); retrying with failure context");
+            failureCtx = VerificationRunner.BuildFailureContext(spec.Command, verify);
+        }
+
+        return false; // unreachable
     }
 
     /// <summary>

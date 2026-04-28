@@ -184,10 +184,18 @@ public partial class PlanGenerator
                **Implementation task** (category: "implementation", id: `{feature}-impl` or `{feature}` for trivial/small)
                   - dependsOn: [`{feature}-plan`] if a plan task exists for this feature, otherwise `[]`.
                   - The prompt must instruct Claude to: implement the feature (according to the plan if one exists), create all necessary files, follow project conventions.
+                  - **STRONGLY RECOMMENDED**: include a `verification` field running the build/typecheck command (NOT the test suite — that belongs on the testing task). Examples: `{ "command": "dotnet build -nologo", "timeoutSec": 180 }`, `{ "command": "tsc --noEmit", "timeoutSec": 120 }`, `{ "command": "go build ./...", "timeoutSec": 120 }`, `{ "command": "cargo check --quiet", "timeoutSec": 180 }`. This catches compilation errors immediately so the testing task starts from a known-good state.
 
                **Testing task** (category: "testing", id: `{feature}-test`)
                   - dependsOn: [`{feature}-impl`]
                   - The prompt must instruct Claude to: write and run tests for the implemented feature, ensure all tests pass, fix any issues found.
+                  - **MUST include a `verification` field** that runs the project's test command. This is the ground-truth gate — Ralph runs this externally and exit code 0 = success (Claude self-report is NOT trusted). Examples by stack:
+                    - .NET: `{ "command": "dotnet test", "timeoutSec": 300 }`
+                    - Python (pytest): `{ "command": "pytest -q tests/", "timeoutSec": 180 }`
+                    - Go: `{ "command": "go test ./...", "timeoutSec": 120 }`
+                    - Node/TS: `{ "command": "npm test --silent", "timeoutSec": 180 }`
+                    - Rust: `{ "command": "cargo test --quiet", "timeoutSec": 300 }`
+                    Detect the actual stack from the codebase (e.g., `Ralph.csproj` → .NET) and pick a command that runs the **specific test suite added by this feature** if possible (e.g. `dotnet test --filter "FullyQualifiedName~FeatureXTests"`).
                   - Skip this task if the feature is mechanical (doc, config, single-line edit) where tests provide no value.
 
                **Commit task** (category: "commit", id: `{feature}-commit`)
@@ -233,6 +241,13 @@ public partial class PlanGenerator
             10. **All tasks start with `"done": false`.**
 
             11. **Include a `projectName` and `version` field** derived from the PRD.
+
+            12. **`verification` field is the external success gate.** Ralph runs this command after Claude finishes the task and only accepts exit code 0. On non-zero, Ralph feeds stdout/stderr back to Claude for one self-fix retry; if it still fails, the task is marked failed and merging is blocked. Use it on:
+               - Every `testing` task (REQUIRED — see testing task definition above)
+               - Every `implementation` task that produces buildable code (build/typecheck)
+               - Skip on `plan` and `commit` tasks (no executable artifact to check)
+               - Skip on documentation/config-only tasks
+               First, **detect the stack from the codebase** (presence of `package.json`, `*.csproj`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`, etc.) and choose the appropriate command. Prefer commands that are quiet (`-q`, `--silent`, `-nologo`) so logs stay readable.
 
             ## JSON Schema
             """);

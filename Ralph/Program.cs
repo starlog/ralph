@@ -967,7 +967,7 @@ async Task<int> RunTaskAuto(
 
     if (!string.IsNullOrEmpty(task.Prompt))
     {
-        var fullPrompt = $"""
+        var basePrompt = $"""
             Task ID: {taskId}
             Task: {task.Title}
 
@@ -982,32 +982,24 @@ async Task<int> RunTaskAuto(
             AnsiConsole.MarkupLine("[cyan]Prompt:[/]");
             AnsiConsole.Write(new Panel(Markup.Escape(task.Prompt)).Border(BoxBorder.Rounded));
             AnsiConsole.MarkupLine("[cyan][[DRY-RUN]] Would execute Claude Code with above prompt[/]");
+            if (task.Verification?.Command is { Length: > 0 } cmd)
+                AnsiConsole.MarkupLine($"[cyan][[DRY-RUN]] Would verify with:[/] [dim]{Markup.Escape(cmd)}[/]");
             logger.Info("[DRY-RUN] Skipped Claude Code execution");
         }
         else
         {
-            // Display prompt summary
             AnsiConsole.MarkupLine("[cyan]Prompt:[/]");
             AnsiConsole.Write(new Panel(Markup.Escape(task.Prompt)).Border(BoxBorder.Rounded));
             AnsiConsole.MarkupLine("\n[cyan]Running Claude Code...[/]\n");
 
-            // P0-1: 예외 경로에서도 cost 기록 보장
-            ClaudeResult? result = null;
-            try
+            var ok = await RunClaudeWithVerification(
+                claude, cost, new VerificationRunner(), task, basePrompt,
+                Directory.GetCurrentDirectory(), model, logger, ct);
+            if (!ok)
             {
-                result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
-            }
-            finally
-            {
-                await cost.RecordAsync(taskId, model ?? "opus", result, CancellationToken.None);
-            }
-            if (result == null || !result.Success)
-            {
-                AnsiConsole.MarkupLine("\n[red]Claude Code execution failed[/]");
                 logger.TaskEnd(taskId, "failed");
                 return 1;
             }
-
             AnsiConsole.MarkupLine("\n[green]Claude Code execution completed[/]");
         }
     }
@@ -1172,24 +1164,16 @@ async Task<int> RunInteractiveLoop(
 
                     if (!string.IsNullOrEmpty(task.Prompt))
                     {
-                        var fullPrompt =
+                        var basePrompt =
                             $"Task ID: {nextId}\nTask: {task.Title}\n\n{task.Prompt}\n\n참고: {tasksFile} 파일에서 apiSpecs, samplePages 등 추가 정보를 확인할 수 있습니다.\n완료 후 생성된 파일 목록을 알려주세요.";
 
                         AnsiConsole.MarkupLine("[cyan]Running Claude Code...[/]\n");
-                        // P0-1: 예외 경로에서도 cost 기록 보장
-                        ClaudeResult? result = null;
-                        try
+                        var ok = await RunClaudeWithVerification(
+                            claude, cost, new VerificationRunner(), task, basePrompt,
+                            Directory.GetCurrentDirectory(), model, logger, ct);
+                        if (!ok)
                         {
-                            result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
-                        }
-                        finally
-                        {
-                            await cost.RecordAsync(nextId, model ?? "opus", result, CancellationToken.None);
-                        }
-
-                        if (result == null || !result.Success)
-                        {
-                            AnsiConsole.MarkupLine("\n[red]Claude Code execution failed[/]");
+                            AnsiConsole.MarkupLine("\n[red]Claude Code 실행 또는 verification 실패[/]");
                             if (!AnsiConsole.Confirm("Continue anyway?", defaultValue: false))
                             {
                                 logger.TaskEnd(nextId, "failed");
@@ -1256,6 +1240,71 @@ async Task<int> RunInteractiveLoop(
     }
 
     return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Verification-aware execution helper (sequential / interactive)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async Task<bool> RunClaudeWithVerification(
+    ClaudeService claude, CostTracker cost, VerificationRunner verifier,
+    TaskItem task, string basePrompt, string workingDirectory,
+    string? model, RalphLogger logger, CancellationToken ct)
+{
+    const int maxVerifyRetries = 1;
+    string? failureCtx = null;
+
+    for (var attempt = 0; attempt <= maxVerifyRetries; attempt++)
+    {
+        var fullPrompt = failureCtx == null
+            ? basePrompt
+            : $"{failureCtx}\n\n---\n\n{basePrompt}";
+
+        ClaudeResult? result = null;
+        try
+        {
+            result = await claude.RunWithRetryAsync(fullPrompt, model: model, logger: logger, ct: ct);
+        }
+        finally
+        {
+            await cost.RecordAsync(task.Id, model ?? "opus", result, CancellationToken.None);
+        }
+
+        if (result == null || !result.Success)
+        {
+            AnsiConsole.MarkupLine("\n[red]Claude Code execution failed[/]");
+            return false;
+        }
+
+        if (task.Verification is not { } spec || string.IsNullOrWhiteSpace(spec.Command))
+            return true;
+
+        AnsiConsole.MarkupLine($"\n[cyan]검증 명령 실행:[/] [dim]{Markup.Escape(spec.Command)}[/]");
+        var verify = await verifier.RunAsync(spec, workingDirectory, logger, output: null, ct);
+
+        if (verify.Success)
+        {
+            AnsiConsole.MarkupLine($"[green]✓ 검증 통과[/] ({verify.Duration.TotalSeconds:F1}s)");
+            return true;
+        }
+
+        if (attempt >= maxVerifyRetries)
+        {
+            AnsiConsole.MarkupLine(
+                $"[red]✗ 검증 실패[/] (exit={verify.ExitCode}{(verify.TimedOut ? ", TIMEOUT" : "")}, {attempt + 1}회 시도)");
+            if (!string.IsNullOrWhiteSpace(verify.Stderr))
+                AnsiConsole.MarkupLine($"[dim]{Markup.Escape(verify.Stderr.Trim())}[/]");
+            logger.Error(
+                $"[verification] {task.Id} failed exit={verify.ExitCode} timedOut={verify.TimedOut}");
+            return false;
+        }
+
+        AnsiConsole.MarkupLine("[yellow]⚠ 검증 실패, Claude에게 수정 요청 (1회 retry)[/]");
+        logger.Warn($"[verification] {task.Id} failed (attempt {attempt + 1}); retrying with failure context");
+        failureCtx = VerificationRunner.BuildFailureContext(spec.Command, verify);
+    }
+
+    return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

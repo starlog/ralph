@@ -9,6 +9,7 @@ namespace Ralph.Models;
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(TasksFile))]
 [JsonSerializable(typeof(ParallelSettings))]
+[JsonSerializable(typeof(VerificationSpec))]
 [JsonSerializable(typeof(JsonElement))]
 // CostTracker / WorktreeService 직렬화 대상 — trimming/AOT 켜져도 reflection fallback 없이 동작.
 [JsonSerializable(typeof(CostEntry))]

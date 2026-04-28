@@ -56,6 +56,27 @@ public class TaskItem
     [JsonPropertyName("subtasks")]
     public List<SubTask>? Subtasks { get; set; }
 
+    [JsonPropertyName("verification")]
+    public VerificationSpec? Verification { get; set; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>
+/// Task 완료 후 외부 검증 명령. Claude self-report가 아닌 exit code 기반 ground truth.
+/// 실패 시 stdout/stderr가 다음 Claude 시도 prompt에 prepend되어 self-fix 1회 시도.
+/// </summary>
+public class VerificationSpec
+{
+    /// <summary>shell command. 예: "dotnet test", "pytest tests/", "go test ./...", "tsc --noEmit"</summary>
+    [JsonPropertyName("command")]
+    public string Command { get; set; } = "";
+
+    /// <summary>실행 timeout(초). 미설정 시 120초 기본값 사용.</summary>
+    [JsonPropertyName("timeoutSec")]
+    public int? TimeoutSec { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
