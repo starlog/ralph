@@ -32,6 +32,19 @@ payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit ─�
   (병렬 실행)                                                    (병합 후 순차)
 ```
 
+## 사례 연구 — Ralph가 자기 자신을 고치다
+
+Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들을 자동 수정한 사례. 위에서 설명한 파이프라인의 모든 단계를 실제로 사용한다.
+
+- **출발점:** `bugfix.md`에 Ralph 내부 서비스(`LogRotator`, `GitService`, `VerificationRunner`, `RalphLogger`, `WorktreeService`, `ParallelExecutor`, `Program`, `PlanGenerator`)에서 발견한 **독립 버그 9개**와 **선택적 cosmetic 리팩토링 1개**를 정리. 각 항목은 1~2개 파일로 한정되며 `modifiedFiles`가 명시되어 있다.
+- **분해:** `ralph --plan bugfix.md`가 PRD를 작은 `*-impl` / `*-commit` task 쌍으로 변환. 서로 다른 파일을 수정하는 7개 버그는 **하나의 완전 병렬 layer**를 이루고, `WorktreeService.cs`를 함께 건드리는 두 항목(Feature 5와 선택적 Feature 10)만 `dependsOn`으로 직렬화된다.
+- **실행:** `ralph --run`이 최대 **5개 worktree를 동시에** dispatch (`workflow.parallel.maxConcurrent: 5`). 각 task는 `.ralph-worktrees/` 아래 `ralph/{taskId}` 브랜치에서 격리 실행되고 Claude Code 스트림이 task별 로그로 기록된다.
+- **머지:** 머지 직전 각 worktree 브랜치를 최신 base로 rebase한 뒤, `conflictStrategies: ["auto-theirs", "claude"]` 체인으로 사소한 충돌은 `-X theirs`로 자동 해결하고 나머지만 Claude에게 escalate.
+- **검증:** task마다 `verification.command`(`dotnet build` 또는 `dotnet test --filter ...`)의 exit code를 ground truth로 사용 — Claude의 self-report는 무시. 실패하면 1회 self-fix 재시도 후에도 안 되면 머지에서 제외된다.
+- **결과:** PRD가 겨냥하는 바로 그 오케스트레이터가 자기 자신을 수정한다 — plan 생성부터 병렬 배치 스케줄링, 머지, 검증까지 사용자가 개입하는 지점은 처음의 `ralph --run` 한 번뿐.
+
+전체 PRD: [bugfix.md](bugfix.md)
+
 ## 버전
 
 | 버전 | 구현 | 플랫폼 | 주요 기능 |

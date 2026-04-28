@@ -43,6 +43,19 @@ payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit ─�
    (parallel execution)                                       (sequential after merge)
 ```
 
+## Case Study — Ralph Fixes Itself
+
+Ralph was used to fix bugs found by static analysis of its own source. The PRD and the resulting parallel run exercise every part of the pipeline described above.
+
+- **Starting point:** `bugfix.md` collects **9 independent bugs** in Ralph's own services (`LogRotator`, `GitService`, `VerificationRunner`, `RalphLogger`, `WorktreeService`, `ParallelExecutor`, `Program`, `PlanGenerator`) plus **1 optional cosmetic refactor** — each scoped to one or two files with declared `modifiedFiles`.
+- **Decomposition:** `ralph --plan bugfix.md` turned the PRD into a `tasks.json` of small `*-impl` / `*-commit` task pairs. Seven bugs touch entirely disjoint files and form a single **fully parallel layer**; the two `WorktreeService.cs` features (Feature 5 and the optional Feature 10) are serialised through `dependsOn`.
+- **Execution:** `ralph --run` dispatches up to **5 worktrees concurrently** (`workflow.parallel.maxConcurrent: 5`), each on its own `ralph/{taskId}` branch under `.ralph-worktrees/`, with Claude Code streaming into per-task logs.
+- **Merge:** every worktree is rebased onto the latest base just before merge; `conflictStrategies: ["auto-theirs", "claude"]` resolves trivial conflicts with `-X theirs` and escalates the rest to Claude.
+- **Verification:** each task carries a `verification.command` (`dotnet build` or a targeted `dotnet test --filter ...`) whose exit code is the ground truth — Claude's self-report is ignored. One self-fix retry is allowed before a task is marked failed and excluded from merge.
+- **Outcome:** the same orchestrator that the PRD targets runs the fixes against itself — Ralph produces the plan, schedules the parallel batch, merges the branches, and verifies each fix end-to-end without human intervention beyond the initial `ralph --run`.
+
+Full PRD: [bugfix.md](bugfix.md)
+
 ## Versions
 
 | Version | Implementation | Platforms | Key Features |
