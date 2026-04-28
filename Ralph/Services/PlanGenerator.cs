@@ -179,7 +179,14 @@ public partial class PlanGenerator
                Step D - **Commit** (category: "commit")
                   - id: `{feature}-commit`
                   - dependsOn: [`{feature}-test`]
-                  - The prompt must instruct Claude to: review all changes, stage the relevant files (not sensitive files like .env), and create a git commit with a descriptive message in Korean.
+                  - The prompt must instruct Claude to create a **pure commit** that contains ONLY the files this feature's processor (plan/impl/test steps) created, modified, or deleted — never files changed by unrelated or parallel work. The prompt MUST require Claude to:
+                    a. Run `git status` and `git diff --name-status HEAD` to see all changed files.
+                    b. Cross-check against this feature's planned scope: the union of `outputFiles` and `modifiedFiles` declared on `{feature}-plan`, `{feature}-impl`, and `{feature}-test` (plus any files those steps actually created/modified/deleted in this run).
+                    c. Stage ONLY those in-scope files explicitly by path with `git add <path>` (one path per file, or a precise pathspec). Do NOT use `git add .`, `git add -A`, `git add -u`, or wildcard globs that could sweep in unrelated changes.
+                    d. If the working tree contains changes that are NOT part of this feature's scope, leave them unstaged — do not stash, revert, or restore them; they belong to other work.
+                    e. Never stage sensitive files (.env, *.pem, *.key, credentials.json, secrets.*, *.p12, *.pfx) even if they appear in scope — abort and report instead.
+                    f. Run `git diff --cached --name-only` to verify the staged set equals the intended in-scope set; if extra files leaked in, unstage them with `git restore --staged <path>` before committing.
+                    g. Create a single `git commit` with a descriptive message in Korean summarizing this feature's changes.
 
             3. **Cross-feature dependencies (IMPORTANT for parallel execution):**
                - Features that are **independent** (don't share files or code dependencies) should have NO cross-feature dependencies. This allows Ralph to execute them in parallel using git worktrees.
