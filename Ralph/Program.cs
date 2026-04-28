@@ -3,7 +3,7 @@ using Ralph.Models;
 using Ralph.Services;
 using Spectre.Console;
 
-const string Version = "1.1";
+const string Version = "1.2";
 
 // ─── UTF-8 console encoding ─────────────────────────────────────────────────
 Console.OutputEncoding = System.Text.Encoding.UTF8;
