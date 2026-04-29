@@ -98,7 +98,8 @@ public sealed class RunCommand : ICommand
             var executor = new ParallelExecutor(
                 tm, claude, git, worktree, logger, _ctx.TasksFile, _ctx.ModelArg,
                 strictFiles: _ctx.StrictFiles, budgetUsd: _ctx.EffectiveBudgetUsd(tm), cost: costTracker,
-                sharedWorktrees: sharedWorktrees, noSmokeTest: _ctx.NoSmokeTest);
+                sharedWorktrees: sharedWorktrees, noSmokeTest: _ctx.NoSmokeTest,
+                smokeTestCommandOverride: _ctx.SmokeTestCommandOverride);
             exitCode = await executor.RunAsync(concurrency, ct);
             if (exitCode == 0 && executor.BudgetReached) exitCode = 2;
         }

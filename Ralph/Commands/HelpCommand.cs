@@ -45,6 +45,7 @@ public sealed class HelpCommand : ICommand
         AnsiConsole.MarkupLine("  [green]--strict-files[/]       Validate declared vs actual files at merge; abort on undeclared");
         AnsiConsole.MarkupLine("  [green]--shared-worktrees[/]   Use 'git worktree add --shared' to share .git objects across worktrees");
         AnsiConsole.MarkupLine("  [green]--no-smoke-test[/]      Disable post-merge smoke test (auto-inferred or explicit)");
+        AnsiConsole.MarkupLine("  [green]--smoke-test[/] <cmd>   1회용 smoke test 명령 override (workflow.smokeTest와 자동 추론을 모두 우회)");
         AnsiConsole.MarkupLine("  [green]--llm-critique[/]       --plan 직후 LLM 기반 PRD/plan 비평 추가 1회 실행 (기본 off, 추가 비용)");
         AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
         AnsiConsole.MarkupLine("  [green]--task-timeout[/] <dur> Per-Claude-call timeout (예: 30m, 1h, 90s, 1800). hang 방지");
@@ -65,6 +66,7 @@ public sealed class HelpCommand : ICommand
         AnsiConsole.MarkupLine("  RALPH_STRICT_FILES          Set to 'true' to enable --strict-files");
         AnsiConsole.MarkupLine("  RALPH_SHARED_WORKTREES      Set to 'true' to enable --shared-worktrees");
         AnsiConsole.MarkupLine("  RALPH_NO_SMOKE_TEST         Set to 'true' or '1' to disable post-merge smoke test");
+        AnsiConsole.MarkupLine("  RALPH_SMOKE_TEST_COMMAND    Override smoke test 명령. CLI --smoke-test가 우선");
         AnsiConsole.MarkupLine("  RALPH_BUDGET_USD            누적 비용 임계값(USD). CLI --budget-usd가 우선");
         AnsiConsole.MarkupLine("  RALPH_TASK_TIMEOUT_SEC      Per-Claude-call timeout(seconds). CLI --task-timeout이 우선");
         AnsiConsole.MarkupLine("  RALPH_WEBHOOK_URL           Default webhook for session completion notifications");

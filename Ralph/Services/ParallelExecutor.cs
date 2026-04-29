@@ -41,7 +41,8 @@ public class ParallelExecutor
         WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
         bool strictFiles = false, double? budgetUsd = null,
         CostTracker? cost = null, BudgetGate? budgetGate = null,
-        bool sharedWorktrees = false, bool noSmokeTest = false)
+        bool sharedWorktrees = false, bool noSmokeTest = false,
+        string? smokeTestCommandOverride = null)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -63,7 +64,7 @@ public class ParallelExecutor
 
         _mergeOrchestrator = new MergeOrchestrator(
             _taskManager, _claude, _git, _worktree, _logger, _verifier, _cost,
-            _tasksFile, _model, strictFiles, noSmokeTest)
+            _tasksFile, _model, strictFiles, noSmokeTest, smokeTestCommandOverride)
         {
             // abort 전략 시 fallback으로 sequential RunSingle 호출.
             RerunSequential = (taskId, ct) => RunSingleTaskAsync(taskId, ct),
@@ -377,35 +378,6 @@ public class ParallelExecutor
         }
 
         return 0;
-    }
-
-    /// <summary>
-    /// repo root에 있는 빌드 시스템 marker를 보고 smoke test 명령을 추론한다.
-    /// 우선순위: .csproj/.sln(dotnet) → package.json(npm) → Cargo.toml(cargo) → go.mod(go)
-    /// → pyproject.toml/setup.py/requirements.txt(python).
-    /// 매치 없으면 null. top-level만 본다 — monorepo는 root marker를 가정.
-    /// 순수 함수: 외부 상태에 의존하지 않으며 명령을 실행하지 않는다.
-    /// </summary>
-    public static VerificationSpec? InferSmokeTestCommand(string repoRoot)
-    {
-        if (string.IsNullOrWhiteSpace(repoRoot) || !Directory.Exists(repoRoot))
-            return null;
-
-        bool HasTopLevel(string pattern) =>
-            Directory.EnumerateFiles(repoRoot, pattern, SearchOption.TopDirectoryOnly).Any();
-
-        if (HasTopLevel("*.csproj") || HasTopLevel("*.sln"))
-            return new VerificationSpec { Command = "dotnet build -nologo", TimeoutSec = 180 };
-        if (HasTopLevel("package.json"))
-            return new VerificationSpec { Command = "npm test --silent", TimeoutSec = 180 };
-        if (HasTopLevel("Cargo.toml"))
-            return new VerificationSpec { Command = "cargo build --quiet", TimeoutSec = 300 };
-        if (HasTopLevel("go.mod"))
-            return new VerificationSpec { Command = "go build ./...", TimeoutSec = 180 };
-        if (HasTopLevel("pyproject.toml") || HasTopLevel("setup.py") || HasTopLevel("requirements.txt"))
-            return new VerificationSpec { Command = "python3 -m compileall -q .", TimeoutSec = 120 };
-
-        return null;
     }
 
     private void DisplayTaskInfo(string taskId)

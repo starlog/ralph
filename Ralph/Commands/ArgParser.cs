@@ -44,6 +44,8 @@ public static class ArgParser
         var envBudgetUsd = TryParseDouble(Environment.GetEnvironmentVariable("RALPH_BUDGET_USD"));
         var envTaskTimeoutSecRaw = TryParseInt(Environment.GetEnvironmentVariable("RALPH_TASK_TIMEOUT_SEC"));
         var envTaskTimeoutSec = envTaskTimeoutSecRaw is > 0 ? envTaskTimeoutSecRaw : null;
+        var envSmokeTestCommandRaw = Environment.GetEnvironmentVariable("RALPH_SMOKE_TEST_COMMAND");
+        var envSmokeTestCommand = string.IsNullOrWhiteSpace(envSmokeTestCommandRaw) ? null : envSmokeTestCommandRaw;
 
         // ─── CLI flags (boolean) ─────────────────────────────────────────────
         var argList = argv.ToList();
@@ -94,6 +96,28 @@ public static class ArgParser
                 return null;
             }
             argList.RemoveRange(budgetIdx, 2);
+        }
+
+        // ─── --smoke-test ────────────────────────────────────────────────────
+        // 1회용 smoke test 명령 override. workflow.smokeTest와 자동 추론을 모두 우회.
+        // 예: ralph --run --smoke-test "pnpm build && pnpm test"
+        string? cliSmokeTestCommand = null;
+        var stIdx = argList.IndexOf("--smoke-test");
+        if (stIdx >= 0)
+        {
+            if (stIdx + 1 >= argList.Count)
+            {
+                AnsiConsole.MarkupLine("[red]Error: --smoke-test 값이 누락되었습니다 (셸 명령 문자열 필요).[/]");
+                return null;
+            }
+            var raw = argList[stIdx + 1];
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                AnsiConsole.MarkupLine("[red]Error: --smoke-test 값이 비어 있습니다.[/]");
+                return null;
+            }
+            cliSmokeTestCommand = raw;
+            argList.RemoveRange(stIdx, 2);
         }
 
         // ─── --task-timeout ──────────────────────────────────────────────────
@@ -168,6 +192,7 @@ public static class ArgParser
             TasksFile = tasksFile,
             CliBudgetUsd = cliBudgetUsd,
             CliTaskTimeoutSec = cliTaskTimeoutSec,
+            CliSmokeTestCommand = cliSmokeTestCommand,
             EnvMaxRetries = envMaxRetries,
             EnvRetryDelay = envRetryDelay,
             EnvMaxParallel = envMaxParallel,
@@ -177,6 +202,7 @@ public static class ArgParser
             EnvSharedWorktrees = envSharedWorktrees,
             EnvBudgetUsd = envBudgetUsd,
             EnvTaskTimeoutSec = envTaskTimeoutSec,
+            EnvSmokeTestCommand = envSmokeTestCommand,
         };
     }
 

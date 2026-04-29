@@ -21,6 +21,7 @@ internal sealed class MergeOrchestrator
     private readonly string? _model;
     private readonly bool _strictFiles;
     private readonly bool _noSmokeTest;
+    private readonly string? _smokeTestCommandOverride;
     private readonly SemaphoreSlim _taskFileLock = new(1, 1);
 
     /// <summary>RunSingle path를 머지가 abort 시 fallback으로 호출하기 위한 콜백.</summary>
@@ -29,7 +30,8 @@ internal sealed class MergeOrchestrator
     public MergeOrchestrator(
         TaskManager taskManager, IAgentRunner claude, GitService git, WorktreeService worktree,
         RalphLogger logger, VerificationRunner verifier, CostTracker cost,
-        string tasksFile, string? model, bool strictFiles, bool noSmokeTest)
+        string tasksFile, string? model, bool strictFiles, bool noSmokeTest,
+        string? smokeTestCommandOverride = null)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -42,6 +44,7 @@ internal sealed class MergeOrchestrator
         _model = model;
         _strictFiles = strictFiles;
         _noSmokeTest = noSmokeTest;
+        _smokeTestCommandOverride = smokeTestCommandOverride;
     }
 
     /// <summary>
@@ -55,6 +58,10 @@ internal sealed class MergeOrchestrator
         CancellationToken ct)
     {
         var cleanupFailures = 0;
+
+        // smoke test의 docs-only 스킵 판단을 위해 머지 시작 직전 baseBranch HEAD SHA를 기록.
+        // 실패해도(unborn branch 등) 그냥 null로 두고 fall-through.
+        var preMergeSha = await CaptureBaseShaAsync(baseBranch, ct);
 
         // 순차적으로 메인에 병합. Live scope는 이미 종료되어 있으므로 진행률만 콘솔로 표시.
         AnsiConsole.MarkupLine(
@@ -158,7 +165,7 @@ internal sealed class MergeOrchestrator
         await CommitTasksFileAsync(taskIds, ct);
 
         // 5.5 머지 후 smoke test
-        if (await RunPostMergeSmokeTestAsync(ct) is { } smokeFail)
+        if (await RunPostMergeSmokeTestAsync(preMergeSha, ct) is { } smokeFail)
             return smokeFail;
 
         return 0;
@@ -347,40 +354,42 @@ internal sealed class MergeOrchestrator
 
     /// <summary>
     /// 머지 후 base 브랜치에서 smoke test를 실행해 머지 결과의 semantic 정합성을 검증.
-    /// 우선순위: --no-smoke-test → workflow.smokeTest → repo root marker로 자동 추론.
+    /// 우선순위 결정은 <see cref="SmokeTestPlanner.Plan"/>에 위임. preMergeSha가 있으면
+    /// 그 시점부터 HEAD까지의 변경 파일을 인자로 넘겨 docs-only 변경일 때 추론을 스킵한다.
     /// </summary>
-    private async Task<int?> RunPostMergeSmokeTestAsync(CancellationToken ct)
+    private async Task<int?> RunPostMergeSmokeTestAsync(string? preMergeSha, CancellationToken ct)
     {
-        if (_noSmokeTest)
+        var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+        var configured = _taskManager.Data.Workflow?.SmokeTest;
+        var changedFiles = await GetChangedFilesAsync(preMergeSha, repoRoot, ct);
+
+        var spec = SmokeTestPlanner.Plan(
+            repoRoot: repoRoot,
+            configured: configured,
+            cliCommand: _smokeTestCommandOverride,
+            envCommand: null, // ArgParser가 CLI/env merge하여 _smokeTestCommandOverride 한 곳으로 전달.
+            noSmokeTest: _noSmokeTest,
+            changedFiles: changedFiles);
+
+        if (spec is null)
         {
-            _logger.Info("[smoke-test] skipped (--no-smoke-test)");
+            var reason = DetermineSkipReason(configured, changedFiles);
+            _logger.Info($"[smoke-test] skipped ({reason})");
             return null;
         }
 
-        var repoRoot = await _git.GetRepoRootAsync(ct: ct);
-        var configured = _taskManager.Data.Workflow?.SmokeTest;
-        VerificationSpec? spec;
-        bool inferred = false;
-
-        if (configured is not null && !string.IsNullOrWhiteSpace(configured.Command))
+        // 라벨링: 어디서 왔는지 사용자에게 보여주는 게 진단에 도움이 됨.
+        var origin = ResolveSpecOrigin(spec, configured);
+        var label = origin switch
         {
-            spec = configured;
-        }
-        else
-        {
-            spec = ParallelExecutor.InferSmokeTestCommand(repoRoot);
-            inferred = spec is not null;
-            if (spec is null)
-            {
-                _logger.Info("[smoke-test] skipped (no workflow.smokeTest, inference matched no marker)");
-                return null;
-            }
-        }
+            "cli/env"  => "Smoke test 실행 (CLI/env override)",
+            "workflow" => "Smoke test 실행 (workflow.smokeTest)",
+            _          => "Smoke test 실행 (자동 추론)",
+        };
 
-        var label = inferred ? "Smoke test 실행 (자동 추론)" : "Smoke test 실행";
         AnsiConsole.MarkupLine(
-            $"\n[cyan]{label}:[/] [dim]{Markup.Escape(spec!.Command)}[/] [dim](cwd: {Markup.Escape(repoRoot)})[/]");
-        _logger.Info($"[smoke-test] running: {spec.Command} (cwd: {repoRoot}, inferred: {inferred})");
+            $"\n[cyan]{label}:[/] [dim]{Markup.Escape(spec.Command)}[/] [dim](cwd: {Markup.Escape(repoRoot)})[/]");
+        _logger.Info($"[smoke-test] running: {spec.Command} (cwd: {repoRoot}, origin: {origin})");
 
         var result = await _verifier.RunAsync(spec, repoRoot, _logger, output: null, ct);
         if (result.Success)
@@ -396,6 +405,68 @@ internal sealed class MergeOrchestrator
         _logger.Error(
             $"[smoke-test] failed exit={result.ExitCode} timedOut={result.TimedOut}");
         return 1;
+    }
+
+    private string DetermineSkipReason(
+        VerificationSpec? configured, IReadOnlyList<string>? changedFiles)
+    {
+        if (_noSmokeTest) return "--no-smoke-test";
+        // configured가 있으면 Plan이 무조건 그것을 반환했어야 하므로 여기에 도달하면 추론 단계에서 null.
+        if (configured is null && changedFiles is { Count: > 0 })
+        {
+            // changedFiles가 모두 docs면 docs-only로 스킵된 것
+            // (recompute하지 않고 changed list 기반으로 추정 — 표시용).
+            return "no workflow.smokeTest, all changes are docs-only";
+        }
+        return "no workflow.smokeTest, inference matched no marker";
+    }
+
+    private string ResolveSpecOrigin(VerificationSpec spec, VerificationSpec? configured)
+    {
+        if (!string.IsNullOrWhiteSpace(_smokeTestCommandOverride)
+            && spec.Command == _smokeTestCommandOverride!.Trim())
+            return "cli/env";
+        if (configured is not null && ReferenceEquals(spec, configured))
+            return "workflow";
+        return "inferred";
+    }
+
+    private async Task<string?> CaptureBaseShaAsync(string baseBranch, CancellationToken ct)
+    {
+        try
+        {
+            var (exit, output) = await _git.RunAsync(
+                new[] { "rev-parse", "--verify", baseBranch + "^{commit}" }, ct: ct);
+            if (exit != 0) return null;
+            var sha = output.Trim();
+            return string.IsNullOrEmpty(sha) ? null : sha;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<IReadOnlyList<string>?> GetChangedFilesAsync(
+        string? preMergeSha, string repoRoot, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(preMergeSha)) return null;
+        try
+        {
+            var (exit, output) = await _git.RunAsync(
+                new[] { "diff", "--name-only", $"{preMergeSha}..HEAD" },
+                workingDirectory: repoRoot, ct: ct);
+            if (exit != 0) return null;
+            var lines = output
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(l => l.Length > 0)
+                .ToList();
+            return lines;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>

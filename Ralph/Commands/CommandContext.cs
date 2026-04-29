@@ -33,6 +33,8 @@ public sealed class CommandContext
     public string TasksFile { get; init; } = "tasks.json";
     public double? CliBudgetUsd { get; init; }
     public int? CliTaskTimeoutSec { get; init; }
+    /// <summary>--smoke-test "&lt;cmd&gt;" 1회용 override. workflow.smokeTest와 자동 추론을 모두 우회.</summary>
+    public string? CliSmokeTestCommand { get; init; }
 
     // ─── env-derived ──────────────────────────────────────────────────────────
     public int? EnvMaxRetries { get; init; }
@@ -44,12 +46,18 @@ public sealed class CommandContext
     public bool? EnvSharedWorktrees { get; init; }
     public double? EnvBudgetUsd { get; init; }
     public int? EnvTaskTimeoutSec { get; init; }
+    /// <summary>RALPH_SMOKE_TEST_COMMAND. CLI --smoke-test가 우선.</summary>
+    public string? EnvSmokeTestCommand { get; init; }
 
     // ─── computed (CLI > env merge) ───────────────────────────────────────────
     public bool StrictFiles => CliStrictFiles || EnvStrictFiles;
     public bool NoSmokeTest => CliNoSmokeTest || EnvNoSmokeTest;
     public double? BudgetUsd => CliBudgetUsd ?? EnvBudgetUsd;
     public int? TaskTimeoutSec => CliTaskTimeoutSec ?? EnvTaskTimeoutSec;
+    /// <summary>최종 smoke test 명령 override: CLI &gt; env. SmokeTestPlanner.Plan에 그대로 전달.</summary>
+    public string? SmokeTestCommandOverride => !string.IsNullOrWhiteSpace(CliSmokeTestCommand)
+        ? CliSmokeTestCommand
+        : EnvSmokeTestCommand;
 
     // ─── factories ────────────────────────────────────────────────────────────
 
