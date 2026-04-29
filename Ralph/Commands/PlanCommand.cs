@@ -66,31 +66,119 @@ public sealed class PlanCommand : ICommand
         var result = await generator.GenerateAsync(
             prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ModelArg, logger,
             categories: configuredCategories, ct: ct);
-        sw.Stop();
 
-        if (result == 0)
+        if (result != 0)
         {
-            AnsiConsole.MarkupLine($"\n[green]플랜 생성 완료[/] [dim]({sw.Elapsed.Minutes}분 {sw.Elapsed.Seconds}초)[/]");
+            sw.Stop();
+            return result;
+        }
 
-            // PRD critique: 생성된 plan에 대한 정성 권고
+        // 검증 + 정정 루프: PlanValidator가 errors를 보고하면 현재 invalid tasks.json과 errors를
+        // 다시 Claude에 보내 정정시킨다. warnings만 있는 경우는 통과로 처리.
+        const int maxCorrectionAttempts = 2;
+        PlanValidationReport report;
+        var correctionAttempt = 0;
+        while (true)
+        {
+            TaskManager validateTm;
             try
             {
-                var critiqueTm = await TaskManager.LoadAsync(_ctx.TasksFile);
-                var suggestions = PrdCritic.Analyze(critiqueTm);
-                PrdCritic.PrintReport(suggestions);
-
-                if (_ctx.LlmCritique)
-                {
-                    await RunLlmCritiqueAsync(prdFile, critiqueTm, _ctx.ModelArg, logger, ct);
-                }
+                validateTm = await TaskManager.LoadAsync(_ctx.TasksFile);
             }
             catch (Exception ex)
             {
-                logger.Warn($"PRD critique skipped: {ex.Message}");
+                sw.Stop();
+                AnsiConsole.MarkupLine($"[red]✗ 생성된 tasks.json을 읽을 수 없습니다: {Markup.Escape(ex.Message)}[/]");
+                return 1;
+            }
+
+            report = PlanValidator.Validate(validateTm);
+            if (!report.HasErrors) break;
+
+            if (correctionAttempt >= maxCorrectionAttempts)
+            {
+                sw.Stop();
+                AnsiConsole.MarkupLine(
+                    $"\n[red]✗ Plan 검증 실패 — {maxCorrectionAttempts}회 정정 시도 후에도 errors가 남았습니다:[/]");
+                PlanValidator.PrintReport(report);
+                AnsiConsole.MarkupLine(
+                    "[yellow]'ralph --validate'로 자세히 확인하거나 PRD를 다듬어 다시 시도하세요.[/]");
+                return 1;
+            }
+
+            correctionAttempt++;
+            AnsiConsole.MarkupLine(
+                $"\n[yellow]⚠ Plan 검증 실패 ({report.Errors.Count}개 error). " +
+                $"AI 정정으로 재생성합니다 (시도 {correctionAttempt}/{maxCorrectionAttempts}):[/]");
+            foreach (var e in report.Errors)
+                AnsiConsole.MarkupLine($"  [red]•[/] {Markup.Escape(e)}");
+            AnsiConsole.WriteLine();
+
+            string currentInvalidJson;
+            try
+            {
+                currentInvalidJson = await File.ReadAllTextAsync(_ctx.TasksFile, ct);
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                AnsiConsole.MarkupLine($"[red]✗ tasks.json 읽기 실패: {Markup.Escape(ex.Message)}[/]");
+                return 1;
+            }
+
+            var correctionContext = PlanGenerator.BuildCorrectionPrompt(
+                currentInvalidJson, report.Errors, correctionAttempt, maxCorrectionAttempts);
+
+            var fixResult = await generator.GenerateAsync(
+                prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ModelArg, logger,
+                categories: configuredCategories,
+                correctionContext: correctionContext, ct: ct);
+
+            if (fixResult != 0)
+            {
+                sw.Stop();
+                AnsiConsole.MarkupLine(
+                    "[red]✗ 정정 시도 중 Claude 실행이 실패했습니다.[/]");
+                return fixResult;
             }
         }
 
-        return result;
+        sw.Stop();
+
+        AnsiConsole.MarkupLine($"\n[green]플랜 생성 완료[/] [dim]({sw.Elapsed.Minutes}분 {sw.Elapsed.Seconds}초)[/]");
+        if (correctionAttempt > 0)
+            AnsiConsole.MarkupLine($"[dim](AI 정정 {correctionAttempt}회 후 검증 통과)[/]");
+
+        if (report.HasWarnings)
+        {
+            AnsiConsole.MarkupLine($"[yellow]⚠ Plan 검증 경고 {report.Warnings.Count}개:[/]");
+            foreach (var w in report.Warnings)
+                AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(w)}");
+            AnsiConsole.WriteLine();
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[green]✓ Plan 검증 통과 (errors: 0, warnings: 0).[/]");
+        }
+
+        // PRD critique: 생성된 plan에 대한 정성 권고
+        try
+        {
+            var critiqueTm = await TaskManager.LoadAsync(_ctx.TasksFile);
+            var suggestions = PrdCritic.Analyze(critiqueTm);
+            PrdCritic.PrintReport(suggestions);
+
+            if (_ctx.LlmCritique)
+            {
+                await RunLlmCritiqueAsync(prdFile, critiqueTm, _ctx.ModelArg, logger, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"PRD critique skipped: {ex.Message}");
+        }
+
+        return 0;
     }
 
     private async Task RunLlmCritiqueAsync(

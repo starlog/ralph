@@ -20,22 +20,32 @@ public partial class PlanGenerator
         string prdFile, string schemaContent, string tasksFile,
         IAgentRunner claude, string model = "opus", RalphLogger? logger = null,
         IReadOnlyList<string>? categories = null,
+        string? correctionContext = null,
         CancellationToken ct = default)
     {
         categories ??= DefaultCategories;
+        var isCorrection = !string.IsNullOrEmpty(correctionContext);
         // Header
         AnsiConsole.WriteLine();
-        AnsiConsole.Write(new Rule("[green]RALPH - Plan Generator[/]").RuleStyle("blue"));
+        var headerTitle = isCorrection
+            ? "[yellow]RALPH - Plan Generator (Correcting validation errors)[/]"
+            : "[green]RALPH - Plan Generator[/]";
+        AnsiConsole.Write(new Rule(headerTitle).RuleStyle("blue"));
         AnsiConsole.MarkupLine($"[cyan]PRD File:[/] {Markup.Escape(prdFile)}");
         AnsiConsole.MarkupLine($"[cyan]Model:[/]    {Markup.Escape(model)}");
         AnsiConsole.MarkupLine($"[cyan]Output:[/]   {Markup.Escape(tasksFile)}");
         AnsiConsole.Write(new Rule().RuleStyle("blue"));
-        AnsiConsole.MarkupLine("\n[cyan]Generating task plan with Claude Code...[/]\n");
+        AnsiConsole.MarkupLine(isCorrection
+            ? "\n[cyan]Re-generating task plan with Claude Code (correction pass)...[/]\n"
+            : "\n[cyan]Generating task plan with Claude Code...[/]\n");
 
         // Build prompt (PRD file path only — Claude reads it via Read tool)
         var prdFullPath = Path.GetFullPath(prdFile);
         var tasksFullPath = Path.GetFullPath(tasksFile);
-        var prompt = BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath, categories);
+        var basePrompt = BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath, categories);
+        var prompt = isCorrection
+            ? correctionContext + "\n\n---\n\n" + basePrompt
+            : basePrompt;
 
         // Run Claude (full tool access — Claude can explore codebase and write tasks.json directly)
         AnsiConsole.Write(new Rule("[yellow]Claude Code Output[/]").RuleStyle("yellow"));
@@ -294,6 +304,21 @@ public partial class PlanGenerator
                - `ruby -e "require 'm'\\nputs M.f(1,2)"` — same problem
                Any `<lang> -c|-e|--eval "..."` whose body contains a `\\n`, `\\t`, or `\\r` escape is wrong.
 
+            14. **`workflow.smokeTest` (CRITICAL — must be progressively safe).** This command runs on the base branch after **every parallel batch merge**, not only at the end. So at the time it runs, only files produced by *already-merged* batches exist; files scheduled for later batches do NOT exist yet.
+
+               Therefore the smoke test command MUST NOT enumerate specific files by name. A command like `python3 -m py_compile add.py subtract.py main.py` will fail on the first batch if `main.py` is in a later batch — even though the plan is correct.
+
+               PREFERRED forms (work at every batch, regardless of which files exist yet):
+               - **Project test/build runner** — `dotnet build -nologo`, `npm test --silent`, `cargo build --quiet`, `go build ./...`, `pytest -q` (only if a test runner is set up).
+               - **Recursive compile/typecheck** — `python3 -m compileall -q .`, `tsc --noEmit`, `ruby -wc *.rb` (glob expanded by shell at run time, so empty-match is fine on most shells with `nullglob`-equivalent — verify per stack).
+               - **Omit entirely** — if no safe whole-tree command exists for the stack, leave `workflow.smokeTest` unset. Ralph will fall back to its built-in inference (`pyproject.toml`/`setup.py`/`requirements.txt` → `python3 -m compileall -q .`, etc.). Setting an over-specific smoke test is worse than setting none.
+
+               FORBIDDEN forms:
+               - Any command that names specific source files the plan creates (`python3 -m py_compile a.py b.py c.py`, `node a.js b.js`, `gcc a.c b.c -o app`). These break the moment a referenced file lives in a later batch.
+               - Test commands that import from yet-to-be-created modules.
+
+               If unsure, **prefer omitting `workflow.smokeTest` over guessing a file list**.
+
             ## JSON Schema
             """);
 
@@ -309,6 +334,45 @@ public partial class PlanGenerator
         sb.AppendLine("4. Write the JSON to the `tasks.json` file in the current directory using the Write tool.");
         sb.AppendLine("5. After writing, print a brief summary: total task count, feature list, and parallel execution info. Do NOT print the full JSON to the screen.");
 
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// PlanValidator가 보고한 errors를 Claude에게 다시 보내 tasks.json을 정정시키기 위한
+    /// "보정" 컨텍스트를 만든다. 호출자는 이 문자열을 BuildPlanPrompt 결과 앞에 prepend해서
+    /// 재생성 호출에 사용한다 (GenerateAsync의 correctionContext 파라미터).
+    /// </summary>
+    public static string BuildCorrectionPrompt(
+        string currentInvalidJson, IReadOnlyList<string> errors, int attempt, int maxAttempts)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# IMPORTANT: tasks.json 검증 실패 — 정정이 필요합니다");
+        sb.AppendLine();
+        sb.AppendLine($"이전에 생성한 tasks.json이 Ralph의 PlanValidator 검증을 통과하지 못했습니다.");
+        sb.AppendLine($"이번이 정정 시도 {attempt}/{maxAttempts}회 입니다.");
+        sb.AppendLine();
+        sb.AppendLine("## 반드시 수정해야 할 검증 오류");
+        sb.AppendLine();
+        foreach (var error in errors)
+            sb.AppendLine($"- {error}");
+        sb.AppendLine();
+        sb.AppendLine("## 현재 (검증 실패한) tasks.json");
+        sb.AppendLine();
+        sb.AppendLine("```json");
+        sb.AppendLine(currentInvalidJson);
+        sb.AppendLine("```");
+        sb.AppendLine();
+        sb.AppendLine("## 정정 지침");
+        sb.AppendLine();
+        sb.AppendLine("PRD를 다시 읽고, 위 오류를 **모두** 해결한 corrected tasks.json을 작성하세요.");
+        sb.AppendLine("이미 올바른 부분은 그대로 유지하고, 오류 해결에 필요한 최소 변경만 가하세요. 특히:");
+        sb.AppendLine("- **순환 의존성**: 의존 관계를 재구성해 cycle 제거");
+        sb.AppendLine("- **dangling dependsOn**: 존재하는 task ID만 참조하도록 수정 (오타 가능성 점검)");
+        sb.AppendLine("- **중복 ID**: 고유한 ID로 rename");
+        sb.AppendLine("- **민감 파일**(.env, .pem, .key, credentials.json 등)이 modifiedFiles/outputFiles에 명시된 경우 → 제거");
+        sb.AppendLine("- **verification.command 이스케이프 오류** (`\\n`/`\\t` 포함 시): `;` separator로 single statement로 바꾸거나, 프로젝트 표준 test runner(예: `dotnet test`, `pytest -q`, `npm test`)를 사용");
+        sb.AppendLine();
+        sb.AppendLine("아래는 원래의 plan 생성 지침과 schema입니다. 동일한 규칙을 따르되 위 정정 사항을 반영하세요.");
         return sb.ToString();
     }
 

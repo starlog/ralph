@@ -381,7 +381,8 @@ public class ParallelExecutor
 
     /// <summary>
     /// repo root에 있는 빌드 시스템 marker를 보고 smoke test 명령을 추론한다.
-    /// 우선순위: .csproj/.sln(dotnet) → package.json(npm) → Cargo.toml(cargo) → go.mod(go).
+    /// 우선순위: .csproj/.sln(dotnet) → package.json(npm) → Cargo.toml(cargo) → go.mod(go)
+    /// → pyproject.toml/setup.py/requirements.txt(python).
     /// 매치 없으면 null. top-level만 본다 — monorepo는 root marker를 가정.
     /// 순수 함수: 외부 상태에 의존하지 않으며 명령을 실행하지 않는다.
     /// </summary>
@@ -401,6 +402,8 @@ public class ParallelExecutor
             return new VerificationSpec { Command = "cargo build --quiet", TimeoutSec = 300 };
         if (HasTopLevel("go.mod"))
             return new VerificationSpec { Command = "go build ./...", TimeoutSec = 180 };
+        if (HasTopLevel("pyproject.toml") || HasTopLevel("setup.py") || HasTopLevel("requirements.txt"))
+            return new VerificationSpec { Command = "python3 -m compileall -q .", TimeoutSec = 120 };
 
         return null;
     }

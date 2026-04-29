@@ -78,6 +78,52 @@ public class SmokeTestInferenceTests : IDisposable
     }
 
     [Fact]
+    public void Pyproject_marker_infers_python_compileall()
+    {
+        File.WriteAllText(Path.Combine(_root, "pyproject.toml"), "[project]");
+
+        var spec = ParallelExecutor.InferSmokeTestCommand(_root);
+
+        Assert.NotNull(spec);
+        Assert.Contains("compileall", spec!.Command);
+        Assert.Equal(120, spec.TimeoutSec);
+    }
+
+    [Fact]
+    public void SetupPy_marker_infers_python_compileall()
+    {
+        File.WriteAllText(Path.Combine(_root, "setup.py"), "from setuptools import setup");
+
+        var spec = ParallelExecutor.InferSmokeTestCommand(_root);
+
+        Assert.NotNull(spec);
+        Assert.Contains("compileall", spec!.Command);
+    }
+
+    [Fact]
+    public void RequirementsTxt_marker_infers_python_compileall()
+    {
+        File.WriteAllText(Path.Combine(_root, "requirements.txt"), "");
+
+        var spec = ParallelExecutor.InferSmokeTestCommand(_root);
+
+        Assert.NotNull(spec);
+        Assert.Contains("compileall", spec!.Command);
+    }
+
+    [Fact]
+    public void Dotnet_takes_priority_over_python()
+    {
+        File.WriteAllText(Path.Combine(_root, "Foo.csproj"), "<Project />");
+        File.WriteAllText(Path.Combine(_root, "pyproject.toml"), "[project]");
+
+        var spec = ParallelExecutor.InferSmokeTestCommand(_root);
+
+        Assert.NotNull(spec);
+        Assert.Contains("dotnet build", spec!.Command);
+    }
+
+    [Fact]
     public void Empty_directory_returns_null()
     {
         var spec = ParallelExecutor.InferSmokeTestCommand(_root);
