@@ -157,6 +157,37 @@ public class WorktreeServiceTests
     }
 
     [Fact]
+    public async Task ValidateModifiedFiles_ignores_files_main_advanced_with_after_branch_diverged()
+    {
+        // 회귀 케이스: 같은 batch에서 앞 태스크가 main에 먼저 머지된 뒤, 다음 태스크의
+        // 워크트리는 그 파일을 갖고 있지 않다. 두-점 diff(`base..HEAD`)는 트리 비교라
+        // main의 신규 파일이 HEAD에 없으면 false-positive undeclared로 잡혔다.
+        // 세-점 diff(`base...HEAD`)는 merge-base 기준이므로 이 false-positive를 막는다.
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "S");
+        await fix.CommitAllAsync("initial");
+        await fix.SetupWorktreeAsync("t2");
+
+        // t2는 자기 파일만 만든다 (subtract-impl 역할).
+        await fix.WriteInWorktreeAsync("t2", "subtract.py", "def subtract(a,b): return a-b");
+        await fix.CommitInWorktreeAsync("t2", "subtract impl");
+
+        // 그 사이 main에는 다른 태스크(add-impl)가 먼저 머지되어 add.py가 추가됨.
+        await fix.WriteFileAsync("add.py", "def add(a,b): return a+b");
+        await fix.CommitAllAsync("add-impl merged");
+
+        var declared = new HashSet<string> { "subtract.py" };
+        var result = await fix.Worktree.ValidateModifiedFilesAsync(
+            "t2", "main", declared, validationLogPath: fix.ValidationLogPath);
+
+        Assert.False(result.DiffFailed);
+        Assert.False(result.HasUndeclared);
+        Assert.DoesNotContain("add.py", result.Actual);
+        Assert.Contains("subtract.py", result.Actual);
+    }
+
+    [Fact]
     public async Task ValidateModifiedFiles_appends_to_jsonl_log()
     {
         using var fix = new GitFixture();

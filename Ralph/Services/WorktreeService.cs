@@ -23,7 +23,7 @@ public sealed record ValidationLogEntry(
     IReadOnlyList<string> NotChanged);
 
 /// <summary>
-/// 머지 직전 declared(modifiedFiles ∪ outputFiles) vs actual(git diff base..HEAD) 비교 결과.
+/// 머지 직전 declared(modifiedFiles ∪ outputFiles) vs actual(git diff base...HEAD) 비교 결과.
 /// </summary>
 public sealed record FileValidationResult(
     string TaskId,
@@ -294,6 +294,10 @@ public class WorktreeService
     /// 대조합니다. F2의 NormalizeTasksJsonAsync "이후"에 호출되어야 tasks.json
     /// 정규화 결과가 actual에서 빠지고, 진짜 undeclared만 남습니다.
     ///
+    /// `git diff baseRef...HEAD` (세-점)을 사용해 merge-base부터 HEAD까지의 변경만
+    /// 비교합니다. 두-점(`..`)은 트리 단순 비교라 같은 batch에서 앞 태스크가 base에
+    /// 먼저 머지된 경우 그 파일이 HEAD엔 없어 false-positive undeclared로 잡힙니다.
+    ///
     /// 결과는 .ralph-logs/validation.jsonl(또는 지정 경로)에 한 줄(append) JSON으로 누적되며,
     /// undeclared가 있으면 logger.Warn을 남깁니다. diff 자체가 실패하면 머지를 막지 않고
     /// DiffFailed=true로 반환합니다.
@@ -310,7 +314,7 @@ public class WorktreeService
         var timestamp = DateTimeOffset.UtcNow;
 
         var (diffExit, diffOut) = await _git.RunAsync(
-            ["diff", "--name-only", $"{baseRef}..HEAD"], worktreePath, ct);
+            ["diff", "--name-only", $"{baseRef}...HEAD"], worktreePath, ct);
 
         if (diffExit != 0)
         {

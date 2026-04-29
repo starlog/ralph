@@ -2,7 +2,7 @@
 
 [English](README.md) | **한국어**
 
-PRD(Product Requirements Document)를 실행 가능한 plan으로 변환해 Claude Code로 실행하는 CLI 태스크 오케스트레이터 — 기본은 git worktree 기반 병렬, 의존성 추적 / exit code 기반 검증 / 충돌 인지 머지 / 누적 비용 게이트 / smoke test / 실시간 진행 모니터링 포함. .NET 8 기반 크로스플랫폼 (Windows, macOS, Linux). 현재 버전: **v1.1**.
+PRD(Product Requirements Document)를 실행 가능한 plan으로 변환해 Claude Code로 실행하는 CLI 태스크 오케스트레이터 — 기본은 git worktree 기반 병렬, 의존성 추적 / exit code 기반 검증 / 충돌 인지 머지 / 누적 비용 게이트 / smoke test / 실시간 진행 모니터링 포함. .NET 8 기반 크로스플랫폼 (Windows, macOS, Linux). 현재 버전: **v1.21**.
 
 **git worktree 기반 병렬 실행을 최초로 구현한 Ralph 변종.** 독립적인 기능들을 격리된 Claude Code 에이전트로 동시에 실행하고 자동으로 다시 머지한다.
 
@@ -115,7 +115,7 @@ Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들�
 
 | 버전 | 구현 | 플랫폼 | 주요 기능 |
 |---|---|---|---|
-| v0.1 | `ralph.sh` (Bash) | macOS, Linux | 순차 실행 |
+| v0.1 | `ralph.sh` / `ralph.ps1` (Bash / PowerShell, 현재 [`legacy/`](legacy/) 디렉토리로 이동) | macOS, Linux, Windows | 순차 실행 |
 | v0.6 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 병렬 실행, worktree, live log |
 | v0.7 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `--graph` 태스크 의존성 그래프 |
 | v1.0 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 비용 추적, 플랜 검증, prompt builder, webhook 알림, 로그 로테이션 |
@@ -130,9 +130,9 @@ Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들�
 
 ## 설치
 
-### 방법 1: 설치 스크립트 (소스에서 빌드)
+### 방법 1: 설치 스크립트 (컴파일된 바이너리를 로컬에 설치)
 
-.NET 8 SDK가 필요하다. 스크립트가 자동으로 빌드하고 PATH에 설치한다.
+.NET 8 SDK가 필요하다. 스크립트는 플랫폼에 맞는 self-contained Ralph 바이너리를 publish한 뒤 PATH 상의 디렉토리(기본 `~/bin`)로 복사한다. 결과물은 방법 2와 동일한 단일 바이너리이며, 다운로드 대신 직접 빌드한다는 차이만 있다.
 
 **macOS / Linux:**
 

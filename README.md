@@ -2,7 +2,7 @@
 
 **English** | [한국어](README.ko.md)
 
-A CLI task orchestrator that turns a PRD (Product Requirements Document) into an executable plan and runs it through Claude Code — in parallel by default, on git worktrees, with dependency tracking, exit-code-based verification, conflict-aware merging, cost budgets, smoke testing, and live progress monitoring. Built on .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.1**.
+A CLI task orchestrator that turns a PRD (Product Requirements Document) into an executable plan and runs it through Claude Code — in parallel by default, on git worktrees, with dependency tracking, exit-code-based verification, conflict-aware merging, cost budgets, smoke testing, and live progress monitoring. Built on .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.21**.
 
 The first Ralph implementation with **parallel git worktree execution**: independent features run concurrently as isolated Claude Code agents and are merged back automatically.
 
@@ -115,7 +115,7 @@ Full PRD: [bugfix.md](bugfix.md)
 
 | Version | Implementation | Platforms | Key Features |
 |---|---|---|---|
-| v0.1 | `ralph.sh` (Bash) | macOS, Linux | Sequential execution |
+| v0.1 | `ralph.sh` / `ralph.ps1` (Bash / PowerShell, now under [`legacy/`](legacy/)) | macOS, Linux, Windows | Sequential execution |
 | v0.6 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Parallel execution, worktrees, live logs |
 | v0.7 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `--graph` task dependency visualization |
 | v1.0 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Cost tracker, plan validator, prompt builder, webhook notifications, log rotation |
@@ -130,9 +130,9 @@ Full PRD: [bugfix.md](bugfix.md)
 
 ## Installation
 
-### Option 1: Install Script (build from source)
+### Option 1: Install Script (build and install compiled binary locally)
 
-Requires the .NET 8 SDK. The script builds Ralph and installs it on your PATH.
+Requires the .NET 8 SDK. The script publishes a self-contained Ralph binary for your platform, then copies it into a directory on your PATH (defaults to `~/bin`). The result is the same single-file binary as Option 2 — you just build it yourself instead of downloading it.
 
 **macOS / Linux:**
 

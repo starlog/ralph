@@ -155,7 +155,7 @@ internal sealed class WorktreeTaskRunner
     /// <summary>
     /// Claude 실행 직후 staging 직전, worktree의 working-tree 변경 전체와 declared 집합을 비교한다.
     /// 새 파일/수정/삭제(staged·unstaged·untracked) 모두 보고 declared 외면 warn-only(또는 strict-files면 fail).
-    /// commit 이후의 base..HEAD 검증과 보완 관계 — 이쪽은 staging 필터에 의해 사라지기 전 raw 변경을 본다.
+    /// commit 이후의 base...HEAD 검증과 보완 관계 — 이쪽은 staging 필터에 의해 사라지기 전 raw 변경을 본다.
     /// tasks.json은 별도 GuardTasksFileAsync가 정규화하므로 검사에서 제외.
     /// </summary>
     private async Task<bool> PreCommitScopeGuardAsync(

@@ -73,7 +73,7 @@ internal sealed class MergeOrchestrator
                 tasksFileName: Path.GetFileName(_tasksFile),
                 logger: _logger, ct: ct);
 
-            // F4: declared(modifiedFiles ∪ outputFiles) vs actual(base..HEAD) 검증.
+            // F4: declared(modifiedFiles ∪ outputFiles) vs actual(base...HEAD) 검증.
             var declared = DeclaredFiles.Build(_taskManager.GetTask(taskId)!);
             var validation = await _worktree.ValidateModifiedFilesAsync(
                 taskId, baseBranch, declared, _logger, ct: ct);
