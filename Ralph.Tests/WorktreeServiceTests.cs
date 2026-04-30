@@ -5,9 +5,10 @@ namespace Ralph.Tests;
 
 /// <summary>
 /// WorktreeService의 머지 직전 단계(NormalizeTasksJson, ValidateModifiedFiles,
-/// AdvanceWorktreeOntoBase)를 실제 git fixture로 검증. 각 테스트는 unique temp dir의
-/// repo + worktree에서 격리되어 병렬 실행 가능.
+/// AdvanceWorktreeOntoBase)와 브랜치 삭제 가드(fix2 #4)를 실제 git fixture로 검증.
+/// CleanupWorktreeAsync는 CWD 의존 git 호출을 사용하므로 "cost" collection으로 직렬화.
 /// </summary>
+[Collection("cost")]
 public class WorktreeServiceTests
 {
     // ─── NormalizeTasksJsonAsync ─────────────────────────────────────────────
@@ -413,5 +414,144 @@ public class WorktreeServiceTests
 
         Assert.True(ok);
         Assert.True(fix.FileExistsInWorktree("t1", "wt.txt"));
+    }
+
+    // ─── BranchGuard (fix2 #4) ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task BranchGuard_config_set_no_worktree_dir_user_commit_holds()
+    {
+        // ralphManaged config 있지만 워크트리 디렉토리가 없고 사용자 커밋이 있는 브랜치 →
+        // HoldUserOwned 판정 → 삭제 보류 + 수동 삭제 안내 메시지 출력
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "S");
+        await fix.CommitAllAsync("initial");
+
+        // 워크트리 생성 후 사용자 커밋 추가 (ralph 시그니처 없는 메시지)
+        await fix.SetupWorktreeAsync("t1");
+        await fix.WriteInWorktreeAsync("t1", "userfile.txt", "user content");
+        await fix.CommitInWorktreeAsync("t1", "user's own work");
+
+        // 워크트리 디렉토리 제거 (브랜치와 reflog는 보존)
+        var wtPath = Path.Combine(fix.WorktreeBase, "t1");
+        await fix.Git.RunAsync(["worktree", "remove", wtPath, "--force"], fix.RepoDir);
+
+        // ralphManaged config 마커 설정 (A 신호)
+        await fix.Git.RunAsync(
+            ["config", "branch.ralph/t1.ralphManaged", "true"], fix.RepoDir);
+
+        var logDir = Path.Combine(Path.GetTempPath(), $"ralph-log-{Guid.NewGuid():N}");
+        string logFile;
+        try
+        {
+            using (var logger = new RalphLogger(logDir))
+            {
+                using (fix.UseRepoCwd())
+                    await fix.Worktree.CleanupWorktreeAsync("t1", logger);
+                logFile = logger.LogFile;
+            }
+
+            // 브랜치는 삭제 보류 상태로 보존되어야 함
+            var (showExit, _) = await fix.Git.RunAsync(
+                ["show-ref", "--verify", "--quiet", "refs/heads/ralph/t1"], fix.RepoDir);
+            Assert.Equal(0, showExit);
+
+            // 수동 삭제 안내 경고 메시지 출력 확인
+            var logContent = File.ReadAllText(logFile);
+            Assert.Contains("[WARN]", logContent);
+            Assert.Contains("ralph/t1", logContent);
+            Assert.Contains("수동 삭제", logContent);
+        }
+        finally
+        {
+            try { Directory.Delete(logDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task BranchGuard_user_branch_no_config_never_deleted()
+    {
+        // 사용자가 직접 만든 ralph/user-test 브랜치 (config/marker 없음) →
+        // NotRalphManaged 판정 → 절대 삭제 안 됨
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "S");
+        await fix.CommitAllAsync("initial");
+
+        // config 없이 사용자가 직접 생성한 ralph/* 브랜치
+        var (e, _) = await fix.Git.RunAsync(["branch", "ralph/user-test"], fix.RepoDir);
+        Assert.Equal(0, e);
+
+        bool ok;
+        using (fix.UseRepoCwd())
+            ok = await fix.Worktree.CleanupWorktreeAsync("user-test");
+
+        Assert.True(ok);
+
+        // 브랜치 보존 확인
+        var (showExit, _) = await fix.Git.RunAsync(
+            ["show-ref", "--verify", "--quiet", "refs/heads/ralph/user-test"], fix.RepoDir);
+        Assert.Equal(0, showExit);
+    }
+
+    [Fact]
+    public async Task BranchGuard_normal_worktree_config_and_marker_deleted()
+    {
+        // 정상 ralph 워크트리 (config + .ralph-marker + 워크트리 디렉토리) →
+        // SafeToDelete 판정 → 가드 통과 후 브랜치 삭제됨
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "S");
+        await fix.CommitAllAsync("initial");
+        await fix.SetupWorktreeAsync("t1");
+
+        // ralphManaged config 설정 (A 신호)
+        await fix.Git.RunAsync(
+            ["config", "branch.ralph/t1.ralphManaged", "true"], fix.RepoDir);
+
+        // .ralph-marker 파일 작성 (D 신호) — schema/task-id/branch 필드 필수
+        var markerPath = Path.Combine(fix.WorktreeBase, "t1", ".ralph-marker");
+        await File.WriteAllTextAsync(markerPath,
+            "schema: v1\ntask-id: t1\nbranch: ralph/t1\n");
+
+        bool ok;
+        using (fix.UseRepoCwd())
+            ok = await fix.Worktree.CleanupWorktreeAsync("t1");
+
+        Assert.True(ok);
+
+        // 브랜치 삭제 확인
+        var (showExit, _) = await fix.Git.RunAsync(
+            ["show-ref", "--verify", "--quiet", "refs/heads/ralph/t1"], fix.RepoDir);
+        Assert.NotEqual(0, showExit);
+    }
+
+    [Fact]
+    public async Task BranchGuard_marker_only_no_config_active_worktree_deleted()
+    {
+        // marker만 있고 config 없는 경우 — 활성 worktree 연결(B 신호)이 IsRalphManaged를
+        // 통과시키고, .ralph-marker(D 신호)가 SafeToDelete를 확정 → 브랜치 삭제됨
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "S");
+        await fix.CommitAllAsync("initial");
+        await fix.SetupWorktreeAsync("t1");  // config 없이 worktree만 생성
+
+        // config 없이 .ralph-marker 파일만 작성 (D 신호)
+        var markerPath = Path.Combine(fix.WorktreeBase, "t1", ".ralph-marker");
+        await File.WriteAllTextAsync(markerPath,
+            "schema: v1\ntask-id: t1\nbranch: ralph/t1\n");
+
+        bool ok;
+        using (fix.UseRepoCwd())
+            ok = await fix.Worktree.CleanupWorktreeAsync("t1");
+
+        Assert.True(ok);
+
+        // 활성 worktree(B 신호) + marker(D 신호) 조합으로 브랜치 삭제 확인
+        var (showExit, _) = await fix.Git.RunAsync(
+            ["show-ref", "--verify", "--quiet", "refs/heads/ralph/t1"], fix.RepoDir);
+        Assert.NotEqual(0, showExit);
     }
 }
