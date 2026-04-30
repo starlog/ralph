@@ -42,10 +42,8 @@ public sealed class PricingFile
 /// </summary>
 public class CostTracker
 {
-    private const string DefaultLogDir = ".ralph-logs";
-    private const string LogFileName = "cost.jsonl";
     private static string? _logDirOverride;
-    private static string LogDir => _logDirOverride ?? DefaultLogDir;
+    private static string LogDir => _logDirOverride ?? RalphPaths.LogDir;
 
     // 단가는 EmbeddedResource pricing.json에서 1회 로드. ~/.ralph/pricing.json이 있으면 override.
     private static readonly Dictionary<string, PricingEntry> Pricing = LoadPricing();
@@ -69,7 +67,7 @@ public class CostTracker
     private static double _cumulativeUsd;
     private static bool _hydrated;
 
-    public string LogFilePath => Path.Combine(LogDir, LogFileName);
+    public string LogFilePath => Path.Combine(LogDir, RalphPaths.CostLedgerFileName);
 
     /// <summary>
     /// 테스트 격리용 — 누적 캐시와 hydrate 플래그를 0으로 리셋합니다.

@@ -18,10 +18,6 @@ namespace Ralph.Services;
 /// </summary>
 public sealed class RollbackService
 {
-    private const string RollbackDirName = "rollback";
-    private const string PrePlanFileName = "pre-plan.json";
-    private const string PostPlanFileName = "post-plan.json";
-
     public const string PrePlanPhase = "pre-plan";
     public const string PostPlanPhase = "post-plan";
 
@@ -34,13 +30,13 @@ public sealed class RollbackService
 
     private readonly string _rollbackDir;
 
-    public RollbackService(string logDir = ".ralph-logs")
+    public RollbackService(string logDir = RalphPaths.LogDir)
     {
-        _rollbackDir = Path.Combine(logDir, RollbackDirName);
+        _rollbackDir = Path.Combine(logDir, RalphPaths.RollbackDirName);
     }
 
-    public string PrePlanPath => Path.Combine(_rollbackDir, PrePlanFileName);
-    public string PostPlanPath => Path.Combine(_rollbackDir, PostPlanFileName);
+    public string PrePlanPath => Path.Combine(_rollbackDir, RalphPaths.PrePlanSnapshotFileName);
+    public string PostPlanPath => Path.Combine(_rollbackDir, RalphPaths.PostPlanSnapshotFileName);
 
     /// <summary>
     /// --plan 실행 직전에 호출. 현재 git HEAD + tasks.json + PRD 원본을 pre-plan 스냅샷으로 저장.

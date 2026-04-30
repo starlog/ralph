@@ -277,7 +277,7 @@ public class ParallelExecutor
         try
         {
             AnsiConsole.MarkupLine("\n[blue]Worktree 생성 중...[/]");
-            const string logDir = ".ralph-logs";
+            const string logDir = RalphPaths.LogDir;
             Directory.CreateDirectory(logDir);
 
             foreach (var taskId in taskIds)

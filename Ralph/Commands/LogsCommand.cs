@@ -9,7 +9,7 @@ namespace Ralph.Commands;
 /// </summary>
 public sealed class LogsCommand : ICommand
 {
-    private const string LogDir = ".ralph-logs";
+    private const string LogDir = RalphPaths.LogDir;
     private readonly CommandContext _ctx;
 
     public LogsCommand(CommandContext ctx) => _ctx = ctx;

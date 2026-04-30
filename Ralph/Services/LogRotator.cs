@@ -9,13 +9,12 @@ namespace Ralph.Services;
 /// </summary>
 public static class LogRotator
 {
-    private const string LogDir = ".ralph-logs";
     private const int DefaultRetentionDays = 30;
 
     private static readonly HashSet<string> ProtectedFiles = new(StringComparer.OrdinalIgnoreCase)
     {
-        "cost.jsonl",
-        "validation.jsonl",
+        RalphPaths.CostLedgerFileName,
+        RalphPaths.ValidationLedgerFileName,
     };
 
     /// <summary>
@@ -34,14 +33,14 @@ public static class LogRotator
             return 0;
         }
 
-        if (!Directory.Exists(LogDir))
+        if (!Directory.Exists(RalphPaths.LogDir))
             return 0;
 
         var cutoff = DateTime.UtcNow.AddDays(-days);
         var deleted = 0;
         long bytesFreed = 0;
 
-        foreach (var file in Directory.EnumerateFiles(LogDir))
+        foreach (var file in Directory.EnumerateFiles(RalphPaths.LogDir))
         {
             var name = Path.GetFileName(file);
             if (ProtectedFiles.Contains(name)) continue;

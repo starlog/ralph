@@ -33,8 +33,8 @@ public sealed class StatusCommand : ICommand
 
         // P3-1/P2-4: 현재 worktree를 fs로 검출 (다른 터미널의 ralph --run 가시성 확보).
         // 모두 idle인 경우 stale 잔존 가능성 → cleanup 안내를 강조.
-        const string worktreeBase = ".ralph-worktrees";
-        const string logDir = ".ralph-logs";
+        const string worktreeBase = RalphPaths.WorktreeDir;
+        const string logDir = RalphPaths.LogDir;
         if (Directory.Exists(worktreeBase))
         {
             var threshold = DateTime.Now.AddSeconds(-30);

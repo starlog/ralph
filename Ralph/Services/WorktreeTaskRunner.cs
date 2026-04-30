@@ -49,7 +49,7 @@ internal sealed class WorktreeTaskRunner
         _logger.TaskStart(taskId, task.Title);
         tracker.UpdateStatus(taskId, TaskProgressStatus.Running);
 
-        const string logDir = ".ralph-logs";
+        const string logDir = RalphPaths.LogDir;
         var logFile = Path.GetFullPath(Path.Combine(logDir, $"{taskId}.log"));
 
         try

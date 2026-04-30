@@ -40,7 +40,7 @@ public class StateStore
     {
         var fullTasks = Path.GetFullPath(tasksFilePath);
         var dir = Path.GetDirectoryName(fullTasks) ?? Directory.GetCurrentDirectory();
-        return Path.Combine(dir, ".ralph-logs", "state.json");
+        return Path.Combine(dir, RalphPaths.LogDir, RalphPaths.StateFileName);
     }
 
     public static async Task<StateStore> OpenAsync(string filePath, CancellationToken ct = default)

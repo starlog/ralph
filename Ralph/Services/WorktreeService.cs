@@ -52,7 +52,7 @@ public class WorktreeService
     private readonly GitService _git;
     private readonly string _worktreeBase;
 
-    public WorktreeService(GitService git, string worktreeBase = ".ralph-worktrees")
+    public WorktreeService(GitService git, string worktreeBase = RalphPaths.WorktreeDir)
     {
         _git = git;
         _worktreeBase = worktreeBase;
@@ -69,7 +69,7 @@ public class WorktreeService
         string taskId, string baseBranch, RalphLogger? logger = null,
         bool sharedObjects = false, CancellationToken ct = default)
     {
-        var branchName = $"ralph/{taskId}";
+        var branchName = RalphPaths.GetBranchName(taskId);
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
 
         // 이미 존재하면 정리
@@ -138,7 +138,7 @@ public class WorktreeService
         string? mergeStrategy = null,
         RalphLogger? logger = null, CancellationToken ct = default)
     {
-        var branchName = $"ralph/{taskId}";
+        var branchName = RalphPaths.GetBranchName(taskId);
 
         // 현재 브랜치가 target이 맞는지 확인
         var currentBranch = await _git.GetCurrentBranchAsync(ct: ct);
@@ -178,7 +178,7 @@ public class WorktreeService
         {
             var repoRoot = await _git.GetRepoRootAsync(ct: ct);
             var backupDir = Path.Combine(
-                repoRoot, ".ralph-logs", "untracked-backup",
+                repoRoot, RalphPaths.LogDir, RalphPaths.UntrackedBackupDirName,
                 $"{taskId}-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
             var moved = new List<string>();
             foreach (var rel in untrackedBlockers)
@@ -417,7 +417,7 @@ public class WorktreeService
         string baseRef,
         IReadOnlyCollection<string> declared,
         RalphLogger? logger = null,
-        string validationLogPath = ".ralph-logs/validation.jsonl",
+        string validationLogPath = RalphPaths.ValidationLedgerRelativePath,
         CancellationToken ct = default)
     {
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
@@ -503,7 +503,7 @@ public class WorktreeService
         catch (Exception ex)
         {
             // best-effort: validation 기록이 머지 흐름을 깨뜨리면 안 됨
-            logger?.Warn($"[validate:files] {result.TaskId}: validation.jsonl 기록 실패 — {ex.Message}");
+            logger?.Warn($"[validate:files] {result.TaskId}: {RalphPaths.ValidationLedgerFileName} 기록 실패 — {ex.Message}");
         }
     }
 
@@ -525,7 +525,7 @@ public class WorktreeService
     private async Task MarkRalphManagedAsync(string branchName, CancellationToken ct)
     {
         await _git.RunAsync(
-            ["config", $"branch.{branchName}.ralphManaged", "true"], ct: ct);
+            ["config", RalphPaths.GetManagedConfigKey(branchName), "true"], ct: ct);
     }
 
     /// <summary>
@@ -538,7 +538,7 @@ public class WorktreeService
     private async Task<bool> IsRalphManagedBranchAsync(string branchName, CancellationToken ct)
     {
         var (cfgExit, cfgOut) = await _git.RunAsync(
-            ["config", "--get", $"branch.{branchName}.ralphManaged"], ct: ct);
+            ["config", "--get", RalphPaths.GetManagedConfigKey(branchName)], ct: ct);
         if (cfgExit == 0 && cfgOut.Trim().Equals("true", StringComparison.OrdinalIgnoreCase))
             return true;
 
@@ -610,7 +610,7 @@ public class WorktreeService
         string taskId, RalphLogger? logger = null, CancellationToken ct = default)
     {
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
-        var branchName = $"ralph/{taskId}";
+        var branchName = RalphPaths.GetBranchName(taskId);
         var ok = true;
 
         // 워크트리 제거 전에 소유권을 판정한다 — 제거 후엔 worktree-list 기반 legacy fallback이
@@ -670,11 +670,11 @@ public class WorktreeService
         await _git.RunAsync(["worktree", "prune"], ct: ct);
 
         // ralph worktree 브랜치 목록 가져오기
-        var (_, branchOutput) = await _git.RunAsync(["branch", "--list", "ralph/*"], ct: ct);
+        var (_, branchOutput) = await _git.RunAsync(["branch", "--list", RalphPaths.BranchListGlob], ct: ct);
         var branches = branchOutput
             .Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .Select(b => b.Trim().TrimStart('*').Trim())
-            .Where(b => b.StartsWith("ralph/"))
+            .Where(b => b.StartsWith(RalphPaths.BranchPrefix, StringComparison.Ordinal))
             .ToList();
 
         foreach (var branch in branches)
@@ -723,7 +723,7 @@ public class WorktreeService
                 branch = line["branch ".Length..].Trim();
             }
 
-            if (branch is { Length: > 0 } && branch.StartsWith("ralph/"))
+            if (branch is { Length: > 0 } && branch.StartsWith(RalphPaths.BranchPrefix, StringComparison.Ordinal))
                 stale.Add(branch);
         }
 

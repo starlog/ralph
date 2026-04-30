@@ -7,7 +7,7 @@ public sealed class RalphLogger : IDisposable
 
     public string LogFile { get; }
 
-    public RalphLogger(string logDir = ".ralph-logs")
+    public RalphLogger(string logDir = RalphPaths.LogDir)
     {
         Directory.CreateDirectory(logDir);
         LogFile = Path.Combine(logDir, $"ralph-{DateTime.Now:yyyyMMdd-HHmmss}.log");
