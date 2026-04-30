@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Ralph.Models;
 using Ralph.Services;
@@ -168,6 +169,125 @@ public class ParallelExecutorTests : IDisposable
 
         // 실패한 worktree는 정리되어야 한다
         Assert.False(Directory.Exists(Path.Combine(_worktreeBase, "B")));
+    }
+
+    // ─── 테스트 4: cleanup 타임아웃 → 실패 카운터 증가, hang 없음 ────────────────
+
+    /// <summary>
+    /// CleanupDelegate가 ct를 통해 취소될 때까지 무기한 대기하도록 모킹.
+    /// CleanupTimeout(200ms)이 지나면 linked CancellationToken이 취소되고 Delay가 중단된다.
+    /// 실패 카운터가 증가하고, 테스트 자체가 hang 없이 종료되는지 확인한다.
+    /// </summary>
+    [Fact(Timeout = 10_000)] // 10초 안에 완료되지 않으면 hang으로 간주
+    public async Task Cleanup_timeout_increments_failure_count_without_hanging()
+    {
+        await InitRepoAsync();
+
+        var tasks = new TasksFile
+        {
+            Tasks =
+            {
+                MakeTask("A", "feat-a", new[] { "a.txt" }),
+                MakeTask("B", "feat-b", new[] { "b.txt" }),
+            },
+            Workflow = MakeWorkflow(commitOnComplete: true),
+        };
+        var manager = await SaveAndLoadTasksAsync(tasks);
+
+        var runner = new WorktreeAwareRunner((prompt, wd) =>
+        {
+            var taskId = ExtractTaskId(prompt);
+            var fileName = taskId == "A" ? "a.txt" : "b.txt";
+            if (!string.IsNullOrEmpty(wd))
+                File.WriteAllText(Path.Combine(wd!, fileName), $"content from {taskId}");
+            return SuccessResult();
+        });
+
+        var (git, worktree) = MakeGitServices();
+        var executor = new ParallelExecutor(
+            manager, runner, git, worktree, _logger,
+            tasksFile: _tasksFile, modelOverride: "opus",
+            noSmokeTest: true);
+
+        // 200ms 후 ct(= linked cleanupCts.Token)가 취소되어 Delay가 중단된다.
+        executor.CleanupTimeout = TimeSpan.FromMilliseconds(200);
+        executor.CleanupDelegate = async (id, logger, ct) =>
+        {
+            await Task.Delay(TimeSpan.FromMinutes(5), ct); // ct 취소 시 즉시 중단
+            return true;
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);
+
+        Assert.Equal(0, exit);
+        // 두 worktree(A, B) 각각 cleanup이 타임아웃 → 실패 카운터 ≥ 2
+        Assert.True(executor.CleanupFailureCount >= 2,
+            $"Expected at least 2 cleanup failures, got {executor.CleanupFailureCount}");
+    }
+
+    // ─── 테스트 5: 부모 CancellationToken 취소 → 즉시 cleanup 중단 ──────────────
+
+    /// <summary>
+    /// CleanupTimeout을 60초로 길게 설정해도, 부모 CancellationToken이 취소되면
+    /// linked cleanupCts도 즉시 취소되어 Delay가 중단된다.
+    /// 테스트는 60초를 기다리지 않고 3초 이내에 완료되어야 한다.
+    /// </summary>
+    [Fact(Timeout = 10_000)]
+    public async Task Parent_ct_cancellation_aborts_cleanup_without_waiting_for_timeout()
+    {
+        await InitRepoAsync();
+
+        var tasks = new TasksFile
+        {
+            Tasks =
+            {
+                MakeTask("A", "feat-a", new[] { "a.txt" }),
+                MakeTask("B", "feat-b", new[] { "b.txt" }),
+            },
+            Workflow = MakeWorkflow(commitOnComplete: true),
+        };
+        var manager = await SaveAndLoadTasksAsync(tasks);
+
+        var runner = new WorktreeAwareRunner((prompt, wd) =>
+        {
+            var taskId = ExtractTaskId(prompt);
+            var fileName = taskId == "A" ? "a.txt" : "b.txt";
+            if (!string.IsNullOrEmpty(wd))
+                File.WriteAllText(Path.Combine(wd!, fileName), $"content from {taskId}");
+            return SuccessResult();
+        });
+
+        var (git, worktree) = MakeGitServices();
+        var cts = new CancellationTokenSource();
+        var executor = new ParallelExecutor(
+            manager, runner, git, worktree, _logger,
+            tasksFile: _tasksFile, modelOverride: "opus",
+            noSmokeTest: true);
+
+        // timeout은 60초로 충분히 길게 설정 — 타임아웃이 아닌 부모 CT 취소로 중단되는지 확인
+        executor.CleanupTimeout = TimeSpan.FromSeconds(60);
+        var firstCall = 0;
+        executor.CleanupDelegate = async (id, logger, ct) =>
+        {
+            // 첫 번째 cleanup 호출에서 부모 CT를 취소
+            if (Interlocked.CompareExchange(ref firstCall, 1, 0) == 0)
+                cts.Cancel();
+            await Task.Delay(TimeSpan.FromSeconds(60), ct); // linked ct 취소 시 즉시 중단
+            return true;
+        };
+
+        var sw = Stopwatch.StartNew();
+        // ct가 취소되면 RunAsync는 OperationCanceledException을 던진다
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => executor.RunAsync(maxConcurrent: 4, cts.Token));
+        sw.Stop();
+
+        // 60초 timeout이 아닌 부모 CT 취소로 즉시 중단 → 3초 이내 완료 확인
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3),
+            $"Expected cleanup to abort quickly on CT cancellation, but took {sw.Elapsed.TotalSeconds:F1}s");
+        Assert.True(executor.CleanupFailureCount >= 1,
+            $"Expected at least 1 cleanup failure, got {executor.CleanupFailureCount}");
     }
 
     // ─── 테스트 3: 머지 후 smoke test 실패 ──────────────────────────────────────
