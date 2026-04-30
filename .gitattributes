@@ -1,0 +1,32 @@
+# Auto-detect text files and normalize to LF in repo
+* text=auto eol=lf
+
+# Shell scripts must stay LF (shebang breaks otherwise on Linux/macOS)
+*.sh text eol=lf
+
+# PowerShell on Windows expects CRLF
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+
+# Source / config — explicit LF
+*.cs text eol=lf
+*.csproj text eol=lf
+*.sln text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.tar.gz binary
+*.dll binary
+*.exe binary

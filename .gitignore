@@ -5,10 +5,11 @@ Ralph.Tests/bin/
 Ralph.Tests/obj/
 
 # Tasks and logs (runtime artifacts)
-tasks.json
+/tasks.json
 *.tmp.*
 *.backup.*
 .ralph-logs/
+.ralph-plans/
 .ralph-worktrees/
 
 # Published binaries
@@ -17,20 +18,28 @@ Ralph/publish/
 # Release packaging staging area (cross-RID self-contained binaries + tarballs)
 dist/
 
+# Test/coverage outputs
+TestResults/
+*.coverage
+coverage.cobertura.xml
+coverage.opencover.xml
+
+# Samples — only ship PRD.md, ignore everything else
+samples/*
+!samples/PRD.md
+
 # IDE
 .vs/
 .vscode/
 .idea/
 *.user
-*.suo
+*.swp
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 Desktop.ini
-
-# Claude Code
-.claude/
 
 # Sensitive files
 .env
@@ -41,3 +50,8 @@ Desktop.ini
 *.pfx
 credentials.json
 service-account*.json
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.ppk
