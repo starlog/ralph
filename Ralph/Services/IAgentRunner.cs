@@ -8,6 +8,8 @@ namespace Ralph.Services;
 /// 구현체가 지켜야 할 계약:
 /// - RunStreamAsync는 single attempt. 실패 시 Success=false인 ClaudeResult 반환(예외 던지지 않음).
 ///   외부 ct 발화 시에만 OperationCanceledException propagate.
+/// - 실패 시 FailureKind를 가능한 한 정확히 채울 것. 분류 불가 시 Unknown.
+///   BinaryNotFound/PermissionDenied는 재시도 정책상 fail-fast 신호로 사용된다.
 /// - RunWithRetryAsync는 maxRetries 만큼 재시도, 실패 컨텍스트를 다음 prompt에 prepend.
 ///   RateLimited 신호면 backoff 시간을 늘릴 것.
 /// - Debug, TaskTimeoutSec는 호출 전 set 가능한 옵션. 구현체가 지원하지 않으면 무시 가능.
