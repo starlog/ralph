@@ -5,6 +5,22 @@ using Ralph.Models;
 namespace Ralph.Services;
 
 /// <summary>
+/// fix2 #7: batch 단위 자동 롤백을 위한 in-memory 스냅샷.
+/// 디스크에 직렬화하지 않는다 — 한 batch가 진행되는 동안만 유효하며 smoke 실패 핸들러가
+/// 즉시 사용 후 폐기한다. pre-plan/post-plan 디스크 스냅샷과는 완전히 별개다.
+/// </summary>
+/// <param name="BaseBranch">batch가 머지된 base 브랜치 이름.</param>
+/// <param name="BaseSha">batch 시작 직전(머지 0회 시점) base 브랜치의 HEAD SHA.</param>
+/// <param name="CapturedAt">스냅샷 생성 UTC 시각 (진단/로그용).</param>
+/// <param name="TaskIds">batch에 포함된 task ID들. 이후 머지 단계에서 일부가 rebase 충돌로
+/// 빠질 수 있으므로 자동 revert 대상은 호출자가 별도로 mergedTasks를 전달한다.</param>
+public sealed record BatchRollbackSnapshot(
+    string BaseBranch,
+    string BaseSha,
+    DateTime CapturedAt,
+    IReadOnlyList<string> TaskIds);
+
+/// <summary>
 /// --rollback이 의존하는 스냅샷 capture/restore 로직.
 ///
 /// 두 개의 스냅샷을 .ralph-logs/rollback/ 아래 보관:
@@ -64,6 +80,14 @@ public sealed class RollbackService
         var snapshot = await BuildSnapshotAsync(PostPlanPhase, git, tasksFile, prdFile, ct);
         await WriteSnapshotAsync(PostPlanPath, snapshot, ct);
     }
+
+    /// <summary>
+    /// fix2 #7: batch 머지 시작 직전에 in-memory 스냅샷을 캡처한다. 디스크 I/O 없음.
+    /// 호출자(MergeOrchestrator)는 smoke 실패 시 이 스냅샷을 자동 revert 핸들러에 전달한다.
+    /// </summary>
+    public static BatchRollbackSnapshot CaptureBatchSnapshot(
+        string baseBranch, string baseSha, IReadOnlyList<string> taskIds)
+        => new(baseBranch, baseSha, DateTime.UtcNow, taskIds);
 
     public async Task<RollbackSnapshot?> LoadPrePlanAsync(CancellationToken ct = default)
         => await TryLoadAsync(PrePlanPath, ct);

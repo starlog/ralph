@@ -58,6 +58,27 @@ internal static class SmokeTestPlanner
     /// </summary>
     public static VerificationSpec? Infer(string repoRoot) => InferFromMarkers(repoRoot);
 
+    /// <summary>
+    /// fix2 #7: smoke 실패 시 자동 revert 커밋 메시지에 첨부할 stdout/stderr 꼬리.
+    /// UTF-8 바이트 기준 maxBytes를 넘으면 끝에서 잘라 truncated 표시를 prefix한다.
+    /// 멀티바이트 문자가 깨지지 않도록 char 단위로 진입한다.
+    /// </summary>
+    public static string TruncateTail(string? text, int maxBytes = 4000)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        var totalBytes = System.Text.Encoding.UTF8.GetByteCount(text);
+        if (totalBytes <= maxBytes) return text;
+
+        var charCount = Math.Min(text.Length, maxBytes);
+        while (charCount > 0
+               && System.Text.Encoding.UTF8.GetByteCount(text.AsSpan(text.Length - charCount)) > maxBytes)
+        {
+            charCount--;
+        }
+        var tail = text.Substring(text.Length - charCount);
+        return $"... (잘림, 원본 {totalBytes} bytes)\n{tail}";
+    }
+
     private static bool AllChangesAreDocs(IReadOnlyList<string> changedFiles)
     {
         if (changedFiles.Count == 0) return false;

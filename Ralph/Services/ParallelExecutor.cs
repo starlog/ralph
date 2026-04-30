@@ -49,7 +49,7 @@ public class ParallelExecutor
         bool strictFiles = false, double? budgetUsd = null,
         CostTracker? cost = null, BudgetGate? budgetGate = null,
         bool sharedWorktrees = false, bool noSmokeTest = false,
-        string? smokeTestCommandOverride = null)
+        string? smokeTestCommandOverride = null, bool autoRollbackOnSmokeFail = false)
     {
         _taskManager = taskManager;
         _claude = claude;
@@ -71,7 +71,8 @@ public class ParallelExecutor
 
         _mergeOrchestrator = new MergeOrchestrator(
             _taskManager, _claude, _git, _worktree, _logger, _verifier, _cost,
-            _tasksFile, _modelOverride, strictFiles, noSmokeTest, smokeTestCommandOverride)
+            _tasksFile, _modelOverride, strictFiles, noSmokeTest, smokeTestCommandOverride,
+            autoRollbackOnSmokeFail)
         {
             // abort 전략 시 fallback으로 sequential RunSingle 호출.
             RerunSequential = (taskId, ct) => RunSingleTaskAsync(taskId, ct),

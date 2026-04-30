@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Ralph.Services;
 using Spectre.Console;
 
@@ -119,11 +120,30 @@ public sealed class RunCommand : ICommand
             var sharedWorktrees = _ctx.CliSharedWorktrees
                 ? true
                 : _ctx.EnvSharedWorktrees ?? tm.Data.Workflow?.Parallel?.SharedWorktreeObjects ?? false;
+
+            // fix2 #7: smoke 실패 시 자동 롤백 — opt-in. CLI > env > workflow > false.
+            // ArgParser는 이 flag를 모르므로 _ctx.Args에 그대로 남아있다 (positional file 판정엔
+            // 영향 없음 — `--`로 시작).
+            var cliAutoRollback = _ctx.Args.Contains("--auto-rollback-on-smoke-fail");
+            var envAutoRollbackRaw = Environment.GetEnvironmentVariable(
+                "RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL")?.ToLowerInvariant();
+            var envAutoRollback = envAutoRollbackRaw is "true" or "1";
+            var workflowAutoRollback = ReadWorkflowAutoRollback(tm);
+            var autoRollbackOnSmokeFail = cliAutoRollback || envAutoRollback || workflowAutoRollback;
+            if (autoRollbackOnSmokeFail)
+            {
+                var origin = cliAutoRollback ? "CLI" : envAutoRollback ? "env" : "workflow";
+                AnsiConsole.MarkupLine(
+                    $"[cyan]자동 롤백:[/] smoke 실패 시 batch 자동 revert 활성화 [dim]({origin})[/]");
+                logger.Info($"auto-rollback-on-smoke-fail enabled (source: {origin})");
+            }
+
             var executor = new ParallelExecutor(
                 tm, claude, git, worktree, logger, _ctx.TasksFile, modelOverride,
                 strictFiles: _ctx.StrictFiles, budgetUsd: _ctx.EffectiveBudgetUsd(tm), cost: costTracker,
                 sharedWorktrees: sharedWorktrees, noSmokeTest: _ctx.NoSmokeTest,
-                smokeTestCommandOverride: _ctx.SmokeTestCommandOverride);
+                smokeTestCommandOverride: _ctx.SmokeTestCommandOverride,
+                autoRollbackOnSmokeFail: autoRollbackOnSmokeFail);
             exitCode = await executor.RunAsync(concurrency, ct);
             if (exitCode == 0 && executor.BudgetReached) exitCode = 2;
         }
@@ -169,5 +189,18 @@ public sealed class RunCommand : ICommand
         }
 
         return exitCode;
+    }
+
+    /// <summary>
+    /// fix2 #7: workflow.autoRollbackOnSmokeFail (boolean)을 ExtensionData를 통해 읽는다.
+    /// WorkflowSettings POCO에 정식 필드 추가 없이 옵션을 인식하기 위한 임시 경로 — 추후
+    /// TasksFile.cs/ralph-schema.json 정식 추가 시 일반 property로 옮길 수 있다.
+    /// </summary>
+    private static bool ReadWorkflowAutoRollback(TaskManager tm)
+    {
+        var ext = tm.Data.Workflow?.ExtensionData;
+        if (ext is null) return false;
+        if (!ext.TryGetValue("autoRollbackOnSmokeFail", out var v)) return false;
+        return v.ValueKind == JsonValueKind.True;
     }
 }
