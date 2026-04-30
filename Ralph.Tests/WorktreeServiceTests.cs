@@ -311,6 +311,91 @@ public class WorktreeServiceTests
         Assert.Equal("subtract.py", result[0]);
     }
 
+    // ─── ParseUntrackedOverwrites Warn 로그 검증 ────────────────────────────
+
+    [Fact]
+    public void ParseUntrackedOverwrites_empty_stderr_does_not_warn()
+    {
+        // 빈 입력은 키워드 탐색 자체를 하지 않으므로 logger.Warn이 호출되어서는 안 된다.
+        var logDir = Path.Combine(Path.GetTempPath(), $"ralph-log-{Guid.NewGuid():N}");
+        string logFile;
+        List<string> result;
+        try
+        {
+            using (var logger = new RalphLogger(logDir))
+            {
+                result = WorktreeService.ParseUntrackedOverwrites("", logger);
+                logFile = logger.LogFile;
+            }
+            var logContent = File.ReadAllText(logFile);
+            Assert.Empty(result);
+            Assert.DoesNotContain("[WARN]", logContent);
+        }
+        finally
+        {
+            try { Directory.Delete(logDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void ParseUntrackedOverwrites_keyword_present_but_no_files_logs_warn()
+    {
+        // git이 키워드를 출력했지만 파일 목록을 추출할 수 없을 때(비표준 포맷 등)
+        // 파싱 실패 Warn이 기록되어야 한다.
+        var input =
+            "error: The following untracked working tree files would be overwritten by merge:\n" +
+            "Aborting\n";
+
+        var logDir = Path.Combine(Path.GetTempPath(), $"ralph-log-{Guid.NewGuid():N}");
+        string logFile;
+        List<string> result;
+        try
+        {
+            using (var logger = new RalphLogger(logDir))
+            {
+                result = WorktreeService.ParseUntrackedOverwrites(input, logger);
+                logFile = logger.LogFile;
+            }
+            var logContent = File.ReadAllText(logFile);
+            Assert.Empty(result);
+            Assert.Contains("[WARN]", logContent);
+            Assert.Contains("ParseUntrackedOverwrites", logContent);
+        }
+        finally
+        {
+            try { Directory.Delete(logDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void ParseUntrackedOverwrites_unrelated_input_does_not_warn()
+    {
+        // 키워드가 없는 일반 충돌 메시지에서는 Warn이 발생하지 않아야 한다.
+        var input =
+            "Auto-merging file.txt\n" +
+            "CONFLICT (content): Merge conflict in file.txt\n" +
+            "Automatic merge failed; fix conflicts and then commit the result.\n";
+
+        var logDir = Path.Combine(Path.GetTempPath(), $"ralph-log-{Guid.NewGuid():N}");
+        string logFile;
+        List<string> result;
+        try
+        {
+            using (var logger = new RalphLogger(logDir))
+            {
+                result = WorktreeService.ParseUntrackedOverwrites(input, logger);
+                logFile = logger.LogFile;
+            }
+            var logContent = File.ReadAllText(logFile);
+            Assert.Empty(result);
+            Assert.DoesNotContain("[WARN]", logContent);
+        }
+        finally
+        {
+            try { Directory.Delete(logDir, recursive: true); } catch { }
+        }
+    }
+
     [Fact]
     public async Task AdvanceWorktreeOntoBase_noop_when_base_unchanged()
     {

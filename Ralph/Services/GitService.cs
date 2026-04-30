@@ -39,8 +39,12 @@ public class GitService
         }
     }
 
-    public async Task<(int ExitCode, string Output)> RunAsync(
-        string[] arguments, string? workingDirectory = null, CancellationToken ct = default)
+    /// <summary>
+    /// git 호출용 ProcessStartInfo를 생성합니다. LC_ALL=C/LANG=C를 강제해 로케일 의존
+    /// 출력(비영어 OS의 번역된 에러 메시지 등)이 파싱에 영향을 주지 않도록 합니다.
+    /// </summary>
+    internal static ProcessStartInfo BuildGitProcessStartInfo(
+        string[] arguments, string? workingDirectory = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -60,6 +64,14 @@ public class GitService
 
         foreach (var arg in arguments)
             psi.ArgumentList.Add(arg);
+
+        return psi;
+    }
+
+    public async Task<(int ExitCode, string Output)> RunAsync(
+        string[] arguments, string? workingDirectory = null, CancellationToken ct = default)
+    {
+        var psi = BuildGitProcessStartInfo(arguments, workingDirectory);
 
         using var process = Process.Start(psi)!;
         var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
