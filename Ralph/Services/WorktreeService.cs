@@ -173,7 +173,7 @@ public class WorktreeService
         // 이 경우 머지가 시작도 못 했으므로 unmerged index가 비어 있어 ConflictFiles로는 잡히지 않고,
         // auto-theirs(-X)나 Claude resolver도 손쓸 게 없다. untracked blocker들을 백업으로 옮기고
         // 한 번 재시도해 plan 단계 부산물 같은 흔한 케이스를 자동 복구한다.
-        var untrackedBlockers = ParseUntrackedOverwrites(output);
+        var untrackedBlockers = ParseUntrackedOverwrites(output, logger);
         if (untrackedBlockers.Count > 0)
         {
             var repoRoot = await _git.GetRepoRootAsync(ct: ct);
@@ -241,7 +241,7 @@ public class WorktreeService
     ///   Please move or remove them before you merge.
     /// 다른 메시지(예: 일반 머지 충돌)일 때는 빈 리스트.
     /// </summary>
-    internal static List<string> ParseUntrackedOverwrites(string mergeOutput)
+    internal static List<string> ParseUntrackedOverwrites(string mergeOutput, RalphLogger? logger = null)
     {
         var result = new List<string>();
         if (string.IsNullOrEmpty(mergeOutput)) return result;
@@ -271,6 +271,13 @@ public class WorktreeService
             var path = line.TrimStart('\t', ' ');
             if (path.Length > 0) result.Add(path);
         }
+
+        if (result.Count == 0)
+        {
+            var snippet = mergeOutput.Length > 200 ? mergeOutput[..200] + "..." : mergeOutput;
+            logger?.Warn($"[ParseUntrackedOverwrites] 'untracked overwrite' 패턴을 감지했으나 파일 목록 추출 실패. stderr 일부: {snippet}");
+        }
+
         return result;
     }
 

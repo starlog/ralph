@@ -52,6 +52,8 @@ public class GitService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        psi.Environment["LC_ALL"] = "C";
+        psi.Environment["LANG"] = "C";
 
         if (!string.IsNullOrEmpty(workingDirectory))
             psi.WorkingDirectory = workingDirectory;
