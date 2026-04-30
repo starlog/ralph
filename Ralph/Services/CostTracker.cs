@@ -1,9 +1,25 @@
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Ralph.Models;
 using Spectre.Console;
 
 namespace Ralph.Services;
+
+/// <summary>cost.jsonl 기록 실패 시 cost-failures.jsonl에 append되는 fallback 레코드.</summary>
+internal sealed class CostFailureEntry
+{
+    public string Ts { get; set; } = "";
+    public string TaskId { get; set; } = "";
+    public string Model { get; set; } = "";
+    public double Usd { get; set; }
+    public string Reason { get; set; } = "";
+    public string Exception { get; set; } = "";
+}
+
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(CostFailureEntry))]
+internal partial class CostFailureJsonContext : JsonSerializerContext;
 
 public class CostEntry
 {
@@ -56,6 +72,13 @@ public sealed class CostTracker
         TypeInfoResolver = RalphJsonContext.Default,
     };
 
+    private static readonly JsonSerializerOptions FailureJsonOpts = new()
+    {
+        WriteIndented = false,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        TypeInfoResolver = CostFailureJsonContext.Default,
+    };
+
     // P1-2: hung 디스크에서 finally 블록이 무한정 막히지 않도록 timeout 가드.
     private static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
 
@@ -76,6 +99,8 @@ public sealed class CostTracker
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private double _cumulativeUsd;
     private bool _hydrated;
+    // P-FAIL: cost.jsonl 기록 실패 누적 카운트.
+    private long _failureCount;
 
     /// <summary>
     /// 단일 CostTracker 인스턴스 생성. logDir이 null이면 SetLogDirForTesting override를 거쳐
@@ -87,6 +112,11 @@ public sealed class CostTracker
     }
 
     public string LogFilePath => Path.Combine(_logDir, RalphPaths.CostLedgerFileName);
+
+    public string FailuresLogFilePath => Path.Combine(_logDir, RalphPaths.CostFailuresLedgerFileName);
+
+    /// <summary>cost.jsonl 기록 실패 누적 카운트. fallback append 성공 시에만 증가.</summary>
+    public long FailureCount => Interlocked.Read(ref _failureCount);
 
     /// <summary>
     /// 레거시 테스트 호환용 — 인스턴스 누적 캐시는 인스턴스 단위이므로 이 호출은 no-op이다.
@@ -105,29 +135,113 @@ public sealed class CostTracker
     /// <summary>
     /// 호출 결과를 jsonl에 1줄 기록하고 누적 캐시를 갱신합니다. result가 null이거나
     /// usage 정보가 없으면 placeholder(estimatedUsd=0, usageMissing=true)로 기록 + 경고합니다.
-    /// 디스크 IO가 5초 안에 끝나지 않으면 기록을 포기하고 경고만 남깁니다(graceful shutdown 보장).
+    /// 5초 안에 끝나지 않으면 200ms 대기 후 1회 재시도하고, 재시도도 실패하면
+    /// cost-failures.jsonl에 fallback 기록합니다. fallback도 실패하면 stderr에 출력합니다.
     /// 동시 호출은 인스턴스 _writeLock으로 직렬화되어 jsonl 라인 손실/손상이 발생하지 않습니다.
     /// </summary>
     public async Task RecordAsync(
         string taskId, string model, ClaudeResult? result, CancellationToken ct = default)
     {
-        // timeout만 적용 (호출자 ct는 보통 None — finally에서 호출). 예외는 아래 catch로.
+        var estimatedUsdAtCall = result?.Usage != null ? EstimateUsd(model, result.Usage) : 0.0;
+        string? failureReason = null;
+        string? failureException = null;
+
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            if (ct.IsCancellationRequested)
+                throw new OperationCanceledException(ct);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(WriteTimeout);
+            try
+            {
+                await RecordInnerAsync(taskId, model, result, cts.Token);
+                return;
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                failureReason = "timeout";
+                failureException = $"RecordAsync exceeded {WriteTimeout.TotalSeconds:F0}s timeout";
+                AnsiConsole.MarkupLine(
+                    $"[yellow]⚠ cost 기록 timeout (taskId={Markup.Escape(taskId)}, attempt {attempt}/2, >{WriteTimeout.TotalSeconds:F0}s). 누적 비용 추적이 부정확할 수 있습니다.[/]");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failureReason = ClassifyReason(ex);
+                failureException = ex.GetType().Name + ": " + ex.Message;
+                AnsiConsole.MarkupLine(
+                    $"[yellow]⚠ cost 기록 실패 (taskId={Markup.Escape(taskId)}, attempt {attempt}/2): {Markup.Escape(ex.Message)}[/]");
+            }
+
+            if (attempt == 1)
+            {
+                try { await Task.Delay(200, ct); }
+                catch (OperationCanceledException) { throw; }
+            }
+        }
+
+        await AppendFailureAsync(taskId, model, estimatedUsdAtCall,
+            failureReason ?? "other", failureException ?? "unknown", ct);
+    }
+
+    private static string ClassifyReason(Exception ex) => ex switch
+    {
+        OperationCanceledException => "timeout",
+        UnauthorizedAccessException => "permission",
+        DirectoryNotFoundException => "missing-dir",
+        IOException => "io",
+        JsonException => "serialize",
+        _ => "other",
+    };
+
+    private async Task AppendFailureAsync(
+        string taskId, string model, double usd, string reason, string exceptionText, CancellationToken ct)
+    {
+        var record = new CostFailureEntry
+        {
+            Ts = DateTime.UtcNow.ToString("o"),
+            TaskId = taskId,
+            Model = model,
+            Usd = usd,
+            Reason = reason,
+            Exception = exceptionText,
+        };
+        var line = JsonSerializer.Serialize(record, FailureJsonOpts) + "\n";
+
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(WriteTimeout);
         try
         {
-            await RecordInnerAsync(taskId, model, result, cts.Token);
+            Directory.CreateDirectory(_logDir);
+            await _writeLock.WaitAsync(cts.Token);
+            try
+            {
+                await File.AppendAllTextAsync(FailuresLogFilePath, line, cts.Token);
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+            Interlocked.Increment(ref _failureCount);
         }
-        catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
+        catch (Exception fbEx)
         {
-            AnsiConsole.MarkupLine(
-                $"[yellow]⚠ cost 기록 timeout (taskId={Markup.Escape(taskId)}, >{WriteTimeout.TotalSeconds:F0}s). 누적 비용 추적이 부정확할 수 있습니다.[/]");
+            WriteFallbackToStderr(taskId, model, reason, fbEx);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            AnsiConsole.MarkupLine(
-                $"[yellow]⚠ cost 기록 실패 (taskId={Markup.Escape(taskId)}): {Markup.Escape(ex.Message)}[/]");
-        }
+    }
+
+    private static void WriteFallbackToStderr(string taskId, string model, string reason, Exception fbEx)
+    {
+        var ts = DateTime.UtcNow.ToString("o");
+        var msg = fbEx.Message?.Replace('\n', ' ').Replace('\r', ' ') ?? "";
+        Console.Error.WriteLine(
+            $"[ralph cost-failures] FALLBACK_WRITE_FAILED " +
+            $"ts={ts} taskId={taskId} model={model} reason={reason} " +
+            $"fallbackException={fbEx.GetType().Name}: {msg}");
     }
 
     private async Task RecordInnerAsync(
@@ -381,6 +495,10 @@ public sealed class CostTracker
         if (missingCount > 0)
             console.MarkupLine(
                 $"[yellow]usage 누락 placeholder: {missingCount}개[/] (실제 토큰은 추정 비용에 반영되지 않음)");
+        if (FailureCount > 0)
+            console.MarkupLine(
+                $"[red]cost ledger writes failed: {FailureCount}회[/] " +
+                $"(fallback: {Markup.Escape(RalphPaths.CostFailuresLedgerRelative)})");
         console.WriteLine();
 
         var table = new Table().Border(TableBorder.Rounded);

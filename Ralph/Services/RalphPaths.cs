@@ -70,6 +70,15 @@ public static class RalphPaths
     /// <summary>`.ralph-logs/validation.jsonl` 상대 경로.</summary>
     public static string ValidationLedgerRelative => Path.Combine(LogDir, ValidationLedgerFileName);
 
+    /// <summary>cost.jsonl 기록 실패 시 fallback ledger basename.</summary>
+    public const string CostFailuresLedgerFileName = "cost-failures.jsonl";
+
+    /// <summary>const string 컨텍스트에서 사용 가능한 `.ralph-logs/cost-failures.jsonl` 표기.</summary>
+    public const string CostFailuresLedgerRelativePath = LogDir + "/" + CostFailuresLedgerFileName;
+
+    /// <summary>`.ralph-logs/cost-failures.jsonl` 상대 경로 (Path.Combine).</summary>
+    public static string CostFailuresLedgerRelative => Path.Combine(LogDir, CostFailuresLedgerFileName);
+
     /// <summary>주어진 디렉토리 산하의 `.ralph-logs` 경로 합성.</summary>
     public static string LogDirUnder(string parentDir) => Path.Combine(parentDir, LogDir);
 }
