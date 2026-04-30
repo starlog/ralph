@@ -168,6 +168,7 @@ ralph --rollback                   # 직전 상태로 되돌리기 (--plan 또�
 ## 더 깊이 알고 싶다면
 
 - **[TECHNICAL.md](TECHNICAL.md)** — 전체 명령어 / 옵션 / 환경변수, 병렬 실행 흐름, 검증 게이트, 충돌 전략, smoke test, tasks.json 스키마, workflow 설정, PRD 작성 가이드, 트러블슈팅, 설계 노트.
+- **[SCRIPTS.md](SCRIPTS.md)** — 루트의 설치/릴리스/유틸리티 스크립트(`install*`, `release-binary*`, `clean-sample*`) 사용법.
 - **[CLAUDE.md](CLAUDE.md)** — LLM 기여자를 위한 서비스 단위 아키텍처 맵.
 - **[samples/PRD.md](samples/PRD.md)** — 병렬 실행에 최적화된 예시 PRD.
 
