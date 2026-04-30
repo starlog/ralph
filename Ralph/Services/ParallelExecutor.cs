@@ -30,6 +30,13 @@ public class ParallelExecutor
     private readonly MergeOrchestrator _mergeOrchestrator;
     private int _cleanupFailures;
 
+    /// <summary>Per-worktree cleanup timeout. Tests can override to a short value.</summary>
+    internal TimeSpan CleanupTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>Tests can inject a custom cleanup function to simulate slow/hung cleanup.</summary>
+    internal Func<string, RalphLogger?, CancellationToken, Task<bool>>? CleanupDelegate;
+    /// <summary>Accumulated cleanup failure count, exposed for testing.</summary>
+    internal int CleanupFailureCount => _cleanupFailures;
+
     /// <summary>
     /// budget(USD) 임계값 도달로 새 dispatch를 차단했는지 여부.
     /// 호출자가 확인해 종료 코드 2를 결정할 수 있다.
@@ -378,13 +385,14 @@ public class ParallelExecutor
         {
             // worktree 정리
             AnsiConsole.MarkupLine("\n[dim]Worktree 정리 중...[/]");
+            var doCleanup = CleanupDelegate ?? _worktree.CleanupWorktreeAsync;
             foreach (var taskId in worktrees.Keys)
             {
                 using var cleanupCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cleanupCts.CancelAfter(TimeSpan.FromSeconds(30));
+                cleanupCts.CancelAfter(CleanupTimeout);
                 try
                 {
-                    if (!await _worktree.CleanupWorktreeAsync(taskId, _logger, cleanupCts.Token))
+                    if (!await doCleanup(taskId, _logger, cleanupCts.Token))
                         Interlocked.Increment(ref _cleanupFailures);
                 }
                 catch (OperationCanceledException)
