@@ -178,4 +178,62 @@ public class StateStoreTests
         var afterMtime = File.GetLastWriteTimeUtc(tasksFile);
         Assert.Equal(beforeMtime, afterMtime);
     }
+
+    // ─── 재시도 로직 단위 테스트 ────────────────────────────────────────────────
+
+    /// <summary>
+    /// IOException이 maxRetries(2)를 초과해 모든 재시도에서 실패하면 호출자에게 전파된다.
+    /// state.json 경로를 디렉토리로 만들어 File.Move(tmp → state.json)를 영구 실패시킨다.
+    /// </summary>
+    [Fact]
+    public async Task MarkDone_propagates_IOException_when_all_retries_exhausted()
+    {
+        var dir = TempDir();
+        var statePath = Path.Combine(dir, "state.json");
+
+        // state.json 경로에 디렉토리를 생성 → File.Move(tmp → state.json) 영구 실패
+        Directory.CreateDirectory(statePath);
+
+        var s = await StateStore.OpenAsync(statePath);
+
+        // 모든 재시도(attempt 0, 1, 2) 후 IOException이 호출자에게 전파되어야 한다
+        await Assert.ThrowsAnyAsync<IOException>(() => s.MarkDoneAsync("task1"));
+
+        // 디스크 상태: statePath는 여전히 디렉토리 → File.Exists(dir)=false → 새 StateStore는 빈 상태
+        var freshState = await StateStore.OpenAsync(statePath);
+        Assert.False(freshState.IsDone("task1"), "disk 쓰기 실패 → done=false여야 한다");
+    }
+
+    /// <summary>
+    /// 첫 번째 시도에서 IOException이 발생하더라도 재시도(100ms 후)에서 성공하면 done 처리가 완료된다.
+    /// state.json 경로를 디렉토리로 막은 뒤 40ms 후 제거 → 재시도 시 쓰기가 가능해진다.
+    /// </summary>
+    [Fact]
+    public async Task MarkDone_succeeds_on_retry_when_first_io_attempt_fails_transiently()
+    {
+        var dir = TempDir();
+        var logDir = Path.Combine(dir, "logs");
+        Directory.CreateDirectory(logDir);
+        var statePath = Path.Combine(logDir, "state.json");
+
+        // 첫 번째 쓰기를 막기 위해 state.json 경로에 디렉토리 생성
+        Directory.CreateDirectory(statePath);
+
+        var s = await StateStore.OpenAsync(statePath);
+
+        // 40ms 후 디렉토리를 제거 → 재시도(100ms 후)에서 File.Move가 성공함
+        _ = Task.Delay(40).ContinueWith(_ =>
+        {
+            try { Directory.Delete(statePath); } catch { /* best-effort */ }
+        });
+
+        // IOException 없이 성공해야 한다 (첫 시도 실패 → 재시도 성공)
+        await s.MarkDoneAsync("task1");
+
+        Assert.True(s.IsDone("task1"), "재시도 성공 후 in-memory done=true여야 한다");
+
+        // 재시도에서 디스크에도 기록되었는지 확인
+        var freshState = await StateStore.OpenAsync(statePath);
+        Assert.True(freshState.IsDone("task1"), "재시도 성공 후 disk state에도 done=true여야 한다");
+    }
 }
