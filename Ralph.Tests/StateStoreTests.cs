@@ -182,8 +182,9 @@ public class StateStoreTests
     // ─── 재시도 로직 단위 테스트 ────────────────────────────────────────────────
 
     /// <summary>
-    /// IOException이 maxRetries(2)를 초과해 모든 재시도에서 실패하면 호출자에게 전파된다.
+    /// IO 에러가 maxRetries(2)를 초과해 모든 재시도에서 실패하면 호출자에게 전파된다.
     /// state.json 경로를 디렉토리로 만들어 File.Move(tmp → state.json)를 영구 실패시킨다.
+    /// Linux는 IOException, Windows는 UnauthorizedAccessException을 던지므로 둘 다 허용.
     /// </summary>
     [Fact]
     public async Task MarkDone_propagates_IOException_when_all_retries_exhausted()
@@ -196,8 +197,12 @@ public class StateStoreTests
 
         var s = await StateStore.OpenAsync(statePath);
 
-        // 모든 재시도(attempt 0, 1, 2) 후 IOException이 호출자에게 전파되어야 한다
-        await Assert.ThrowsAnyAsync<IOException>(() => s.MarkDoneAsync("task1"));
+        // 모든 재시도(attempt 0, 1, 2) 후 IO 계열 예외가 호출자에게 전파되어야 한다.
+        var ex = await Record.ExceptionAsync(() => s.MarkDoneAsync("task1"));
+        Assert.NotNull(ex);
+        Assert.True(
+            ex is IOException || ex is UnauthorizedAccessException,
+            $"예상: IOException 또는 UnauthorizedAccessException, 실제: {ex.GetType().FullName}");
 
         // 디스크 상태: statePath는 여전히 디렉토리 → File.Exists(dir)=false → 새 StateStore는 빈 상태
         var freshState = await StateStore.OpenAsync(statePath);

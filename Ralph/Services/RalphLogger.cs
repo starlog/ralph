@@ -13,7 +13,11 @@ public class RalphLogger : IDisposable
     {
         Directory.CreateDirectory(logDir);
         LogFile = Path.Combine(logDir, $"ralph-{DateTime.Now:yyyyMMdd-HHmmss}.log");
-        _writer = new StreamWriter(LogFile, append: true) { AutoFlush = true };
+        // Windows에서 로그를 tail하거나 테스트가 동시에 read 가능하도록 share 명시.
+        var stream = new FileStream(
+            LogFile, FileMode.Append, FileAccess.Write,
+            FileShare.ReadWrite | FileShare.Delete);
+        _writer = new StreamWriter(stream) { AutoFlush = true };
         _writer.WriteLine($"Ralph session started at {DateTime.Now}");
     }
 

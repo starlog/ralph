@@ -142,7 +142,7 @@ public class StateStore
     public async Task SaveAsync(CancellationToken ct = default)
     {
         await _lock.WaitAsync(ct);
-        try { await SaveInternalAsync(ct); }
+        try { await SaveWithRetryAsync(ct); }
         finally { _lock.Release(); }
     }
 

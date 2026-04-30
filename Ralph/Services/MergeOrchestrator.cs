@@ -188,6 +188,53 @@ internal sealed class MergeOrchestrator
                 if (!resolved)
                 {
                     _logger.Error($"Merge conflict unresolved for {taskId}");
+
+                    // C3 fix: 충돌로 batch를 중단하기 전에 이미 base에 머지된 동료 task들의
+                    // done 마킹을 먼저 처리한다. 머지 커밋은 이미 base에 반영된 상태인데
+                    // done이 안 찍히면 다음 --run에서 재dispatch되어 토큰 낭비 + 재머지 충돌
+                    // 가능성이 생긴다. Loop 2(아래)와 동일하게 state 쓰기 실패 시 진단 후 중단.
+                    var alreadyMerged = mergeShaBytaskId.Keys.ToList();
+                    var earlyStateMarkResults = new Dictionary<string, bool>();
+                    var earlyMarked = new List<string>();
+                    var earlyPending = new List<string>(alreadyMerged);
+                    foreach (var doneId in alreadyMerged)
+                    {
+                        try
+                        {
+                            await MarkTaskDoneThreadSafeAsync(doneId, ct);
+                            earlyStateMarkResults[doneId] = true;
+                            earlyMarked.Add(doneId);
+                            earlyPending.Remove(doneId);
+                            var t = _taskManager.GetTask(doneId)!;
+                            AnsiConsole.MarkupLine(
+                                $"[green]태스크 완료: {Markup.Escape(t.Title)}[/]");
+                            _logger.TaskEnd(doneId, "completed");
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex)
+                        {
+                            earlyStateMarkResults[doneId] = false;
+                            ReportStateWriteFailure(doneId, ex, earlyMarked, earlyPending);
+                            await AppendMergeLogEntriesAsync(
+                                alreadyMerged, mergeShaBytaskId, earlyStateMarkResults,
+                                "skipped", preMergeSha ?? "", batchIndex, ct);
+                            foreach (var remaining in taskIds)
+                            {
+                                if (!await _worktree.CleanupWorktreeAsync(remaining, _logger, ct))
+                                    cleanupFailures++;
+                            }
+                            reportCleanupFailures(cleanupFailures);
+                            return 1;
+                        }
+                    }
+
+                    if (alreadyMerged.Count > 0)
+                    {
+                        await AppendMergeLogEntriesAsync(
+                            alreadyMerged, mergeShaBytaskId, earlyStateMarkResults,
+                            "skipped", preMergeSha ?? "", batchIndex, ct);
+                    }
+
                     foreach (var remaining in taskIds)
                     {
                         if (!await _worktree.CleanupWorktreeAsync(remaining, _logger, ct))

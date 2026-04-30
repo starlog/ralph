@@ -38,8 +38,10 @@ public class RebaseConflictTests
         Assert.False(result.Success);
         Assert.Equal(MergeFailureKind.RebaseConflict, result.FailureKind);
 
-        // abort로 worktree가 깨끗한 상태로 복원됨 — t2의 원래 변경이 남아있어야 함
-        Assert.Equal("line1\nt2-version\nline3\n", fix.ReadInWorktree("t2", "shared.txt"));
+        // abort로 worktree가 깨끗한 상태로 복원됨 — t2의 원래 변경이 남아있어야 함.
+        // Windows의 git autocrlf=true 설정으로 \r\n이 들어올 수 있어 정규화 후 비교.
+        var actual = fix.ReadInWorktree("t2", "shared.txt").Replace("\r\n", "\n");
+        Assert.Equal("line1\nt2-version\nline3\n", actual);
     }
 
     // 충돌 없는 독립 task는 같은 batch에서 정상 진행
