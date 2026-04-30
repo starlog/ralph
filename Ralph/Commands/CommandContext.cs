@@ -26,6 +26,10 @@ public sealed class CommandContext
     public bool CliSharedWorktrees { get; init; }
     public bool CliNoSmokeTest { get; init; }
     public bool LlmCritique { get; init; }
+    /// <summary>--safe-permissions: Claude 호출 시 --dangerously-skip-permissions 미부착.</summary>
+    public bool CliSafePermissions { get; init; }
+    /// <summary>RALPH_REQUIRE_PERMISSIONS=true: env 기반 safe 모드. CLI 플래그가 우선.</summary>
+    public bool EnvRequirePermissions { get; init; }
 
     // ─── parsed CLI flags (value) ─────────────────────────────────────────────
     public int MaxParallelArg { get; init; }
@@ -56,6 +60,8 @@ public sealed class CommandContext
     // ─── computed (CLI > env merge) ───────────────────────────────────────────
     public bool StrictFiles => CliStrictFiles || EnvStrictFiles;
     public bool NoSmokeTest => CliNoSmokeTest || EnvNoSmokeTest;
+    /// <summary>최종 safe-permissions 모드: CLI 플래그가 우선, 없으면 env.</summary>
+    public bool SafePermissions => CliSafePermissions || EnvRequirePermissions;
     public double? BudgetUsd => CliBudgetUsd ?? EnvBudgetUsd;
     public int? TaskTimeoutSec => CliTaskTimeoutSec ?? EnvTaskTimeoutSec;
     /// <summary>최종 smoke test 명령 override: CLI &gt; env. SmokeTestPlanner.Plan에 그대로 전달.</summary>
@@ -88,6 +94,7 @@ public sealed class CommandContext
         {
             Debug = Debug,
             TaskTimeoutSec = resolvedTimeout,
+            SafePermissions = SafePermissions,
         };
     }
 

@@ -225,7 +225,7 @@ internal sealed class MergeOrchestrator
             $"    1) [dim]{Markup.Escape(stateFilePath)}[/] 의 디스크 / 권한 / 잠금을 확인하세요.");
         AnsiConsole.MarkupLine(
             "    2) 미처리 task의 변경이 base 브랜치에 적용되었는지 직접 확인 후, " +
-            "필요 시 state.json의 tasks[\"<id>\"].done = true 로 수동 편집하세요.");
+            "필요 시 state.json의 tasks[[\"<id>\"]].done = true 로 수동 편집하세요.");
         AnsiConsole.MarkupLine(
             "    3) 수동 정리 후 [cyan]ralph --run[/] 으로 재개하세요.");
 

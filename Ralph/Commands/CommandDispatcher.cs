@@ -21,7 +21,7 @@ public static class CommandDispatcher
         "--reset" or "-r"      => new ResetCommand(ctx),
         "--rollback"           => new RollbackCommand(ctx),
         "--logs"               => new LogsCommand(ctx),
-        "--cost"               => new CostCommand(),
+        "--cost"               => new CostCommand(ctx),
         "--show-prompt"        => new ShowPromptCommand(ctx),
         "--validate"           => new ValidateCommand(ctx),
         "--critique"           => new CritiqueCommand(ctx),

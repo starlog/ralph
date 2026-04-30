@@ -40,9 +40,12 @@ public class CostTrackerConcurrencyTests : IDisposable
 
         var usage = new TokenUsage(1000, 1000, 0, 0); // small entry per call
 
+        // 단일 CostTracker 인스턴스를 모든 writer가 공유 — 프로덕션 동작 (CommandContext.Cost)과 일치.
+        // 인스턴스별 _writeLock이 라인 손실을 막는 단일 직렬화 지점이다.
+        var cost = new CostTracker();
+
         var tasks = Enumerable.Range(0, writers).Select(async i =>
         {
-            var cost = new CostTracker();
             for (var j = 0; j < perWriter; j++)
             {
                 var result = new ClaudeResult
