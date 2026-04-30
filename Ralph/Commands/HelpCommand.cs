@@ -35,6 +35,7 @@ public sealed class HelpCommand : ICommand
         table.AddRow("[green]--cost[/]", "Show cumulative token usage and estimated cost");
         table.AddRow("[green]--worktree-cleanup[/]", "Clean up stale worktrees");
         table.AddRow("[green]--help[/], -h", "Show this help message");
+        table.AddRow("[green]--version[/], -v", "Show ralph version");
         AnsiConsole.Write(table);
 
         AnsiConsole.MarkupLine("\n[blue]Options:[/]");
@@ -49,7 +50,7 @@ public sealed class HelpCommand : ICommand
         AnsiConsole.MarkupLine("  [green]--llm-critique[/]       --plan 직후 LLM 기반 PRD/plan 비평 추가 1회 실행 (기본 off, 추가 비용)");
         AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
         AnsiConsole.MarkupLine("  [green]--task-timeout[/] <dur> Per-Claude-call timeout (예: 30m, 1h, 90s, 1800). hang 방지");
-        AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus)");
+        AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus for --plan, sonnet for --run/--task/--dry-run/--interactive)");
         AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
         AnsiConsole.MarkupLine("\n[blue]Workflow:[/]");

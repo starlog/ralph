@@ -46,6 +46,22 @@ public class PlanGeneratorPromptTests
     }
 
     [Fact]
+    public void Prompt_forbids_absolute_paths_in_generated_task_prompts()
+    {
+        // 동기: planner 가 절대 경로(`D:\t8`)를 노출하면 모델이 그것을 각 task 의 prompt 에
+        // 그대로 박아넣어, worktree 에서 실행될 때 파일이 메인 레포로 새고 verification 이
+        // 못 찾아 실패한다. 가드레일로 "상대 경로만 쓸 것" 규칙이 반드시 prompt 에 있어야 함.
+        var prompt = PlanGenerator.BuildPlanPrompt(
+            prdFilePath: "/tmp/PRD.md",
+            schemaContent: "{}",
+            tasksFilePath: "/tmp/tasks.json");
+
+        Assert.Contains("use ONLY relative paths", prompt);
+        Assert.Contains(".ralph-worktrees/{taskId}/", prompt);
+        Assert.Contains("verification command", prompt);
+    }
+
+    [Fact]
     public void Prompt_positive_examples_use_host_python_command()
     {
         // 13/14번 규칙의 ALLOWED/PREFERRED 예시는 호스트에 맞게 치환되어야 한다.

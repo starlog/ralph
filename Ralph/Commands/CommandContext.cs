@@ -29,7 +29,11 @@ public sealed class CommandContext
 
     // ─── parsed CLI flags (value) ─────────────────────────────────────────────
     public int MaxParallelArg { get; init; }
-    public string ModelArg { get; init; } = "opus";
+    /// <summary>
+    /// --model로 명시된 값. null이면 command별 default 적용 (<see cref="ResolveModel"/>).
+    /// 사용자가 명시했을 때만 모든 command에 우선한다.
+    /// </summary>
+    public string? ModelArg { get; init; }
     public string TasksFile { get; init; } = "tasks.json";
     public double? CliBudgetUsd { get; init; }
     public int? CliTaskTimeoutSec { get; init; }
@@ -81,4 +85,13 @@ public sealed class CommandContext
     /// <summary>budget 적용 우선순위: cli > env > workflow.</summary>
     public double? EffectiveBudgetUsd(TaskManager tm) =>
         CliBudgetUsd ?? EnvBudgetUsd ?? tm.Data.Workflow?.BudgetUsd;
+
+    /// <summary>
+    /// command별 model 결정. 사용자가 --model을 명시했으면 그것을 우선,
+    /// 그렇지 않으면 호출자가 넘긴 default를 사용한다.
+    /// 기본값은 명령의 성격에 따라 다르다 — plan은 opus(reasoning-heavy),
+    /// run/task/dry-run/interactive는 sonnet(throughput-friendly).
+    /// </summary>
+    public string ResolveModel(string defaultModel) =>
+        !string.IsNullOrEmpty(ModelArg) ? ModelArg : defaultModel;
 }

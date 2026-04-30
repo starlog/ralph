@@ -22,6 +22,13 @@ public sealed class RunCommand : ICommand
         using var logger = new RalphLogger();
         logger.Info($"Tasks file: {_ctx.TasksFile}");
 
+        // Model 결정 + 표시 — 사용자가 --model을 안 줬을 때 default가 opus 였다가 sonnet으로
+        // 바뀌어 비용/품질에 직접 영향이 가므로 실행 시작 시 어떤 모델을 쓰는지 명확히 알린다.
+        var model = _ctx.ResolveModel("sonnet");
+        var modelSource = string.IsNullOrEmpty(model) ? "default" : "--model";
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(model)} [dim]({modelSource})[/]");
+        logger.Info($"Model: {model} ({modelSource})");
+
         // 세션 시작 시 자동 로그 rotation (silent)
         LogRotator.Rotate(retentionDays: tm.Data.Workflow?.LogRetentionDays, quiet: true);
 
@@ -96,7 +103,7 @@ public sealed class RunCommand : ICommand
                 ? true
                 : _ctx.EnvSharedWorktrees ?? tm.Data.Workflow?.Parallel?.SharedWorktreeObjects ?? false;
             var executor = new ParallelExecutor(
-                tm, claude, git, worktree, logger, _ctx.TasksFile, _ctx.ModelArg,
+                tm, claude, git, worktree, logger, _ctx.TasksFile, model,
                 strictFiles: _ctx.StrictFiles, budgetUsd: _ctx.EffectiveBudgetUsd(tm), cost: costTracker,
                 sharedWorktrees: sharedWorktrees, noSmokeTest: _ctx.NoSmokeTest,
                 smokeTestCommandOverride: _ctx.SmokeTestCommandOverride);
@@ -108,7 +115,7 @@ public sealed class RunCommand : ICommand
             logger.Info("Exec mode: sequential");
             AnsiConsole.MarkupLine("[yellow]순차 실행 모드[/]");
 
-            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, _ctx.ModelArg, costTracker);
+            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, model, costTracker);
             exitCode = await runner.RunAutoLoopAsync(
                 dryRun: false, commitOnComplete: true,
                 _ctx.EffectiveBudgetUsd(tm), costTracker, ct);

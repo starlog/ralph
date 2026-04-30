@@ -21,12 +21,17 @@ public sealed class DryRunCommand : ICommand
         using var logger = new RalphLogger();
         logger.Info("Exec mode: dry-run");
 
+        var model = _ctx.ResolveModel("sonnet");
+        var modelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(model)} [dim]({modelSource})[/]");
+        logger.Info($"Model: {model} ({modelSource})");
+
         var backupJson = await File.ReadAllTextAsync(_ctx.TasksFile, ct);
 
         int result;
         try
         {
-            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, _ctx.ModelArg, new CostTracker());
+            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, model, new CostTracker());
             result = await runner.RunAutoLoopAsync(
                 dryRun: true, commitOnComplete: false, budgetUsd: null,
                 cost: new CostTracker(), ct);

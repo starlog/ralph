@@ -1,4 +1,5 @@
 using Ralph.Services;
+using Spectre.Console;
 
 namespace Ralph.Commands;
 
@@ -18,7 +19,12 @@ public sealed class InteractiveCommand : ICommand
         using var logger = new RalphLogger();
         logger.Info("Exec mode: interactive");
 
-        var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, _ctx.ModelArg, new CostTracker());
+        var model = _ctx.ResolveModel("sonnet");
+        var modelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(model)} [dim]({modelSource})[/]");
+        logger.Info($"Model: {model} ({modelSource})");
+
+        var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, model, new CostTracker());
         return await runner.RunInteractiveLoopAsync(ct);
     }
 }

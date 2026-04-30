@@ -39,10 +39,13 @@ public partial class PlanGenerator
             ? "\n[cyan]Re-generating task plan with Claude Code (correction pass)...[/]\n"
             : "\n[cyan]Generating task plan with Claude Code...[/]\n");
 
-        // Build prompt (PRD file path only — Claude reads it via Read tool)
-        var prdFullPath = Path.GetFullPath(prdFile);
-        var tasksFullPath = Path.GetFullPath(tasksFile);
-        var basePrompt = BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath, categories);
+        // Build prompt with the caller-supplied (typically relative) paths.
+        // 절대 경로를 주입하면 모델이 "프로젝트 루트는 이 디렉토리" 라고 추론해 생성된 각
+        // task의 prompt 에 그 절대 경로를 그대로 박아넣는 경향이 있다. 그러면 worktree 에서
+        // task 가 실행될 때(`. ralph-worktrees/{taskId}/`) 파일이 메인 레포에 쓰이고
+        // verification 은 worktree 에서 돌면서 파일을 못 찾아 실패한다. 따라서 GetFullPath
+        // 로 감싸지 않고 호출자가 넘긴 상대 경로 그대로 전달한다.
+        var basePrompt = BuildPlanPrompt(prdFile, schemaContent, tasksFile, categories);
         var prompt = isCorrection
             ? correctionContext + "\n\n---\n\n" + basePrompt
             : basePrompt;
@@ -288,7 +291,19 @@ public partial class PlanGenerator
 
             7. **Phase naming:** Group related features into phases (e.g., "phase1-setup", "phase2-core", "phase3-ui").
 
-            8. **Prompts must be detailed and self-contained.**
+            8. **Prompts must be detailed, self-contained, and use ONLY relative paths.**
+               Tasks may execute inside a git worktree at `.ralph-worktrees/{taskId}/`,
+               whose cwd differs from where this plan is being generated. Embedding
+               absolute paths from the planner's machine — `D:\proj`, `C:\...`,
+               `/home/user/proj`, `/Users/...`, `/tmp/...` — causes Claude to write outside
+               the worktree, after which the verification command (which runs inside the
+               worktree) cannot find the file and fails the task even when the code is
+               correct. Always reference files by name relative to the project root
+               (`add.py`, `src/foo.ts`, `tests/test_x.py`), never by the absolute path of
+               the directory you happen to observe while planning. Do NOT phrase task
+               prompts as "create the file at `<absolute path>`" or "the file must exist
+               at `<absolute path>` directory" — say "create `add.py` in the project
+               root" or simply "create `add.py`".
 
             9. **Workflow settings:** Set `workflow.onTaskComplete.commitChanges` to `true`. Include `workflow.parallel.enabled: true`.
 

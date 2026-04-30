@@ -25,6 +25,7 @@ public static class CommandDispatcher
         "--validate"           => new ValidateCommand(ctx),
         "--critique"           => new CritiqueCommand(ctx),
         "--worktree-cleanup"   => new WorktreeCleanupCommand(),
+        "--version" or "-v"    => new VersionCommand(),
         "--help" or "-h" or "" => new HelpCommand(),
         _                      => new UnknownCommand(ctx.Command),
     };

@@ -140,7 +140,10 @@ public static class ArgParser
         }
 
         // ─── --model ─────────────────────────────────────────────────────────
-        var modelArg = "opus";
+        // 명시되지 않으면 null — 각 command가 자체 default를 적용한다 (--plan은 opus,
+        // --run/--task/--dry-run/--interactive는 sonnet). 사용자가 --model을 직접 줬을
+        // 때만 그 값이 모든 command에 우선 적용된다.
+        string? modelArg = null;
         var modelIdx = argList.IndexOf("--model");
         if (modelIdx >= 0 && modelIdx + 1 < argList.Count)
         {

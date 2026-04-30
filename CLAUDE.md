@@ -95,7 +95,9 @@ ralph --run --task-timeout 30m   # Per-Claude-call timeout (30m, 1h, 90s, or sec
 ralph --run --strict-files       # Validate declared vs actual modifiedFiles after merge; abort on undeclared
 ralph --run --shared-worktrees   # git worktree add --shared (saves disk/IO; auto-fallback)
 ralph --run --no-smoke-test      # Skip post-merge smoke test
-ralph --run --model sonnet       # Model override (sonnet | opus, default: opus)
+ralph --run --model opus         # Model override. Defaults: opus for --plan (reasoning-heavy),
+                                 # sonnet for --run/--task/--dry-run/--interactive (throughput).
+                                 # The selected model is printed at the start of each run.
 
 # Single task
 ralph --task <id>                # Honors dependsOn

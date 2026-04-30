@@ -64,7 +64,7 @@ public sealed class PlanCommand : ICommand
         var generator = new PlanGenerator();
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var result = await generator.GenerateAsync(
-            prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ModelArg, logger,
+            prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ResolveModel("opus"), logger,
             categories: configuredCategories, ct: ct);
 
         if (result != 0)
@@ -130,7 +130,7 @@ public sealed class PlanCommand : ICommand
                 currentInvalidJson, report.Errors, correctionAttempt, maxCorrectionAttempts);
 
             var fixResult = await generator.GenerateAsync(
-                prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ModelArg, logger,
+                prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ResolveModel("opus"), logger,
                 categories: configuredCategories,
                 correctionContext: correctionContext, ct: ct);
 
@@ -170,7 +170,7 @@ public sealed class PlanCommand : ICommand
 
             if (_ctx.LlmCritique)
             {
-                await RunLlmCritiqueAsync(prdFile, critiqueTm, _ctx.ModelArg, logger, ct);
+                await RunLlmCritiqueAsync(prdFile, critiqueTm, _ctx.ResolveModel("opus"), logger, ct);
             }
         }
         catch (Exception ex)
