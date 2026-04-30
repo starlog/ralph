@@ -170,6 +170,7 @@ Full command / option / env-var reference is in **[TECHNICAL.en.md](TECHNICAL.en
 ## Going deeper
 
 - **[TECHNICAL.en.md](TECHNICAL.en.md)** — full command list, options, environment variables, parallel-execution flow, verification gate, conflict strategies, smoke test, `tasks.json` schema, workflow settings, PRD-writing guide, troubleshooting, and design notes.
+- **[SCRIPTS.en.md](SCRIPTS.en.md)** — usage guide for the root-level install / release / utility scripts (`install*`, `release-binary*`, `clean-sample*`).
 - **[CLAUDE.md](CLAUDE.md)** — service-level architecture map, oriented to LLM contributors.
 - **[samples/PRD.md](samples/PRD.md)** — a parallel-optimized example PRD.
 
