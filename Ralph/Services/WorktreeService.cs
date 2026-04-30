@@ -152,6 +152,57 @@ public class WorktreeService
             return new MergeResult { Success = true };
         }
 
+        // base working tree에 untracked 파일이 있어 git이 데이터 손실 방지로 머지를 abort한 케이스.
+        // 이 경우 머지가 시작도 못 했으므로 unmerged index가 비어 있어 ConflictFiles로는 잡히지 않고,
+        // auto-theirs(-X)나 Claude resolver도 손쓸 게 없다. untracked blocker들을 백업으로 옮기고
+        // 한 번 재시도해 plan 단계 부산물 같은 흔한 케이스를 자동 복구한다.
+        var untrackedBlockers = ParseUntrackedOverwrites(output);
+        if (untrackedBlockers.Count > 0)
+        {
+            var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+            var backupDir = Path.Combine(
+                repoRoot, ".ralph-logs", "untracked-backup",
+                $"{taskId}-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
+            var moved = new List<string>();
+            foreach (var rel in untrackedBlockers)
+            {
+                try
+                {
+                    var src = Path.Combine(repoRoot, rel);
+                    if (!File.Exists(src)) continue;
+                    var dst = Path.Combine(backupDir, rel);
+                    Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+                    File.Move(src, dst, overwrite: true);
+                    moved.Add(rel);
+                }
+                catch (Exception ex)
+                {
+                    logger?.Warn(
+                        $"[merge:untracked-rescue] {taskId}: '{rel}' 백업 실패 — {ex.Message}");
+                }
+            }
+
+            if (moved.Count > 0)
+            {
+                logger?.Warn(
+                    $"[merge:untracked-rescue] {taskId}: base 워크트리의 untracked {moved.Count}건을 " +
+                    $"{backupDir}로 이동 후 머지 재시도 — {string.Join(", ", moved)}");
+                AnsiConsole.MarkupLine(
+                    $"  [yellow]ℹ[/] base 워크트리에 untracked 파일이 있어 머지가 막혔습니다. " +
+                    $"{moved.Count}건을 백업 후 재머지: [dim]{Markup.Escape(backupDir)}[/]");
+
+                var (retryExit, retryOut) = await _git.RunAsync(mergeArgs.ToArray(), ct: ct);
+                if (retryExit == 0)
+                {
+                    logger?.Info(
+                        $"Merged {branchName} into {targetBranch} (after relocating {moved.Count} untracked file(s))");
+                    return new MergeResult { Success = true };
+                }
+                // 재시도도 실패한 경우 — 일반 충돌 경로로 fall through
+                output = retryOut;
+            }
+        }
+
         // merge 충돌 감지
         var conflictFiles = await GetConflictFilesAsync(ct);
         logger?.Error($"Merge conflict for {branchName}: {output}");
@@ -162,6 +213,48 @@ public class WorktreeService
             ConflictFiles = conflictFiles,
             ErrorMessage = output
         };
+    }
+
+    /// <summary>
+    /// `git merge`가 untracked working tree 파일과 충돌해 abort한 경우 출력에서 파일 목록을 추출한다.
+    /// 메시지 패턴:
+    ///   error: The following untracked working tree files would be overwritten by merge:
+    ///   	subtract.py
+    ///   	other.py
+    ///   Please move or remove them before you merge.
+    /// 다른 메시지(예: 일반 머지 충돌)일 때는 빈 리스트.
+    /// </summary>
+    internal static List<string> ParseUntrackedOverwrites(string mergeOutput)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrEmpty(mergeOutput)) return result;
+        if (!mergeOutput.Contains("untracked working tree files would be overwritten by merge"))
+            return result;
+
+        var lines = mergeOutput.Split('\n');
+        var collecting = false;
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimEnd('\r');
+            if (line.Contains("untracked working tree files would be overwritten by merge"))
+            {
+                collecting = true;
+                continue;
+            }
+            if (!collecting) continue;
+            // 종료 마커
+            if (line.StartsWith("Please move or remove", StringComparison.Ordinal)
+                || line.StartsWith("Aborting", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(line))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                break;
+            }
+            // git은 파일명을 탭으로 들여쓰기 출력
+            var path = line.TrimStart('\t', ' ');
+            if (path.Length > 0) result.Add(path);
+        }
+        return result;
     }
 
     /// <summary>

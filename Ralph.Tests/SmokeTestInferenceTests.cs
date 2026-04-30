@@ -85,6 +85,27 @@ public class SmokeTestPlannerTests : IDisposable
     }
 
     [Fact]
+    public void Python_inference_uses_host_appropriate_interpreter_command()
+    {
+        // Windows에서는 `python3.exe`가 Microsoft Store 스텁(exit 9009)일 확률이 높아 `python`을 써야 한다.
+        // POSIX에서는 시스템 `python`이 부재하거나 Python 2일 수 있어 `python3` 사용.
+        File.WriteAllText(Path.Combine(_root, "pyproject.toml"), "[project]");
+
+        var spec = SmokeTestPlanner.Infer(_root);
+
+        Assert.NotNull(spec);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.StartsWith("python ", spec!.Command);
+            Assert.DoesNotContain("python3", spec.Command);
+        }
+        else
+        {
+            Assert.StartsWith("python3 ", spec!.Command);
+        }
+    }
+
+    [Fact]
     public void SetupPy_marker_infers_python_compileall()
     {
         File.WriteAllText(Path.Combine(_root, "setup.py"), "from setuptools import setup");

@@ -1,3 +1,4 @@
+using Ralph.Services;
 using Xunit;
 
 namespace Ralph.Tests;
@@ -255,6 +256,59 @@ public class WorktreeServiceTests
         Assert.False(ok);
         // rebase --abort로 worktree가 깨끗한 상태로 복원되었는지 확인
         Assert.Equal("WT-VERSION", fix.ReadInWorktree("t1", "a.txt"));
+    }
+
+    // ─── ParseUntrackedOverwrites (머지 abort 메시지 파서) ─────────────────────
+
+    [Fact]
+    public void ParseUntrackedOverwrites_extracts_files_from_git_message()
+    {
+        var output =
+            "error: The following untracked working tree files would be overwritten by merge:\n" +
+            "\tsubtract.py\n" +
+            "\tsrc/foo.py\n" +
+            "Please move or remove them before you merge.\n" +
+            "Aborting\n";
+
+        var result = WorktreeService.ParseUntrackedOverwrites(output);
+
+        Assert.Equal(2, result.Count);
+        Assert.Contains("subtract.py", result);
+        Assert.Contains("src/foo.py", result);
+    }
+
+    [Fact]
+    public void ParseUntrackedOverwrites_returns_empty_for_unrelated_message()
+    {
+        var output =
+            "Auto-merging file.txt\n" +
+            "CONFLICT (content): Merge conflict in file.txt\n" +
+            "Automatic merge failed; fix conflicts and then commit the result.\n";
+
+        var result = WorktreeService.ParseUntrackedOverwrites(output);
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public void ParseUntrackedOverwrites_returns_empty_for_empty_input()
+    {
+        Assert.Empty(WorktreeService.ParseUntrackedOverwrites(""));
+        Assert.Empty(WorktreeService.ParseUntrackedOverwrites(null!));
+    }
+
+    [Fact]
+    public void ParseUntrackedOverwrites_handles_crlf_line_endings()
+    {
+        var output =
+            "error: The following untracked working tree files would be overwritten by merge:\r\n" +
+            "\tsubtract.py\r\n" +
+            "Please move or remove them before you merge.\r\n";
+
+        var result = WorktreeService.ParseUntrackedOverwrites(output);
+
+        Assert.Single(result);
+        Assert.Equal("subtract.py", result[0]);
     }
 
     [Fact]

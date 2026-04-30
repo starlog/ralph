@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# Ralph release publisher — builds self-contained binaries for each platform
-# and publishes them as a GitHub Release using the `gh` CLI.
+# Ralph release publisher — builds self-contained binaries for each platform,
+# creates a matching git tag, pushes it, and publishes a GitHub Release using gh.
 #
 # Usage:
-#   ./release-binary.sh --version v1.2
-#   ./release-binary.sh --version v1.2 --draft
-#   ./release-binary.sh --version v1.2 --notes RELEASE_NOTES.md
-#   ./release-binary.sh --version v1.2 --skip-build       # reuse existing dist/
-#   ./release-binary.sh --version v1.2 --dry-run          # build & package only
+#   ./release-binary.sh                              # auto-bump from latest tag based on commit analysis
+#   ./release-binary.sh --bump major                 # force +0.1 bump
+#   ./release-binary.sh --bump minor                 # force +0.01 bump
+#   ./release-binary.sh --version v1.3               # explicit version
+#   ./release-binary.sh --no-tag                     # skip git tag/push (assume tag exists)
+#   ./release-binary.sh --no-push                    # create tag locally but don't push
+#   ./release-binary.sh --skip-build                 # reuse existing dist/
+#   ./release-binary.sh --dry-run                    # build & package only; no tag, no release
 #
-# Mirrors .github/workflows/release.yml so you can publish from a local machine
-# without waiting for CI (e.g. when re-cutting an existing tag).
+# Auto-bump rules (when --version is omitted):
+#   +0.1  (major) if any commit since the latest tag contains a feature/refactor/breaking marker
+#                 (기능추가, 기능개선, 리팩토링, feat, BREAKING)
+#   +0.01 (minor) otherwise (docs / chore / fix only)
 
 set -euo pipefail
 
@@ -20,12 +25,16 @@ DIST_DIR="$SCRIPT_DIR/dist"
 REPO="${RALPH_REPO:-starlog/ralph}"
 
 VERSION=""
+BUMP=""              # "" | major | minor — explicit override for auto-bump
 NOTES_FILE=""
 DRAFT=0
 PRERELEASE=0
 SKIP_BUILD=0
 DRY_RUN=0
 GENERATE_NOTES=1
+CREATE_TAG=1
+PUSH_TAG=1
+ALLOW_DIRTY=0
 
 # RID list mirrors .github/workflows/release.yml
 RIDS=(win-x64 osx-x64 osx-arm64 linux-x64 linux-arm64)
@@ -35,17 +44,22 @@ usage() {
 Ralph release publisher
 
 Usage:
-  release-binary.sh --version <tag> [options]
+  release-binary.sh [--version <tag> | --bump major|minor] [options]
 
-Required:
-  --version <tag>    Release tag (e.g. v1.2). Must match an existing or new git tag.
+Versioning:
+  --version <tag>    Explicit release tag (e.g. v1.3). Overrides auto-bump.
+  --bump major|minor Force +0.1 (major) or +0.01 (minor) bump from latest tag.
+                     Default: auto-detect from commit messages since latest tag.
 
 Options:
   --notes <file>     Path to release notes markdown (overrides auto-generated notes)
   --draft            Publish as draft release
   --prerelease       Mark as pre-release
+  --no-tag           Skip git tag creation and push (tag must already exist)
+  --no-push          Create tag locally but don't push it
+  --allow-dirty      Allow tagging when the working tree has uncommitted changes
   --skip-build       Skip dotnet publish; reuse existing dist/ artifacts
-  --dry-run          Build & package only; do not create GitHub release
+  --dry-run          Build & package only; no tag, no push, no release
   -h, --help         Show this help
 
 Environment:
@@ -59,28 +73,109 @@ need() { command -v "$1" >/dev/null 2>&1 || err "'$1' is required but not instal
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --version)    VERSION="$2"; shift 2 ;;
-        --notes)      NOTES_FILE="$2"; GENERATE_NOTES=0; shift 2 ;;
-        --draft)      DRAFT=1; shift ;;
-        --prerelease) PRERELEASE=1; shift ;;
-        --skip-build) SKIP_BUILD=1; shift ;;
-        --dry-run)    DRY_RUN=1; shift ;;
-        -h|--help)    usage; exit 0 ;;
-        *)            err "Unknown option: $1 (try --help)" ;;
+        --version)     VERSION="$2"; shift 2 ;;
+        --bump)        BUMP="$2"; shift 2 ;;
+        --notes)       NOTES_FILE="$2"; GENERATE_NOTES=0; shift 2 ;;
+        --draft)       DRAFT=1; shift ;;
+        --prerelease)  PRERELEASE=1; shift ;;
+        --no-tag)      CREATE_TAG=0; shift ;;
+        --no-push)     PUSH_TAG=0; shift ;;
+        --allow-dirty) ALLOW_DIRTY=1; shift ;;
+        --skip-build)  SKIP_BUILD=1; shift ;;
+        --dry-run)     DRY_RUN=1; shift ;;
+        -h|--help)     usage; exit 0 ;;
+        *)             err "Unknown option: $1 (try --help)" ;;
     esac
 done
 
-[[ -n "$VERSION" ]] || { usage; err "--version is required"; }
-[[ "$VERSION" =~ ^v[0-9] ]] || err "Version must start with 'v' followed by a digit (e.g. v1.2), got: $VERSION"
+[[ -z "$BUMP" || "$BUMP" == "major" || "$BUMP" == "minor" ]] || err "--bump must be 'major' or 'minor'"
+[[ -z "$VERSION" || -z "$BUMP" ]] || err "--version and --bump are mutually exclusive"
 
 need dotnet
 need tar
 need zip
 need shasum
+need git
 [[ $DRY_RUN -eq 1 ]] || need gh
+
+cd "$SCRIPT_DIR"
+
+# ─── Resolve version ───────────────────────────────────────────────────────
+latest_tag() {
+    git tag --list 'v[0-9]*' --sort=-v:refname | head -n1
+}
+
+# Compute next version: $1 = current "vX.Y", $2 = "major"|"minor"
+bump_version() {
+    local current="$1" kind="$2" delta
+    case "$kind" in
+        major) delta="0.1" ;;
+        minor) delta="0.01" ;;
+        *)     err "internal: unknown bump kind '$kind'" ;;
+    esac
+    local num="${current#v}"
+    awk -v v="$num" -v d="$delta" 'BEGIN {
+        r = v + d
+        s = sprintf("%.2f", r)
+        sub(/0+$/, "", s)
+        sub(/\.$/, "", s)
+        printf "v%s", s
+    }'
+}
+
+# Decide bump kind from commit messages between $1..HEAD
+detect_bump_kind() {
+    local since="$1" log
+    log=$(git log --format='%s' "${since}..HEAD" 2>/dev/null || true)
+    if [[ -z "$log" ]]; then
+        echo "minor"
+        return
+    fi
+    if echo "$log" | grep -Eq '기능추가|기능개선|리팩토링|^feat(\(|:|!)|BREAKING CHANGE'; then
+        echo "major"
+    else
+        echo "minor"
+    fi
+}
+
+if [[ -z "$VERSION" ]]; then
+    CURRENT="$(latest_tag || true)"
+    [[ -n "$CURRENT" ]] || err "No prior 'v*' tag found; pass --version explicitly for the first release"
+
+    if [[ -z "$BUMP" ]]; then
+        BUMP="$(detect_bump_kind "$CURRENT")"
+        log "Auto-detected bump kind: $BUMP (from commits since $CURRENT)"
+    fi
+    VERSION="$(bump_version "$CURRENT" "$BUMP")"
+    log "Resolved version: $CURRENT → $VERSION"
+fi
+
+[[ "$VERSION" =~ ^v[0-9] ]] || err "Version must start with 'v' followed by a digit (e.g. v1.3), got: $VERSION"
 
 if [[ -n "$NOTES_FILE" && ! -f "$NOTES_FILE" ]]; then
     err "Notes file not found: $NOTES_FILE"
+fi
+
+# ─── Tag (before build, so a build failure leaves no orphan tag pushed) ────
+if [[ $CREATE_TAG -eq 1 && $DRY_RUN -eq 0 ]]; then
+    if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+        log "Tag $VERSION already exists locally; skipping creation"
+    else
+        if [[ $ALLOW_DIRTY -eq 0 ]] && ! git diff-index --quiet HEAD --; then
+            err "Working tree has uncommitted changes; commit/stash or pass --allow-dirty"
+        fi
+        log "Creating annotated tag $VERSION at HEAD"
+        git tag -a "$VERSION" -m "Release $VERSION"
+    fi
+
+    if [[ $PUSH_TAG -eq 1 ]]; then
+        if git ls-remote --tags origin "refs/tags/$VERSION" 2>/dev/null | grep -q "refs/tags/$VERSION"; then
+            log "Tag $VERSION already on origin; skipping push"
+        else
+            log "Pushing tag $VERSION to origin"
+            git push origin "refs/tags/$VERSION"
+        fi
+    fi
 fi
 
 # ─── Build ─────────────────────────────────────────────────────────────────
@@ -153,7 +248,6 @@ fi
 # ─── Publish via gh ────────────────────────────────────────────────────────
 cd "$SCRIPT_DIR"
 
-GH_ARGS=(release)
 if gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
     log "Release $VERSION already exists on $REPO; uploading assets (clobber)"
     gh release upload "$VERSION" "${ARTIFACTS[@]}" --repo "$REPO" --clobber

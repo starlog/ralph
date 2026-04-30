@@ -181,6 +181,11 @@ public partial class PlanGenerator
     {
         categories ??= DefaultCategories;
         var categoryListText = string.Join(", ", categories.Select(c => $"\"{c}\""));
+        var pythonCmd = HostPlatform.PythonCommand;
+        var osName = HostPlatform.OsName;
+        var pythonHostNote = OperatingSystem.IsWindows()
+            ? $"`{pythonCmd}` (NOT `python3` — on Windows, `python3.exe` is usually a Microsoft Store stub that prints 'Python' to stderr and exits with code 9009, which makes verification fail regardless of code correctness; `python` resolves to the real Anaconda / python.org install)"
+            : $"`{pythonCmd}` (system `python` may be missing or be Python 2)";
         var sb = new StringBuilder();
         sb.AppendLine($$"""
             You are a project planner that generates a tasks.json file for the Ralph task executor.
@@ -191,6 +196,16 @@ public partial class PlanGenerator
             the default 4-stage pattern (plan/implementation/testing/commit); when this project
             defines a different category set, infer each stage's intent from its name and adapt
             the prompt template accordingly.
+
+            ## Host environment (use these binary names in verification.command and workflow.smokeTest.command)
+
+            - Operating system: {{osName}}
+            - Python interpreter: {{pythonHostNote}}
+
+            All examples below that show `python3` are written for the POSIX convention; if the host
+            OS above lists a different Python command, substitute it. The binary name actually has to
+            resolve on this machine, otherwise verification will fail with a "command not found"
+            error and the task will be marked failed regardless of whether the code is correct.
 
             ## Your Goal
             Read the PRD file at `{{prdFilePath}}`, explore the codebase, and write a valid JSON task plan to `{{tasksFilePath}}`.
@@ -294,9 +309,9 @@ public partial class PlanGenerator
                - `pytest -q tests/` · `dotnet test` · `go test ./...` · `npm test --silent` · `cargo test --quiet` · `tsc --noEmit` · `dotnet build -nologo`
 
                If a one-off ad-hoc check is genuinely needed, ALLOWED forms are:
-               - **Single-statement inline** (use `;` separators, no `\n`): `python3 -c "from m import f; assert f(10, 3) == 3.5; print('OK')"`
-               - **Saved script file**: `python3 path/to/check.py` (the implementation task writes the file)
-               - **Heredoc to stdin** with a quoted delimiter: `python3 - <<'PY'\\nimport m\\nassert m.f(1,2)==3\\nPY` — and only when the JSON encoder will produce real `\n` characters in the command string (NOT the two-character `\` + `n` escape).
+               - **Single-statement inline** (use `;` separators, no `\n`): `{{pythonCmd}} -c "from m import f; assert f(10, 3) == 3.5; print('OK')"`
+               - **Saved script file**: `{{pythonCmd}} path/to/check.py` (the implementation task writes the file)
+               - **Heredoc to stdin** with a quoted delimiter: `{{pythonCmd}} - <<'PY'\\nimport m\\nassert m.f(1,2)==3\\nPY` — and only when the JSON encoder will produce real `\n` characters in the command string (NOT the two-character `\` + `n` escape).
 
                FORBIDDEN forms (these will fail at run time across every interpreter):
                - `python3 -c "from m import f\\nimport sys\\ntry: ..."` — `\\n` inside double quotes → literal backslash-n → SyntaxError
@@ -310,8 +325,8 @@ public partial class PlanGenerator
 
                PREFERRED forms (work at every batch, regardless of which files exist yet):
                - **Project test/build runner** — `dotnet build -nologo`, `npm test --silent`, `cargo build --quiet`, `go build ./...`, `pytest -q` (only if a test runner is set up).
-               - **Recursive compile/typecheck** — `python3 -m compileall -q .`, `tsc --noEmit`, `ruby -wc *.rb` (glob expanded by shell at run time, so empty-match is fine on most shells with `nullglob`-equivalent — verify per stack).
-               - **Omit entirely** — if no safe whole-tree command exists for the stack, leave `workflow.smokeTest` unset. Ralph will fall back to its built-in inference (`pyproject.toml`/`setup.py`/`requirements.txt` → `python3 -m compileall -q .`, etc.). Setting an over-specific smoke test is worse than setting none.
+               - **Recursive compile/typecheck** — `{{pythonCmd}} -m compileall -q .`, `tsc --noEmit`, `ruby -wc *.rb` (glob expanded by shell at run time, so empty-match is fine on most shells with `nullglob`-equivalent — verify per stack).
+               - **Omit entirely** — if no safe whole-tree command exists for the stack, leave `workflow.smokeTest` unset. Ralph will fall back to its built-in inference (`pyproject.toml`/`setup.py`/`requirements.txt` → `{{pythonCmd}} -m compileall -q .`, etc.). Setting an over-specific smoke test is worse than setting none.
 
                FORBIDDEN forms:
                - Any command that names specific source files the plan creates (`python3 -m py_compile a.py b.py c.py`, `node a.js b.js`, `gcc a.c b.c -o app`). These break the moment a referenced file lives in a later batch.

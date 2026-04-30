@@ -106,8 +106,9 @@ internal static class SmokeTestPlanner
             parts.Add(("go build ./...", 180));
 
         // Python — bytecode 컴파일은 syntax/import 오류 잡는 가벼운 검증.
+        // Windows에서는 `python3.exe`가 Microsoft Store 스텁(exit 9009)일 확률이 높아 `python`을 사용.
         if (HasTopLevel("pyproject.toml") || HasTopLevel("setup.py") || HasTopLevel("requirements.txt"))
-            parts.Add(("python3 -m compileall -q .", 120));
+            parts.Add(($"{HostPlatform.PythonCommand} -m compileall -q .", 120));
 
         if (parts.Count == 0) return null;
 

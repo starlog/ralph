@@ -123,6 +123,24 @@ public class VerificationRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Embedded_double_quotes_survive_shell_invocation()
+    {
+        // 회귀: tasks.json verification.command이 큰따옴표로 감싼 인자(예: `python -c "..."`)를
+        // 가질 때 셸 invocation이 따옴표를 망가뜨리면 안 됨.
+        // Windows: ArgumentList가 inner `"`를 `\"`로 escape하면 cmd.exe가 잘못 파싱.
+        var spec = OperatingSystem.IsWindows()
+            ? new VerificationSpec { Command = "echo \"hello world\"" }
+            : new VerificationSpec { Command = "printf '%s' \"hello world\"" };
+
+        var r = await new VerificationRunner().RunAsync(spec, _tempDir);
+
+        Assert.True(r.Success, $"exit={r.ExitCode} stderr={r.Stderr}");
+        Assert.Contains("hello world", r.Stdout);
+        if (OperatingSystem.IsWindows())
+            Assert.DoesNotContain("\\\"", r.Stdout);  // 따옴표 escape이 깨지면 backslash가 새어 나옴
+    }
+
+    [Fact]
     public async Task Empty_command_throws()
     {
         var spec = new VerificationSpec { Command = "" };

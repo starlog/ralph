@@ -152,9 +152,12 @@ public class VerificationRunner
         };
         if (OperatingSystem.IsWindows())
         {
+            // cmd.exe /c uses CMD's own quoting rules, not CommandLineToArgvW.
+            // psi.ArgumentList would escape inner `"` as `\"`, which cmd misreads
+            // (cmd treats `\` as literal), splitting tokens at the wrong boundaries.
+            // Build the raw command line and rely on cmd's `/C "..."` outer-quote-strip rule.
             psi.FileName = "cmd.exe";
-            psi.ArgumentList.Add("/c");
-            psi.ArgumentList.Add(command);
+            psi.Arguments = $"/c \"{command}\"";
         }
         else
         {
