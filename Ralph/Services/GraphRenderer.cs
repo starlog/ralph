@@ -116,8 +116,8 @@ public class GraphRenderer
         var boxes = taskIds.Take(MaxBoxesPerRow).Select(id => BuildBox(id)).ToList();
         var overflow = taskIds.Count > MaxBoxesPerRow;
 
-        // Render boxes line by line (each box is 4 lines)
-        for (var line = 0; line < 4; line++)
+        // Render boxes line by line (each box is 5 lines)
+        for (var line = 0; line < 5; line++)
         {
             var sb = new System.Text.StringBuilder("  ");
             for (var b = 0; b < boxes.Count; b++)
@@ -154,15 +154,15 @@ public class GraphRenderer
             var slice = taskIds.Skip(chunk).Take(maxPerLine).ToList();
             var chainBoxes = slice.Select(id => BuildBox(id, chainBoxWidth)).ToList();
 
-            for (var line = 0; line < 4; line++)
+            for (var line = 0; line < 5; line++)
             {
                 var sb = new System.Text.StringBuilder("  ");
                 for (var b = 0; b < chainBoxes.Count; b++)
                 {
                     if (b > 0)
                     {
-                        // Arrow only on middle lines (line 1 or 2)
-                        sb.Append(line == 1 || line == 2 ? " [yellow]\u2500\u25ba[/] " : "    ");
+                        // Arrow only on the visual middle line (line 2 of 5)
+                        sb.Append(line == 2 ? " [yellow]\u2500\u25ba[/] " : "    ");
                     }
                     sb.Append(chainBoxes[b][line]);
                 }
@@ -274,10 +274,10 @@ public class GraphRenderer
     {
         AnsiConsole.MarkupLine(new string('\u2550', 80));
         AnsiConsole.MarkupLine(
-            "[dim]Legend:[/] [green][[\u2713]][/] done  [[ ]] pending  [dim]\u2502[/] parallel  [yellow]\u2500\u25ba[/] sequential chain");
+            "[dim]Legend:[/] [green][[\u2713]][/] done  [[ ]] pending  [dim]\u2502[/] parallel  [yellow]\u2500\u25ba[/] sequential chain  [magenta]opus[/] reasoning  [dim]sonnet[/] routine");
     }
 
-    /// <summary>박스 4줄 생성 (Spectre Markup 포함)</summary>
+    /// <summary>박스 5줄 생성 (Spectre Markup 포함): top / id / category / model / bottom</summary>
     private string[] BuildBox(string taskId, int width = BoxWidth)
     {
         var task = _tm.GetTask(taskId);
@@ -285,24 +285,29 @@ public class GraphRenderer
         var status = done ? "[green][\u2713][/]" : "[ ]";
         var statusRaw = done ? "[v]" : "[ ]";
         var category = task?.Category ?? task?.Phase ?? "";
+        var model = !string.IsNullOrEmpty(task?.Model) ? task!.Model! : ModelResolver.DefaultModel;
 
         var innerWidth = width - 2; // minus borders
         var idDisplay = Truncate($"{statusRaw} {taskId}", innerWidth);
         var catDisplay = Truncate($"    {category}", innerWidth);
+        var modelDisplay = Truncate($"    {model}", innerWidth);
 
         // Markup versions
         var idMarkup = done
             ? $"[green]{Markup.Escape(Truncate($"[\u2713] {taskId}", innerWidth))}[/]"
             : $"{Markup.Escape(Truncate("[ ] " + taskId, innerWidth))}";
         var catMarkup = $"[dim]{Markup.Escape(catDisplay)}[/]";
+        var modelColor = string.Equals(model, "opus", StringComparison.OrdinalIgnoreCase) ? "magenta" : "dim";
+        var modelMarkup = $"[{modelColor}]{Markup.Escape(modelDisplay)}[/]";
 
         var top = $"\u250C{new string('\u2500', innerWidth)}\u2510";
         var idLine = $"\u2502{idMarkup}{PadMarkup(idDisplay, innerWidth)}\u2502";
         var catLine = $"\u2502{catMarkup}{PadMarkup(catDisplay, innerWidth)}\u2502";
+        var modelLine = $"\u2502{modelMarkup}{PadMarkup(modelDisplay, innerWidth)}\u2502";
         var connectorPos = innerWidth / 2;
         var bottom = $"\u2514{new string('\u2500', connectorPos)}\u252C{new string('\u2500', innerWidth - connectorPos - 1)}\u2518";
 
-        return [top, idLine, catLine, bottom];
+        return [top, idLine, catLine, modelLine, bottom];
     }
 
     /// <summary>Markup을 포함한 문자열의 패딩 계산 (실제 표시 너비 기준)</summary>
