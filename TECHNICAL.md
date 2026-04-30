@@ -154,6 +154,7 @@ Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들�
 | `--shared-worktrees` | `git worktree add --shared`로 `.git` objects 공유 (디스크/IO 절약, 미지원 시 자동 fallback) |
 | `--no-smoke-test` | 머지 후 smoke test 건너뜀 (그렇지 않으면 자동 추론 또는 `workflow.smokeTest` 사용) |
 | `--smoke-test <cmd>` | 1회용 smoke test 명령 override — `workflow.smokeTest`와 자동 추론을 모두 우회. `--no-smoke-test`만이 더 우선 |
+| `--auto-rollback-on-smoke-fail` | opt-in: 머지 후 smoke test 실패 시 이번 배치 머지 커밋들을 자동 revert하고 해당 task의 `done` 비트를 pending으로 되돌림 (working tree가 dirty거나 외부 커밋이 끼어있으면 보류). env `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL=true` / `workflow.autoRollbackOnSmokeFail`로도 동일 효과 |
 | `--budget-usd <amt>` | 누적 비용이 `<amt>` USD에 도달하면 새 task dispatch 중단 |
 | `--task-timeout <dur>` | per-Claude 호출 timeout (예: `30m`, `1h`, `90s`, `1800`) — 멈춘 호출 강제 종료 |
 | `--llm-critique` | `--plan` 직후 PRD + plan에 대한 LLM 기반 비평 1회 추가 (기본 off, 추가 비용) |
@@ -192,6 +193,7 @@ ralph -f my-project-tasks.json --run  # 글로벌 -f / --file 플래그
 | `RALPH_SMOKE_TEST_COMMAND` | unset | 1회용 smoke test 명령 override — CLI `--smoke-test`가 우선, 다음으로 이 값, 그 다음 `workflow.smokeTest`, 마지막으로 자동 추론 |
 | `RALPH_BUDGET_USD` | unset | 누적 비용 상한 — CLI `--budget-usd` 우선 |
 | `RALPH_TASK_TIMEOUT_SEC` | unset | per-Claude 호출 timeout(초) — CLI `--task-timeout` 우선 |
+| `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL` | false | `true`/`1`이면 smoke 실패 시 자동 롤백(opt-in). CLI `--auto-rollback-on-smoke-fail` 우선, 다음 이 값, 그 다음 `workflow.autoRollbackOnSmokeFail` |
 | `RALPH_WEBHOOK_URL` | unset | 세션 완료 webhook 기본값 |
 | `RALPH_LOG_RETENTION_DAYS` | 30 | N일 초과 로그 자동 삭제 |
 
@@ -272,15 +274,19 @@ ralph --rollback --force   # 비대화형 / 자동화에서 즉시 진행
 | 같은 배치 내 한 task에서 Claude 실패 | 다른 task들은 **정상 진행 + 머지**. 실패 task는 worktree 정리, `done` 플래그 false 유지. |
 | `verification.command` 실패 | `workflow.verifyRetries` (기본 1)까지 stdout/stderr를 context로 self-fix 재시도. 그래도 실패하면 task 실패 처리 + **머지에서 제외**. |
 | Pre-merge scope 위반 (`--strict-files`) | 머지 전에 worktree 빠르게 실패 — cleanup 비용 절약. 같은 배치의 다른 task는 영향 없음. |
-| 충돌 전략 chain으로도 해결 불가능한 머지 충돌 | 남은 미머지 worktree들은 정리. 이미 머지된 task는 **그대로 유지** (롤백 없음). |
-| 머지 후 `workflow.smokeTest` 실패 | non-zero exit로 ralph 종료. 머지는 revert되지 않으며 실패 내용은 로그 + 표시. |
+| 충돌 전략 chain으로도 해결 불가능한 머지 충돌 | 남은 미머지 worktree들은 정리. **이미 머지에 성공한 동료 task는 abort 직전에 `done`으로 마킹**되어 다음 `--run`에서 재dispatch되지 않는다 (`merge-log.jsonl`에는 `smoke=skipped`로 기록). |
+| 머지 후 `workflow.smokeTest` 실패 | 기본: non-zero exit로 ralph 종료, 머지는 revert되지 않음, 실패 내용은 로그 + 표시. **opt-in:** `--auto-rollback-on-smoke-fail`(또는 env / workflow 설정)을 켜면 이번 배치 머지 커밋들을 자동 revert하고 해당 task의 `done`을 pending으로 되돌림 (working tree dirty 또는 외부 커밋이 base에 끼어있으면 보류). 어느 경우든 종료 코드는 1. |
 
 **중단 후 재개:**
 - `done: true`는 task 단위로 `.ralph-logs/state.json`에 atomic write — `ralph --run`을 다시 실행하면 정확히 중단점부터 (오직 미완료 task만 dispatch).
 - `--run` 시작 시 worktree에 uncommitted 변경 또는 base 대비 commit이 남아있으면 **조용히 삭제하지 않는다.** worktree 경로를 출력하고 사용자가 직접 머지/정리하거나 `ralph --worktree-cleanup`으로 강제 제거하도록 안내.
 - 작업이 사라지지 않은 깔끔한 stale worktree는 자동 제거.
 
-**이미 머지된 task는 자동 롤백되지 않는다.** Ralph 설계상 머지가 commit point — 되돌리려면 사람이 `git revert` / `git reset`을 실행하거나 `ralph --rollback` (마지막 plan 직후로) 사용. 머지가 영구화되기 전에 문제를 잡으려면 `--strict-files`와 `workflow.smokeTest`를 활용.
+**기본적으로 이미 머지된 task는 자동 롤백되지 않는다.** Ralph 설계상 머지가 commit point — 되돌리려면 사람이 `git revert` / `git reset`을 실행하거나 `ralph --rollback` (마지막 plan 직후로) 사용. 머지가 영구화되기 전에 문제를 잡으려면 `--strict-files`와 `workflow.smokeTest`를 활용.
+
+**Opt-in 자동 롤백.** smoke test 실패 시 이번 배치 머지 커밋들을 자동으로 revert하고 해당 task의 `done`을 pending으로 되돌리고 싶으면 `--auto-rollback-on-smoke-fail` (또는 `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL=true` / `workflow.autoRollbackOnSmokeFail: true`)을 사용. 안전 가드: working tree가 dirty거나 batch 시작 후 외부 커밋이 base에 끼어들었으면 자동 롤백을 **보류**하고 사용자에게 안내한다 (silent corrupt를 막기 위함). 자동 롤백이든 보류든 종료 코드는 1로 동일하며, 모든 결정은 `merge-log.jsonl`에 entry로 남는다.
+
+**충돌로 abort된 동료 task의 처리.** 같은 배치에서 task A는 머지 성공, task B는 충돌 미해결로 abort된 경우 — A의 머지는 이미 base에 들어가 있으므로 abort 직전에 A의 `done`을 `state.json`에 마킹하고 `merge-log.jsonl`에 entry를 남긴다 (`smokeTest=skipped`). 다음 `ralph --run`에서 A는 재dispatch되지 않으며 B만 다시 시도한다.
 
 ## 충돌 해결 전략
 
@@ -530,6 +536,7 @@ ralph --logs --live subtract-impl
 | `retryDelay` | 5 | 재시도 간 대기(초) (env `RETRY_DELAY` 우선) |
 | `verifyRetries` | 1 | `verification.command` 실패 시 self-fix 재시도 (0이면 비활성) |
 | `smokeTest` | (unset → 자동 추론) | 머지 배치 후 base 브랜치에서 실행할 단일 명령 |
+| `autoRollbackOnSmokeFail` | false | smoke 실패 시 이번 배치 머지 커밋들을 자동 revert하고 task `done`을 pending으로 되돌림. CLI / env 우선 |
 | `categories` | `["plan","implementation","testing","commit"]` | `--plan`에서 사용할 기능별 stage 목록 오버라이드 |
 
 ## 설계 노트 — Spec(`tasks.json`) / State(`.ralph-logs/state.json`) 분리
@@ -619,7 +626,10 @@ plan generator가 의존성을 결정하는 규칙:
 ├── subtract-plan.log
 ├── multiply-plan.log
 ├── cost.jsonl                  # 누적 토큰 사용량 / 비용 ledger (보존)
+├── cost-failures.jsonl         # cost.jsonl 쓰기 실패 시 fallback ledger (보존)
 ├── validation.jsonl            # 검증 명령 ledger (보존)
+├── merge-log.jsonl             # 머지 트랜잭션 ledger — task별 머지 SHA, smoke 결과, rollback 이벤트 (보존)
+├── state.json                  # per-task done 비트 (orchestrator 단독 writer, atomic tmp+rename)
 └── rollback/                   # --plan 직전/직후 스냅샷 (--rollback이 사용)
     ├── pre-plan.json
     └── post-plan.json
@@ -713,7 +723,7 @@ ralph --run               # Phase 1은 4-wide 병렬, Phase 2-3은 순차
 | 브랜치에 uncommitted 변경이 있어 worktree 차단 | 내용 확인 후 직접 commit/머지하거나 `ralph --worktree-cleanup`으로 강제 제거. |
 | Claude 호출이 무한히 멈춤 | `--task-timeout 30m` 등 적절한 값 설정. timeout 시 process tree 강제 종료. |
 | `--budget-usd` 초과 사용 | 정상 — 게이트는 새 dispatch만 막고 in-flight는 못 막는다. 더 타이트하게 막으려면 `maxConcurrent`를 낮추자. |
-| 첫 배치 smoke test 실패 | `.ralph-logs/` 확인. 머지 결과를 직접 수정(자동 롤백 없음)하거나, `workflow.smokeTest`를 더 타게팅된 명령으로 바꾸거나, 반복 작업 중에는 `--no-smoke-test`. |
+| 첫 배치 smoke test 실패 | `.ralph-logs/merge-log.jsonl`로 어느 task의 머지였는지 확인. 기본은 자동 revert 없음 — 머지를 직접 수정/`git revert`하거나, `workflow.smokeTest`를 더 타게팅된 명령으로 바꾸거나, 반복 작업 중에는 `--no-smoke-test`. 자동 revert 필요 시 `--auto-rollback-on-smoke-fail` opt-in. |
 | 실행 도중 `tasks.json`을 변경했음 | Ralph는 머지 사이에 `tasks.json`을 reload하지만, `--run` 활성 중에는 직접 수정하지 말 것. 깨끗한 상태가 필요하면 `--reset`. |
 | 검증이 계속 재시도됨 | `workflow.verifyRetries`를 낮추자(0이면 즉시 실패). 실제 명령 출력은 `validation.jsonl` 참고. |
 | `--rollback`이 "스냅샷 없음"으로 실패 | `.ralph-logs/rollback/`이 비어있다. 이 repo에서 한 번도 `--plan`을 돌리지 않았거나 로그를 지운 경우. 스냅샷은 `--plan`만이 만든다. |

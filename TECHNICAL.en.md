@@ -154,6 +154,7 @@ Full PRD: [doc/bugfix.md](doc/bugfix.md)
 | `--shared-worktrees` | Use `git worktree add --shared` to share `.git` objects across worktrees (saves disk/IO; auto-falls-back if unsupported) |
 | `--no-smoke-test` | Skip the post-merge smoke test (otherwise auto-inferred or from `workflow.smokeTest`) |
 | `--smoke-test <cmd>` | One-shot smoke-test command override — bypasses both `workflow.smokeTest` and auto-inference; only `--no-smoke-test` outranks it |
+| `--auto-rollback-on-smoke-fail` | Opt-in: when post-merge smoke test fails, auto-revert this batch's merge commits and reset the affected tasks' `done` bits to pending. Held when working tree is dirty or external commits intervened. Equivalent to env `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL=true` / `workflow.autoRollbackOnSmokeFail` |
 | `--budget-usd <amt>` | Stop dispatching new tasks once cumulative cost reaches `<amt>` USD |
 | `--task-timeout <dur>` | Per-Claude-call timeout (e.g. `30m`, `1h`, `90s`, `1800`) — kills hung calls |
 | `--llm-critique` | After `--plan`, run an extra LLM-driven critique of the PRD + generated plan (off by default; adds one LLM call) |
@@ -192,6 +193,7 @@ ralph -f my-project-tasks.json --run  # global -f / --file flag
 | `RALPH_SMOKE_TEST_COMMAND` | unset | One-shot smoke-test command override — CLI `--smoke-test` wins, then this, then `workflow.smokeTest`, then auto-infer |
 | `RALPH_BUDGET_USD` | unset | Cumulative cost ceiling — CLI `--budget-usd` wins |
 | `RALPH_TASK_TIMEOUT_SEC` | unset | Per-Claude-call timeout (seconds) — CLI `--task-timeout` wins |
+| `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL` | false | `true`/`1` to enable opt-in auto-rollback when post-merge smoke fails. CLI `--auto-rollback-on-smoke-fail` wins, then this, then `workflow.autoRollbackOnSmokeFail` |
 | `RALPH_WEBHOOK_URL` | unset | Default session-completion webhook |
 | `RALPH_LOG_RETENTION_DAYS` | 30 | Auto-delete logs older than N days |
 
@@ -272,15 +274,19 @@ What happens when a parallel batch partially fails:
 | Claude fails for one task in a batch | The other tasks in the same batch **continue and merge normally**. The failed task's worktree is cleaned up; its `done` flag stays `false`. |
 | `verification.command` fails | Up to `workflow.verifyRetries` (default 1) self-fix retries with stdout/stderr fed back as context. If still failing, the task is marked failed and **excluded from merge**. |
 | Pre-merge scope violation (`--strict-files`) | Worktree fails fast before merge — saves cleanup cost. Other tasks in the batch are not affected. |
-| Merge conflict unresolvable by the strategy chain | Remaining unmerged worktrees are cleaned up; already-merged tasks **stay merged** (no rollback). |
-| Post-merge `workflow.smokeTest` fails | Run stops with a non-zero exit. No merges are reverted; the smoke-test failure is logged and surfaced. |
+| Merge conflict unresolvable by the strategy chain | Remaining unmerged worktrees are cleaned up. **Peer tasks that already merged successfully are marked `done` before the abort** so the next `--run` does not re-dispatch them (`merge-log.jsonl` records `smoke=skipped`). |
+| Post-merge `workflow.smokeTest` fails | Default: run stops with a non-zero exit, no merges reverted, failure is logged and surfaced. **Opt-in:** with `--auto-rollback-on-smoke-fail` (or env / workflow setting), Ralph reverts this batch's merge commits and resets the affected tasks' `done` bits to pending (held if working tree is dirty or external commits landed in base). Exit code is 1 in either case. |
 
 **Resume after interruption:**
 - `done: true` is written atomically per task to `.ralph-logs/state.json` — re-running `ralph --run` picks up exactly where it left off (only pending tasks dispatch).
 - If a worktree has uncommitted changes or commits ahead of base when `--run` starts, Ralph **does not silently delete it**. It prints the worktree path and asks you to merge/clean manually (or run `ralph --worktree-cleanup` to force-remove).
 - Stale worktrees that are clean (cleanup was missed but no work was lost) are auto-removed.
 
-**Already-merged tasks are not auto-rolled-back.** Ralph's design treats merge as the commit point — undoing requires a human-driven `git revert` / `git reset`, or `ralph --rollback` (which restores the state from immediately after `--plan`). Use `--strict-files` and `workflow.smokeTest` to catch problems before the merge becomes durable.
+**By default, already-merged tasks are not auto-rolled-back.** Ralph's design treats merge as the commit point — undoing requires a human-driven `git revert` / `git reset`, or `ralph --rollback` (which restores the state from immediately after `--plan`). Use `--strict-files` and `workflow.smokeTest` to catch problems before the merge becomes durable.
+
+**Opt-in auto-rollback.** If you want Ralph to revert a batch's merge commits and reset the corresponding tasks to pending when the post-merge smoke test fails, enable `--auto-rollback-on-smoke-fail` (or `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL=true` / `workflow.autoRollbackOnSmokeFail: true`). Safety guards: rollback is **held** (not applied) when the working tree is dirty or an external commit landed in base after the batch started — surfacing the situation rather than silently corrupting state. Whether the rollback applied or was held, the exit code is 1 and every decision is journaled to `merge-log.jsonl`.
+
+**Already-merged peers when a batch aborts on conflict.** When task A merges successfully and task B in the same batch then fails with an unresolved conflict, A's merge is already in base. Ralph marks A as `done` in `state.json` and writes a `merge-log.jsonl` entry (`smokeTest=skipped`) before aborting — so the next `ralph --run` re-dispatches only B and not A.
 
 ## Conflict Resolution Strategies
 
@@ -530,6 +536,7 @@ The main `--run` console also shows a Spectre.Console live table with each workt
 | `retryDelay` | 5 | Seconds between retries (env `RETRY_DELAY` wins) |
 | `verifyRetries` | 1 | Self-fix retries when `verification.command` exits non-zero (0 disables) |
 | `smokeTest` | (unset → auto-infer) | Single command run on base branch after each merge batch |
+| `autoRollbackOnSmokeFail` | false | When smoke fails, auto-revert this batch's merge commits and reset the affected tasks' `done` bits to pending. CLI / env outrank this. |
 | `categories` | `["plan","implementation","testing","commit"]` | Override the per-feature stage list used by `--plan` |
 
 ## Design Note — Spec (`tasks.json`) / State (`.ralph-logs/state.json`) split
@@ -619,7 +626,10 @@ Run logs are written to `.ralph-logs/`:
 ├── subtract-plan.log
 ├── multiply-plan.log
 ├── cost.jsonl                  # cumulative token usage / cost ledger (preserved)
+├── cost-failures.jsonl         # fallback ledger when cost.jsonl writes fail (preserved)
 ├── validation.jsonl            # verification command ledger (preserved)
+├── merge-log.jsonl             # merge transaction ledger — per-task merge SHA, smoke result, rollback events (preserved)
+├── state.json                  # per-task done bits (orchestrator-only writer, atomic tmp+rename)
 └── rollback/                   # snapshots from --plan (consumed by --rollback)
     ├── pre-plan.json
     └── post-plan.json
@@ -713,7 +723,7 @@ A non-exhaustive list of constraints, gotchas, and design choices to be aware of
 | Worktree blocked because branch has uncommitted changes | Inspect, then either commit/merge manually or run `ralph --worktree-cleanup` to force-remove. |
 | Task hangs on a Claude call forever | Set `--task-timeout 30m` (or whatever is appropriate). The process tree is killed on timeout. |
 | Cost overrun past `--budget-usd` | Expected — the gate blocks new dispatches, not in-flight ones. Lower `maxConcurrent` if you need a tighter cap. |
-| Smoke test fails on the first batch | Inspect `.ralph-logs/`. Either fix the underlying merge result manually (no auto-rollback), set a more targeted `workflow.smokeTest`, or use `--no-smoke-test` while iterating. |
+| Smoke test fails on the first batch | Check `.ralph-logs/merge-log.jsonl` to see which task's merge is at fault. Default behaviour does not auto-revert — fix the merge result manually / `git revert`, set a more targeted `workflow.smokeTest`, or use `--no-smoke-test` while iterating. To opt into auto-revert, use `--auto-rollback-on-smoke-fail`. |
 | `tasks.json` change midway through a run | `tasks.json` is now spec-only and Ralph never writes it during `--run`, so hand-edits don't race with Ralph. Edits take effect on the next `ralph --run` invocation (Ralph reloads on each call). |
 | Verification keeps retrying | Lower `workflow.verifyRetries` (set `0` to fail fast). Check `validation.jsonl` for the actual command output. |
 | `--rollback` says "no snapshot available" | `.ralph-logs/rollback/` is empty. Either you never ran `--plan` in this repo, or the logs were wiped — only `--plan` creates snapshots. |

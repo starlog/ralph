@@ -172,6 +172,7 @@ Phase 1의 독립적인 모듈은 동시에, Phase 2는 그 뒤에 순차적으�
 ralph --run --budget-usd 5.00      # 5달러 넘으면 새 작업 시작 안 함
 ralph --run --max-parallel 3       # 한 번에 최대 3개만 동시에
 ralph --run --task-timeout 30m     # 한 호출이 30분 넘으면 강제 종료
+ralph --run --auto-rollback-on-smoke-fail  # 머지 후 빌드 실패 시 자동으로 되돌리기 (opt-in)
 ralph --status                     # 진행 상황 보기
 ralph --cost                       # 누적 비용 / 토큰
 ralph --rollback                   # 직전 상태로 되돌리기 (--plan 또는 --run 직전)

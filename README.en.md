@@ -174,6 +174,7 @@ Phase 1's independent modules run concurrently; Phase 2 follows. You see a live 
 ralph --run --budget-usd 5.00     # stop dispatching once $5 is reached
 ralph --run --max-parallel 3      # never run more than 3 at a time
 ralph --run --task-timeout 30m    # kill any single Claude call after 30 minutes
+ralph --run --auto-rollback-on-smoke-fail  # auto-revert this batch if post-merge smoke test fails (opt-in)
 ralph --status                    # show current progress
 ralph --cost                      # cumulative cost / tokens
 ralph --rollback                  # roll back to before --plan or --run
