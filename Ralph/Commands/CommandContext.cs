@@ -63,6 +63,15 @@ public sealed class CommandContext
         ? CliSmokeTestCommand
         : EnvSmokeTestCommand;
 
+    // ─── shared services ──────────────────────────────────────────────────────
+
+    private CostTracker? _cost;
+    /// <summary>
+    /// 세션 단일 CostTracker. 처음 접근 시 RalphPaths.LogDir 기준으로 1회 생성된다.
+    /// 모든 command/runner가 동일 인스턴스를 공유해 누적 캐시·jsonl writer를 일관되게 유지한다.
+    /// </summary>
+    public CostTracker Cost => _cost ??= new CostTracker();
+
     // ─── factories ────────────────────────────────────────────────────────────
 
     /// <summary>
