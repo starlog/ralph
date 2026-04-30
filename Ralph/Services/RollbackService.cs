@@ -43,12 +43,13 @@ public sealed class RollbackService
     public string PostPlanPath => Path.Combine(_rollbackDir, PostPlanFileName);
 
     /// <summary>
-    /// --plan 실행 직전에 호출. 현재 git HEAD + tasks.json 내용을 pre-plan 스냅샷으로 저장.
+    /// --plan 실행 직전에 호출. 현재 git HEAD + tasks.json + PRD 원본을 pre-plan 스냅샷으로 저장.
     /// 동시에 더 이상 유효하지 않은 post-plan 스냅샷은 제거한다 (새 plan은 새 post-plan을 만든다).
     /// </summary>
-    public async Task CaptureBeforePlanAsync(GitService git, string tasksFile, CancellationToken ct = default)
+    public async Task CaptureBeforePlanAsync(
+        GitService git, string tasksFile, string prdFile, CancellationToken ct = default)
     {
-        var snapshot = await BuildSnapshotAsync(PrePlanPhase, git, tasksFile, ct);
+        var snapshot = await BuildSnapshotAsync(PrePlanPhase, git, tasksFile, prdFile, ct);
         await WriteSnapshotAsync(PrePlanPath, snapshot, ct);
 
         // pre-plan을 새로 잡았다면 이전 post-plan은 stale — 제거한다.
@@ -59,11 +60,12 @@ public sealed class RollbackService
     }
 
     /// <summary>
-    /// --plan 성공 직후에 호출. 현재 git HEAD + 새로 생성된 tasks.json을 post-plan 스냅샷으로 저장.
+    /// --plan 성공 직후에 호출. 현재 git HEAD + 새로 생성된 tasks.json + PRD 원본을 post-plan 스냅샷으로 저장.
     /// </summary>
-    public async Task CaptureAfterPlanAsync(GitService git, string tasksFile, CancellationToken ct = default)
+    public async Task CaptureAfterPlanAsync(
+        GitService git, string tasksFile, string prdFile, CancellationToken ct = default)
     {
-        var snapshot = await BuildSnapshotAsync(PostPlanPhase, git, tasksFile, ct);
+        var snapshot = await BuildSnapshotAsync(PostPlanPhase, git, tasksFile, prdFile, ct);
         await WriteSnapshotAsync(PostPlanPath, snapshot, ct);
     }
 
@@ -91,10 +93,12 @@ public sealed class RollbackService
     }
 
     /// <summary>
-    /// 스냅샷대로 git/tasks.json을 복원한다.
+    /// 스냅샷대로 git/tasks.json/PRD를 복원한다.
     /// - git reset --hard {snapshot.GitHead}
     /// - snapshot.HadTasksJson==true: tasksFile에 atomic write
     /// - snapshot.HadTasksJson==false: tasksFile 삭제
+    /// - snapshot.HadPrdFile==true: PrdFilePath에 atomic write (git reset에서 잃어버린 PRD를 복구)
+    /// PRD는 plan 입력 파일이므로 항상 보존되어야 한다 (사라지면 사용자가 재작성해야 함).
     /// </summary>
     public async Task<(bool Ok, string Message)> RestoreAsync(
         RollbackSnapshot snapshot, GitService git, string tasksFile, CancellationToken ct = default)
@@ -129,11 +133,32 @@ public sealed class RollbackService
             }
         }
 
+        // PRD 복원: git reset이 PRD를 워킹트리에서 지웠을 수 있으므로(스냅샷 시점에 untracked였다가
+        // --run 도중 git add -A로 commit된 케이스) snapshot 내용을 디스크에 다시 쓴다.
+        // 이미 동일 내용이 있어도 atomic overwrite로 안전하다.
+        if (snapshot.HadPrdFile && !string.IsNullOrEmpty(snapshot.PrdFilePath))
+        {
+            try
+            {
+                var prdPath = snapshot.PrdFilePath;
+                var prdDir = Path.GetDirectoryName(prdPath);
+                if (!string.IsNullOrEmpty(prdDir) && !Directory.Exists(prdDir))
+                    Directory.CreateDirectory(prdDir);
+                var tmpPrd = prdPath + $".tmp.{Guid.NewGuid():N}";
+                await File.WriteAllTextAsync(tmpPrd, snapshot.PrdContent ?? "", ct);
+                File.Move(tmpPrd, prdPath, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"PRD 복원 실패 ({snapshot.PrdFilePath}): {ex.Message}");
+            }
+        }
+
         return (true, "복원 완료");
     }
 
     private static async Task<RollbackSnapshot> BuildSnapshotAsync(
-        string phase, GitService git, string tasksFile, CancellationToken ct)
+        string phase, GitService git, string tasksFile, string prdFile, CancellationToken ct)
     {
         var (headExit, headOut) = await git.RunAsync(["rev-parse", "HEAD"], ct: ct);
         var head = headExit == 0 ? headOut.Trim() : "";
@@ -147,6 +172,14 @@ public sealed class RollbackService
             catch { had = false; content = null; }
         }
 
+        bool hadPrd = !string.IsNullOrEmpty(prdFile) && File.Exists(prdFile);
+        string? prdContent = null;
+        if (hadPrd)
+        {
+            try { prdContent = await File.ReadAllTextAsync(prdFile, ct); }
+            catch { hadPrd = false; prdContent = null; }
+        }
+
         return new RollbackSnapshot
         {
             Phase = phase,
@@ -156,6 +189,9 @@ public sealed class RollbackService
             HadTasksJson = had,
             TasksJsonContent = content,
             TasksFilePath = tasksFile,
+            HadPrdFile = hadPrd,
+            PrdContent = prdContent,
+            PrdFilePath = prdFile ?? "",
         };
     }
 

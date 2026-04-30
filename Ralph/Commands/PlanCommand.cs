@@ -64,7 +64,7 @@ public sealed class PlanCommand : ICommand
         var rollback = new RollbackService();
         try
         {
-            await rollback.CaptureBeforePlanAsync(git, _ctx.TasksFile, ct);
+            await rollback.CaptureBeforePlanAsync(git, _ctx.TasksFile, prdFile, ct);
         }
         catch (Exception ex)
         {
@@ -176,7 +176,7 @@ public sealed class PlanCommand : ICommand
         // --rollback 지원: plan 성공 직후 상태(post-plan) 스냅샷 저장.
         try
         {
-            await rollback.CaptureAfterPlanAsync(git, _ctx.TasksFile, ct);
+            await rollback.CaptureAfterPlanAsync(git, _ctx.TasksFile, prdFile, ct);
         }
         catch (Exception ex)
         {
