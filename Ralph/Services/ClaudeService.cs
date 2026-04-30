@@ -578,7 +578,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
     /// prompt를 32KB 청크 단위로 stdin에 비동기 write+flush 후 스트림을 닫습니다.
     /// 백그라운드 태스크로 실행해 stdout 읽기와 동시에 진행함으로써 대형 prompt 데드락을 방지합니다.
     /// </summary>
-    private static async Task WritePromptChunkedAsync(
+    internal static async Task WritePromptChunkedAsync(
         StreamWriter writer, string prompt, CancellationToken ct)
     {
         const int ChunkSize = 32 * 1024;
