@@ -2,7 +2,7 @@
 
 [English](README.md) | **한국어**
 
-PRD(Product Requirements Document)를 실행 가능한 plan으로 변환해 Claude Code로 실행하는 CLI 태스크 오케스트레이터 — 기본은 git worktree 기반 병렬, 의존성 추적 / exit code 기반 검증 / 충돌 인지 머지 / 누적 비용 게이트 / smoke test / 실시간 진행 모니터링 포함. .NET 8 기반 크로스플랫폼 (Windows, macOS, Linux). 현재 버전: **v1.21**.
+PRD(Product Requirements Document)를 실행 가능한 plan으로 변환해 Claude Code로 실행하는 CLI 태스크 오케스트레이터 — 기본은 git worktree 기반 병렬, 의존성 추적 / exit code 기반 검증 / 충돌 인지 머지 / 누적 비용 게이트 / smoke test / 실시간 진행 모니터링 포함. .NET 8 기반 크로스플랫폼 (Windows, macOS, Linux). 현재 버전: **v1.22**.
 
 **git worktree 기반 병렬 실행을 최초로 구현한 Ralph 변종.** 독립적인 기능들을 격리된 Claude Code 에이전트로 동시에 실행하고 자동으로 다시 머지한다.
 

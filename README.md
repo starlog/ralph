@@ -2,7 +2,7 @@
 
 **English** | [한국어](README.ko.md)
 
-A CLI task orchestrator that turns a PRD (Product Requirements Document) into an executable plan and runs it through Claude Code — in parallel by default, on git worktrees, with dependency tracking, exit-code-based verification, conflict-aware merging, cost budgets, smoke testing, and live progress monitoring. Built on .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.21**.
+A CLI task orchestrator that turns a PRD (Product Requirements Document) into an executable plan and runs it through Claude Code — in parallel by default, on git worktrees, with dependency tracking, exit-code-based verification, conflict-aware merging, cost budgets, smoke testing, and live progress monitoring. Built on .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.22**.
 
 The first Ralph implementation with **parallel git worktree execution**: independent features run concurrently as isolated Claude Code agents and are merged back automatically.
 

@@ -8,7 +8,7 @@ namespace Ralph.Commands;
 /// </summary>
 public static class DisplayHelpers
 {
-    public const string Version = "1.21";
+    public const string Version = "1.22";
 
     public static void ShowProgress(TaskManager tm, RalphLogger? logger)
     {
