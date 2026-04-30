@@ -41,6 +41,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Windows 콘솔(cp949)에서 git이 한국어 커밋 요약을 stdout에 쓸 때
+# "fatal: unknown write failure on standard output"으로 죽는 것을 방지.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding           = [System.Text.Encoding]::UTF8
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $Project   = Join-Path $ScriptDir 'Ralph\Ralph.csproj'
 $DistDir   = Join-Path $ScriptDir 'dist'
