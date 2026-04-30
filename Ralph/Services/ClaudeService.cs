@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Spectre.Console;
 
 namespace Ralph.Services;
@@ -22,9 +23,17 @@ public class ClaudeResult
 
     /// <summary>
     /// stderr/errorMessages에서 rate-limit/overloaded 신호를 감지한 결과. RunWithRetryAsync는
-    /// 이 플래그가 true이면 일반 retryDelay 대신 exponential backoff(60s × 2^attempt, 최대 600s)를 적용한다.
+    /// 이 플래그가 true이면 일반 retryDelay 대신 jittered backoff를 적용한다 — 베이스는
+    /// 서버가 준 RetryAfterSec(있으면) 또는 60s × 2^(attempt-2)(없으면), 최대 600s, jitter ×0.5~1.5.
     /// </summary>
     public bool RateLimited { get; init; }
+
+    /// <summary>
+    /// 서버가 알려준 retry-after 값(초). stream-json 에러 페이로드의 `retry_after`/`retryAfter` 필드,
+    /// 또는 stderr의 `Retry-After: N` 헤더에서 추출. RunWithRetryAsync는 이 값이 있으면 추측 기반
+    /// exponential backoff 대신 이 값을 backoff 베이스로 사용한다(jitter는 그대로 적용).
+    /// </summary>
+    public int? RetryAfterSec { get; init; }
 }
 
 public record TokenUsage(
@@ -202,6 +211,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         // Determine where streaming chunks go: log file or console
         var sink = output ?? Console.Out;
         var errorMessages = new StringBuilder();
+        int? capturedRetryAfter = null;
         var hasStreamDeltas = false;
         var lastDisplayedLen = 0;
         var streamSw = new Stopwatch();
@@ -236,8 +246,13 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                         : root.TryGetProperty("message", out var m) ? m.GetString()
                         : line;
                     errorMessages.AppendLine(errorMsg);
+
+                    // Server-provided retry-after를 우선 캡처 (error 객체 또는 root에서)
+                    if (capturedRetryAfter == null)
+                        capturedRetryAfter = ReadRetryAfterFromError(root);
+
                     logger?.Error($"Claude stream error: {errorMsg}");
-                    DebugLog($"error: {errorMsg}");
+                    DebugLog($"error: {errorMsg}{(capturedRetryAfter is { } ra ? $" (retry-after={ra}s)" : "")}");
                     if (output == null)
                     {
                         await StopSpinner();
@@ -422,6 +437,9 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         totalSw.Stop();
 
         var errMsgsText = errorMessages.ToString();
+        var rateLimited = process.ExitCode != 0 && IsRateLimitSignal(stderr, errMsgsText);
+        // JSON에서 못 뽑았으면 stderr/error 텍스트에서 한 번 더 시도 (HTTP `Retry-After: N` 헤더 등).
+        var retryAfter = capturedRetryAfter ?? (rateLimited ? ExtractRetryAfterSeconds(stderr, errMsgsText) : null);
         return new ClaudeResult
         {
             Success = process.ExitCode == 0,
@@ -431,7 +449,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             ExitCode = process.ExitCode,
             Usage = capturedUsage,
             Duration = totalSw.Elapsed,
-            RateLimited = process.ExitCode != 0 && IsRateLimitSignal(stderr, errMsgsText),
+            RateLimited = rateLimited,
+            RetryAfterSec = retryAfter,
         };
     }
 
@@ -452,6 +471,92 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             || combined.Contains("overloaded")
             || combined.Contains("resource_exhausted")
             || combined.Contains("quota exceeded");
+    }
+
+    /// <summary>
+    /// stream-json `error` 메시지의 `error.retry_after`/`error.retryAfter` 또는 root의 같은 필드에서
+    /// 서버가 알려준 retry-after(초)를 추출. 음수/0/말도 안 되는 큰 값(>1일)은 거부.
+    /// </summary>
+    internal static int? ReadRetryAfterFromError(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        if (root.TryGetProperty("error", out var errObj) && errObj.ValueKind == JsonValueKind.Object)
+        {
+            if (TryReadRetryAfter(errObj, out var s)) return s;
+        }
+        return TryReadRetryAfter(root, out var s2) ? s2 : null;
+    }
+
+    private static bool TryReadRetryAfter(JsonElement el, out int seconds)
+    {
+        seconds = 0;
+        foreach (var name in new[] { "retry_after", "retryAfter", "retry-after" })
+        {
+            if (!el.TryGetProperty(name, out var v)) continue;
+            if (v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) && d > 0 && d < 86400)
+            {
+                seconds = (int)Math.Ceiling(d);
+                return true;
+            }
+            if (v.ValueKind == JsonValueKind.String
+                && int.TryParse(v.GetString(), out var i) && i > 0 && i < 86400)
+            {
+                seconds = i;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static readonly Regex RetryAfterJsonRegex = new(
+        @"""retry[_-]?after""\s*:\s*(\d+(?:\.\d+)?)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex RetryAfterHeaderRegex = new(
+        @"retry-after\s*:\s*(\d+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// stderr/error 텍스트에서 retry-after 값을 휴리스틱으로 추출(JSON에서 못 뽑은 경우 fallback).
+    /// `"retry_after": N` JSON 단편, HTTP `Retry-After: N` 헤더 형식을 인식. 0/음수/하루 이상은 거부.
+    /// </summary>
+    internal static int? ExtractRetryAfterSeconds(string stderr, string errorMessages)
+    {
+        var combined = (stderr ?? "") + "\n" + (errorMessages ?? "");
+        if (string.IsNullOrWhiteSpace(combined)) return null;
+
+        var m = RetryAfterJsonRegex.Match(combined);
+        if (m.Success && double.TryParse(m.Groups[1].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var d)
+            && d > 0 && d < 86400)
+            return (int)Math.Ceiling(d);
+
+        m = RetryAfterHeaderRegex.Match(combined);
+        if (m.Success && int.TryParse(m.Groups[1].Value, out var i) && i > 0 && i < 86400)
+            return i;
+
+        return null;
+    }
+
+    /// <summary>
+    /// Rate-limit backoff 시간을 계산. 베이스는 서버가 준 retry-after가 있으면 그 값(최대 600s),
+    /// 없으면 기존 exponential 60s × 2^(attempt-2). 베이스에 random(0.5,1.5) jitter를 곱해 동기화된
+    /// herd 재진입을 흩트린다. 최종 결과는 [1, 600]초로 클램프.
+    /// </summary>
+    /// <param name="rng">[0,1) 난수 공급자(테스트용). null이면 Random.Shared.NextDouble.</param>
+    internal static int ComputeRateLimitBackoffSec(int attempt, int? retryAfterSec, Func<double>? rng = null)
+    {
+        var jitter01 = (rng ?? Random.Shared.NextDouble)();
+        if (jitter01 < 0) jitter01 = 0;
+        if (jitter01 >= 1) jitter01 = 0.999999;
+        var jitterMul = 0.5 + jitter01;
+
+        int baseSec = retryAfterSec is { } ra && ra > 0
+            ? Math.Min(600, ra)
+            : Math.Min(600, 60 * (int)Math.Pow(2, Math.Max(0, attempt - 2)));
+
+        var jittered = (int)Math.Round(baseSec * jitterMul);
+        return Math.Clamp(jittered, 1, 600);
     }
 
     public async Task<ClaudeResult> RunWithRetryAsync(
@@ -481,16 +586,20 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                     {prompt}
                     """;
 
-                // rate-limit 신호면 exponential backoff(60·120·240..., 최대 600초). 그 외엔 retryDelay.
+                // rate-limit 신호면 backoff. 서버가 retry-after를 줬으면 그 값을 베이스로, 없으면
+                // exponential(60·120·240..., 최대 600초). jitter(×0.5~1.5)로 동기화 herd 방지.
                 int delaySec;
                 if (lastResult.RateLimited)
                 {
-                    delaySec = Math.Min(600, 60 * (int)Math.Pow(2, attempt - 2));
+                    delaySec = ComputeRateLimitBackoffSec(attempt, lastResult.RetryAfterSec);
+                    var src = lastResult.RetryAfterSec is { } ra
+                        ? $"server retry-after={ra}s"
+                        : "exponential";
                     if (output == null)
                         AnsiConsole.MarkupLine(
-                            $"[yellow]Rate limit 감지 — exponential backoff {delaySec}s 대기 (attempt {attempt}/{maxRetries})[/]");
-                    logger?.Warn($"Rate-limit backoff {delaySec}s before attempt {attempt}/{maxRetries}");
-                    output?.WriteLine($"\n=== Rate-limit backoff {delaySec}s before attempt {attempt}/{maxRetries} ===");
+                            $"[yellow]Rate limit 감지 — backoff {delaySec}s ({src}, jittered) 대기 (attempt {attempt}/{maxRetries})[/]");
+                    logger?.Warn($"Rate-limit backoff {delaySec}s ({src}) before attempt {attempt}/{maxRetries}");
+                    output?.WriteLine($"\n=== Rate-limit backoff {delaySec}s ({src}, jittered) before attempt {attempt}/{maxRetries} ===");
                 }
                 else
                 {
