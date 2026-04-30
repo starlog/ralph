@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Ralph release publisher — builds self-contained binaries for each platform,
-# creates a matching git tag, pushes it, and publishes a GitHub Release using gh.
+# creates a matching git tag, pushes the current branch + tag, and publishes a
+# GitHub Release using gh.
 #
 # Usage:
 #   ./release-binary.sh                              # auto-bump from latest tag based on commit analysis
@@ -56,7 +57,7 @@ Options:
   --draft            Publish as draft release
   --prerelease       Mark as pre-release
   --no-tag           Skip git tag creation and push (tag must already exist)
-  --no-push          Create tag locally but don't push it
+  --no-push          Create tag locally but don't push (branch or tag)
   --allow-dirty      Allow tagging when the working tree has uncommitted changes
   --skip-build       Skip dotnet publish; reuse existing dist/ artifacts
   --dry-run          Build & package only; no tag, no push, no release
@@ -274,6 +275,11 @@ if [[ $CREATE_TAG -eq 1 && $DRY_RUN -eq 0 ]]; then
     fi
 
     if [[ $PUSH_TAG -eq 1 ]]; then
+        # 브랜치를 먼저 푸시한다 — 태그가 가리키는 커밋이 origin에 이미 있어야
+        # 태그 푸시가 깔끔하다. version-bump 커밋이 없으면 no-op.
+        log "Pushing current branch to origin"
+        git push
+
         if git ls-remote --tags origin "refs/tags/$VERSION" 2>/dev/null | grep -q "refs/tags/$VERSION"; then
             log "Tag $VERSION already on origin; skipping push"
         else

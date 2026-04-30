@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
     Ralph release publisher (PowerShell). Builds self-contained binaries for each
-    platform, creates a matching git tag, pushes it, and publishes a GitHub Release
-    using the `gh` CLI.
+    platform, creates a matching git tag, pushes the current branch + tag, and
+    publishes a GitHub Release using the `gh` CLI.
 
 .DESCRIPTION
     Mirrors release-binary.sh. When -Version is omitted, the next version is
@@ -248,6 +248,12 @@ if (-not $NoTag -and -not $DryRun) {
     }
 
     if (-not $NoPush) {
+        # 브랜치를 먼저 푸시한다 — 태그가 가리키는 커밋이 origin에 이미 있어야
+        # 태그 푸시가 깔끔하다. version-bump 커밋이 없으면 no-op.
+        Write-Step "Pushing current branch to origin"
+        git push
+        if ($LASTEXITCODE -ne 0) { Fail "git push (branch) failed" }
+
         $remoteTags = git ls-remote --tags origin "refs/tags/$Version" 2>$null
         if ($remoteTags -and $remoteTags -match "refs/tags/$Version") {
             Write-Step "Tag $Version already on origin; skipping push"
