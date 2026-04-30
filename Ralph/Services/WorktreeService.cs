@@ -6,9 +6,19 @@ using Spectre.Console;
 
 namespace Ralph.Services;
 
+public enum MergeFailureKind
+{
+    None,
+    MergeConflict,
+    RebaseConflict,
+    UntrackedOverwrite,
+    Other,
+}
+
 public class MergeResult
 {
     public bool Success { get; set; }
+    public MergeFailureKind FailureKind { get; set; } = MergeFailureKind.None;
     public List<string>? ConflictFiles { get; set; }
     public string? ErrorMessage { get; set; }
 }
@@ -189,7 +199,12 @@ public class WorktreeService
         {
             var (checkoutExit, checkoutOut) = await _git.RunAsync(["checkout", targetBranch], ct: ct);
             if (checkoutExit != 0)
-                return new MergeResult { Success = false, ErrorMessage = $"Failed to checkout {targetBranch}: {checkoutOut}" };
+                return new MergeResult
+                {
+                    Success = false,
+                    FailureKind = MergeFailureKind.Other,
+                    ErrorMessage = $"Failed to checkout {targetBranch}: {checkoutOut}",
+                };
         }
 
         // merge 실행
@@ -267,9 +282,16 @@ public class WorktreeService
         var conflictFiles = await GetConflictFilesAsync(ct);
         logger.Error($"Merge conflict for {branchName}: {output}");
 
+        // untracked overwrite로 시작했지만 재시도까지 실패한 경우엔 unmerged 파일이 없을 수 있다 —
+        // 그럴 땐 UntrackedOverwrite로 라벨링, 그 외엔 일반 MergeConflict.
+        var failureKind = (untrackedBlockers.Count > 0 && conflictFiles.Count == 0)
+            ? MergeFailureKind.UntrackedOverwrite
+            : MergeFailureKind.MergeConflict;
+
         return new MergeResult
         {
             Success = false,
+            FailureKind = failureKind,
             ConflictFiles = conflictFiles,
             ErrorMessage = output
         };
@@ -421,10 +443,12 @@ public class WorktreeService
     /// 자동 생성 파일 등)에 불필요한 충돌이 발생합니다. 머지 직전에 rebase하면 LCA가
     /// 현재 base가 되어 깨끗한 fast-forward로 머지됩니다.
     ///
-    /// rebase가 충돌하면 abort로 worktree를 깨끗하게 복원하고 false를 반환합니다 —
-    /// 호출자는 기존 3-way merge 경로로 fallback해 동작 회귀를 막을 수 있습니다.
+    /// rebase가 충돌하면 abort로 worktree를 깨끗하게 복원하고
+    /// FailureKind=RebaseConflict + ConflictFiles로 분류해 반환합니다.
+    /// abort 자체가 실패하면 worktree가 더러운 상태로 남았다는 뜻이므로 FailureKind=Other.
+    /// 호출자는 분류에 따라 task만 실패 처리하거나 batch를 중단합니다 (silent 3-way fallback 없음).
     /// </summary>
-    public async Task<bool> AdvanceWorktreeOntoBaseAsync(
+    public async Task<MergeResult> AdvanceWorktreeOntoBaseAsync(
         string taskId, string baseRef, RalphLogger? logger = null, CancellationToken ct = default)
     {
         logger ??= RalphLogger.Null;
@@ -436,20 +460,55 @@ public class WorktreeService
         if (exitCode == 0)
         {
             logger.Info($"[merge:advance] {taskId} rebased onto current {baseRef}");
-            return true;
+            return new MergeResult { Success = true };
         }
 
+        // 충돌 파일을 abort 전에 캡처 — abort 후 unmerged index가 비워진다.
+        var conflictFiles = await GetRebaseConflictFilesAsync(worktreePath, ct);
+
         logger.Warn(
-            $"[merge:advance] {taskId} rebase 실패 — 3-way merge로 fallback. " +
+            $"[merge:advance] {taskId} rebase 실패 — RebaseConflict로 분류, abort 후 task만 실패 처리. " +
             $"detail: {output.Trim()}");
 
-        // rebase 중단으로 worktree를 깨끗한 상태로 복원 (다음 단계의 직접 머지가 가능하도록)
         var (abortExit, abortOut) = await _git.RunAsync(
             ["rebase", "--abort"], worktreePath, ct);
         if (abortExit != 0)
-            logger.Warn($"[merge:advance] {taskId} rebase --abort도 실패: {abortOut.Trim()}");
+        {
+            logger.Error(
+                $"[merge:advance] {taskId} rebase --abort 실패: {abortOut.Trim()}. " +
+                $"worktree가 더러운 상태일 수 있습니다.");
+            return new MergeResult
+            {
+                Success = false,
+                FailureKind = MergeFailureKind.Other,
+                ConflictFiles = conflictFiles,
+                ErrorMessage = $"rebase abort failed: {abortOut.Trim()}",
+            };
+        }
 
-        return false;
+        return new MergeResult
+        {
+            Success = false,
+            FailureKind = MergeFailureKind.RebaseConflict,
+            ConflictFiles = conflictFiles,
+            ErrorMessage = output.Trim(),
+        };
+    }
+
+    /// <summary>
+    /// rebase 도중 unmerged 상태인 파일 목록을 캡처합니다 (abort 호출 전에 사용).
+    /// diff가 실패해도 빈 리스트로 안전하게 반환 — 진단 정보 누락만 발생.
+    /// </summary>
+    private async Task<List<string>> GetRebaseConflictFilesAsync(
+        string worktreePath, CancellationToken ct)
+    {
+        var (_, output) = await _git.RunAsync(
+            ["diff", "--name-only", "--diff-filter=U"], worktreePath, ct);
+        return output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(f => f.Trim())
+            .Where(f => f.Length > 0)
+            .ToList();
     }
 
     /// <summary>

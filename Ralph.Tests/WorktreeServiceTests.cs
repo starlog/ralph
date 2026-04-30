@@ -229,9 +229,10 @@ public class WorktreeServiceTests
         await fix.WriteFileAsync("main-only.txt", "main content");
         await fix.CommitAllAsync("main advance");
 
-        var ok = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
+        var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
 
-        Assert.True(ok);
+        Assert.True(result.Success);
+        Assert.Equal(MergeFailureKind.None, result.FailureKind);
         Assert.True(fix.FileExistsInWorktree("t1", "wt-only.txt"));
         Assert.True(fix.FileExistsInWorktree("t1", "main-only.txt"));
     }
@@ -252,9 +253,11 @@ public class WorktreeServiceTests
         await fix.WriteFileAsync("a.txt", "MAIN-VERSION");
         await fix.CommitAllAsync("main change");
 
-        var ok = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
+        var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
 
-        Assert.False(ok);
+        Assert.False(result.Success);
+        Assert.Equal(MergeFailureKind.RebaseConflict, result.FailureKind);
+        Assert.Contains("a.txt", result.ConflictFiles ?? new());
         // rebase --abort로 worktree가 깨끗한 상태로 복원되었는지 확인
         Assert.Equal("WT-VERSION", fix.ReadInWorktree("t1", "a.txt"));
     }
@@ -410,9 +413,10 @@ public class WorktreeServiceTests
         await fix.CommitInWorktreeAsync("t1", "wt change");
 
         // main 이동 없음 — rebase는 이미 up-to-date로 즉시 성공
-        var ok = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
+        var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
 
-        Assert.True(ok);
+        Assert.True(result.Success);
+        Assert.Equal(MergeFailureKind.None, result.FailureKind);
         Assert.True(fix.FileExistsInWorktree("t1", "wt.txt"));
     }
 

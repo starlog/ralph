@@ -66,6 +66,8 @@ internal sealed class MergeOrchestrator
         AnsiConsole.MarkupLine(
             $"\n[blue]메인 브랜치에 병합 중...[/] [dim]({taskIds.Count}개 태스크)[/]");
 
+        // fix2 #5: rebase 충돌로 실패한 task는 done 마킹에서 제외하고 batch는 계속.
+        var rebaseFailedTasks = new HashSet<string>();
         var mergeIdx = 0;
         foreach (var taskId in taskIds)
         {
@@ -111,7 +113,37 @@ internal sealed class MergeOrchestrator
             }
 
             // 같은 batch의 앞선 머지로 baseBranch가 advance된 경우 충돌 감소를 위해 rebase.
-            await _worktree.AdvanceWorktreeOntoBaseAsync(taskId, baseBranch, _logger, ct);
+            // fix2 #5: rebase 충돌은 silent fallback 없이 RebaseConflict로 분류해 task만 실패.
+            var advance = await _worktree.AdvanceWorktreeOntoBaseAsync(
+                taskId, baseBranch, _logger, ct);
+
+            if (!advance.Success && advance.FailureKind == MergeFailureKind.RebaseConflict)
+            {
+                PrintRebaseConflict(taskId, baseBranch, advance);
+                _logger.Error(
+                    $"[merge:advance] {taskId} RebaseConflict — task 실패 마킹, batch 진행 계속. " +
+                    $"files=[{string.Join(",", advance.ConflictFiles ?? new())}]");
+
+                AnsiConsole.MarkupLine(
+                    $"  [red]✗[/] {Markup.Escape(taskId)} rebase 충돌 (자세한 내용은 stderr 확인)");
+
+                if (!await _worktree.CleanupWorktreeAsync(taskId, _logger, ct))
+                    cleanupFailures++;
+                rebaseFailedTasks.Add(taskId);
+                _logger.TaskEnd(taskId, "rebase-conflict");
+                continue;
+            }
+
+            if (!advance.Success && advance.FailureKind == MergeFailureKind.Other)
+            {
+                AnsiConsole.MarkupLine(
+                    $"  [red]✗[/] {Markup.Escape(taskId)} rebase abort 실패 — batch 중단 " +
+                    $"(worktree가 더러운 상태일 수 있음)");
+                _logger.Error(
+                    $"[merge:advance] {taskId} abort 실패 — batch 중단. " +
+                    $"detail: {advance.ErrorMessage}");
+                return 1;
+            }
 
             var mergeResult = await _worktree.MergeWorktreeAsync(
                 taskId, baseBranch, primaryStrategy, _logger, ct);
@@ -141,13 +173,14 @@ internal sealed class MergeOrchestrator
             }
         }
 
-        // 4. 상태 업데이트 (thread-safe).
+        // 4. 상태 업데이트 (thread-safe). rebase 충돌 task는 머지 안 됐으므로 done 마킹 제외.
         // state.json 쓰기 실패 시 silent 진행하지 않고 즉시 batch를 중단한다.
         // 머지는 이미 base에 반영된 상태이므로, done 마킹이 누락된 채 다음 batch로 넘어가면
         // 다음 --run에서 동일 task가 재dispatch되어 worktree 충돌이 발생한다 (fix1.md 1번).
+        var mergedTasks = taskIds.Where(id => !rebaseFailedTasks.Contains(id)).ToList();
         var marked = new List<string>();
-        var pending = new List<string>(taskIds);
-        foreach (var taskId in taskIds)
+        var pending = new List<string>(mergedTasks);
+        foreach (var taskId in mergedTasks)
         {
             try
             {
@@ -174,7 +207,39 @@ internal sealed class MergeOrchestrator
         if (await RunPostMergeSmokeTestAsync(preMergeSha, ct) is { } smokeFail)
             return smokeFail;
 
-        return 0;
+        // rebase 충돌이 한 건이라도 있었으면 batch 부분 성공 — exit 1로 호출자에 알림.
+        return rebaseFailedTasks.Count > 0 ? 1 : 0;
+    }
+
+    /// <summary>
+    /// fix2 #5: rebase 충돌을 stderr로 사람이 읽기 좋게 출력 (한국어, locale-safe).
+    /// stdout(AnsiConsole)에는 한 줄 요약만 남기고 자세한 내용은 stderr로 분리.
+    /// </summary>
+    private static void PrintRebaseConflict(
+        string taskId, string baseBranch, MergeResult advance)
+    {
+        var branch = $"ralph/{taskId}";
+        var files = advance.ConflictFiles ?? new List<string>();
+
+        var err = Console.Error;
+        err.WriteLine();
+        err.WriteLine($"[merge:advance] {taskId}: rebase 단계 충돌 (RebaseConflict)");
+        err.WriteLine($"  base: {baseBranch} → {branch}");
+        if (files.Count > 0)
+        {
+            err.WriteLine($"  충돌 파일 ({files.Count}건):");
+            foreach (var f in files)
+                err.WriteLine($"    - {f}");
+        }
+        else
+        {
+            err.WriteLine("  충돌 파일: (목록 캡처 실패)");
+        }
+        err.WriteLine("  조치: 이 task만 실패 처리하고 batch의 다른 독립 task는 계속 진행합니다.");
+        err.WriteLine($"  재실행: ralph --task {taskId} --force");
+        err.WriteLine($"  수동 머지: git checkout {branch} && git rebase {baseBranch}");
+        if (!string.IsNullOrEmpty(advance.ErrorMessage))
+            err.WriteLine($"  detail: {advance.ErrorMessage}");
     }
 
     /// <summary>
