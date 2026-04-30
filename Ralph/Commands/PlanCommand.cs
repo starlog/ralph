@@ -29,6 +29,15 @@ public sealed class PlanCommand : ICommand
             return 1;
         }
 
+        // --run과 동일하게 세션 시작 시 배너 + 사용 모델을 출력한다. plan은 reasoning-heavy
+        // 라 default가 opus이고 비용 차이가 크기 때문에 어떤 모델로 plan을 만드는지 가시화한다.
+        DisplayHelpers.ShowBanner();
+        var planModel = _ctx.ResolveModel("opus");
+        var planModelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(planModel)} [dim]({planModelSource})[/]");
+        AnsiConsole.MarkupLine($"[cyan]Input:[/]  {Markup.Escape(prdFile)}");
+        AnsiConsole.MarkupLine($"[cyan]Output:[/] {Markup.Escape(_ctx.TasksFile)}");
+
         // 기존 tasks.json 백업
         if (File.Exists(_ctx.TasksFile))
         {
@@ -43,6 +52,7 @@ public sealed class PlanCommand : ICommand
         var claude = _ctx.NewClaudeService(tm: null);
         var git = new GitService();
         using var logger = new RalphLogger();
+        logger.Info($"Model: {planModel} ({planModelSource})");
 
         if (!await git.IsRepoInitializedAsync(ct))
             await git.InitAsync(logger, ct);
@@ -64,7 +74,7 @@ public sealed class PlanCommand : ICommand
         var generator = new PlanGenerator();
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var result = await generator.GenerateAsync(
-            prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ResolveModel("opus"), logger,
+            prdFile, schemaContent, _ctx.TasksFile, claude, planModel, logger,
             categories: configuredCategories, ct: ct);
 
         if (result != 0)
@@ -130,7 +140,7 @@ public sealed class PlanCommand : ICommand
                 currentInvalidJson, report.Errors, correctionAttempt, maxCorrectionAttempts);
 
             var fixResult = await generator.GenerateAsync(
-                prdFile, schemaContent, _ctx.TasksFile, claude, _ctx.ResolveModel("opus"), logger,
+                prdFile, schemaContent, _ctx.TasksFile, claude, planModel, logger,
                 categories: configuredCategories,
                 correctionContext: correctionContext, ct: ct);
 
@@ -170,7 +180,7 @@ public sealed class PlanCommand : ICommand
 
             if (_ctx.LlmCritique)
             {
-                await RunLlmCritiqueAsync(prdFile, critiqueTm, _ctx.ResolveModel("opus"), logger, ct);
+                await RunLlmCritiqueAsync(prdFile, critiqueTm, planModel, logger, ct);
             }
         }
         catch (Exception ex)

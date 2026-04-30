@@ -160,8 +160,8 @@ fi
 # Files that display the current version and must be kept in sync:
 #   - Ralph/Commands/DisplayHelpers.cs  (const Version, without the "v" prefix)
 #   - CLAUDE.md                          ("Current version: **vX.Y**.")
-#   - README.md                          ("Current version: **vX.Y**.")
-#   - README.ko.md                       ("현재 버전: **vX.Y**.")
+#   - README.md                          ("현재 버전: **vX.Y**.")
+#   - README.en.md                       ("Current version: **vX.Y**.")
 update_version_refs() {
     local new_version="$1"
     local stripped="${new_version#v}"
@@ -182,10 +182,10 @@ Bump the Ralph project version to ${new_version}. Make exactly these edits and n
    In the "## Project Overview" paragraph, replace the existing "Current version: **vX.Y**." sentence so it reads "Current version: **${new_version}**.".
 
 3. File: README.md
-   On the first paragraph after the H1, replace the existing "Current version: **vX.Y**." sentence so it reads "Current version: **${new_version}**.".
-
-4. File: README.ko.md
    On the first paragraph after the H1, replace the existing "현재 버전: **vX.Y**." sentence so it reads "현재 버전: **${new_version}**.".
+
+4. File: README.en.md
+   On the first paragraph after the H1, replace the existing "Current version: **vX.Y**." sentence so it reads "Current version: **${new_version}**.".
 
 Use the Edit tool for each file. Do not modify any other lines, files, or formatting. Do not create new files. Do not run git or any other shell commands.
 EOF
@@ -207,7 +207,7 @@ if [[ $CREATE_TAG -eq 1 && $DRY_RUN -eq 0 ]]; then
             "Ralph/Commands/DisplayHelpers.cs"
             "CLAUDE.md"
             "README.md"
-            "README.ko.md"
+            "README.en.md"
         )
         if ! git diff --quiet -- "${VERSION_FILES[@]}"; then
             log "Committing version bump to $VERSION"
@@ -243,13 +243,13 @@ ${commits}
 
 Output exactly this Markdown structure and nothing else (no preamble, no code fences, no trailing text):
 
-## What's Changed
-
-<2-5 bullet points summarising user-facing changes in English. Group related commits. Drop noise like the version-bump / release commits ("릴리스: 버전을 ..."). Each bullet starts with a past-tense verb.>
-
 ## 변경 사항
 
-<Same bullets translated into natural Korean. Match the count and ordering of the English bullets.>
+<2-5 bullet points summarising user-facing changes in natural Korean. Group related commits. Drop noise like the version-bump / release commits ("릴리스: 버전을 ..."). Each bullet starts with a past-tense verb.>
+
+## What's Changed
+
+<Same bullets translated into English. Match the count and ordering of the Korean bullets. Each bullet starts with a past-tense verb.>
 
 **Full Changelog**: https://github.com/${REPO}/compare/${prev_tag}...${version}
 EOF

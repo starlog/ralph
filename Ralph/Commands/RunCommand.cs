@@ -22,10 +22,13 @@ public sealed class RunCommand : ICommand
         using var logger = new RalphLogger();
         logger.Info($"Tasks file: {_ctx.TasksFile}");
 
+        // 모든 세션 출력은 배너 아래에 모인다 — 배너 먼저, 그 다음 Model/그래프 스캔/실행 모드/진행률.
+        DisplayHelpers.ShowBanner();
+
         // Model 결정 + 표시 — 사용자가 --model을 안 줬을 때 default가 opus 였다가 sonnet으로
         // 바뀌어 비용/품질에 직접 영향이 가므로 실행 시작 시 어떤 모델을 쓰는지 명확히 알린다.
         var model = _ctx.ResolveModel("sonnet");
-        var modelSource = string.IsNullOrEmpty(model) ? "default" : "--model";
+        var modelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
         AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(model)} [dim]({modelSource})[/]");
         logger.Info($"Model: {model} ({modelSource})");
 

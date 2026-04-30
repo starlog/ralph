@@ -25,18 +25,8 @@ public partial class PlanGenerator
     {
         categories ??= DefaultCategories;
         var isCorrection = !string.IsNullOrEmpty(correctionContext);
-        // Header
-        AnsiConsole.WriteLine();
-        var headerTitle = isCorrection
-            ? "[yellow]RALPH - Plan Generator (Correcting validation errors)[/]"
-            : "[green]RALPH - Plan Generator[/]";
-        AnsiConsole.Write(new Rule(headerTitle).RuleStyle("blue"));
-        AnsiConsole.MarkupLine($"[cyan]PRD File:[/] {Markup.Escape(prdFile)}");
-        AnsiConsole.MarkupLine($"[cyan]Model:[/]    {Markup.Escape(model)}");
-        AnsiConsole.MarkupLine($"[cyan]Output:[/]   {Markup.Escape(tasksFile)}");
-        AnsiConsole.Write(new Rule().RuleStyle("blue"));
         AnsiConsole.MarkupLine(isCorrection
-            ? "\n[cyan]Re-generating task plan with Claude Code (correction pass)...[/]\n"
+            ? "\n[yellow]Re-generating task plan with Claude Code (correction pass)...[/]\n"
             : "\n[cyan]Generating task plan with Claude Code...[/]\n");
 
         // Build prompt with the caller-supplied (typically relative) paths.

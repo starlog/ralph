@@ -10,7 +10,7 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 
 - **Ralph/** — .NET 8 C# project producing a self-contained single-file binary.
   - `Program.cs` — entrypoint. Sets UTF-8 console, wires Ctrl+C → CancellationToken, runs `DependencyChecker` for `claude` / `git`, parses argv via `ArgParser`, dispatches via `CommandDispatcher`.
-  - `Commands/` — one ICommand per CLI subcommand (`PlanCommand`, `RunCommand`, `DryRunCommand`, `SingleTaskCommand`, `InteractiveCommand`, `ListCommand`, `GraphCommand`, `PromptsCommand`, `ShowPromptCommand`, `StatusCommand`, `LogsCommand`, `CostCommand`, `ResetCommand`, `ValidateCommand`, `CritiqueCommand`, `WorktreeCleanupCommand`, `HelpCommand`, ...) plus `ArgParser` / `CommandDispatcher` / `CommandContext` / `DependencyChecker` / `DisplayHelpers` / `SchemaLoader`.
+  - `Commands/` — one ICommand per CLI subcommand (`PlanCommand`, `RunCommand`, `DryRunCommand`, `SingleTaskCommand`, `InteractiveCommand`, `ListCommand`, `GraphCommand`, `PromptsCommand`, `ShowPromptCommand`, `StatusCommand`, `LogsCommand`, `CostCommand`, `ResetCommand`, `ValidateCommand`, `CritiqueCommand`, `WorktreeCleanupCommand`, `HelpCommand`, `VersionCommand`, ...) plus `ArgParser` / `CommandDispatcher` / `CommandContext` / `DependencyChecker` / `DisplayHelpers` / `SchemaLoader`. `DisplayHelpers.ShowBanner` is invoked once per session by the entry command (`--plan` / `--run` / `--status` / etc.), so progress lines, model info, and graph scans all appear under a single banner.
   - `Services/` — orchestration and integration code (table below).
   - `Models/` — `TasksFile.cs` (POCOs for tasks.json) and `RalphJsonContext.cs` (System.Text.Json source-gen context for AOT-friendly serialization).
 - **Ralph.Tests/** — xUnit test project (worktree integration tests, plan validator tests, parallel batch transition tests, etc.).
@@ -24,7 +24,7 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 |---|---|
 | `IAgentRunner.cs` | Abstraction over an LLM agent runner (Claude). Allows tests/mocks to substitute the real CLI. |
 | `ClaudeService.cs` | Runs Claude Code with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY), per-call timeout. Implements `IAgentRunner`. |
-| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus model) to produce tasks.json. Atomic write (tmp + rename). Honors `workflow.categories` for non-default stage patterns. Exposes `BuildCorrectionPrompt` for the validator-driven correction loop (re-sends invalid tasks.json + errors to Claude, up to 2 attempts). |
+| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus by default) to produce tasks.json. Atomic write (tmp + rename). Honors `workflow.categories` for non-default stage patterns. Passes the caller's relative paths through unchanged and instructs the planner to emit only relative paths in task prompts — embedding absolute planner-host paths makes worktree-executed tasks write outside their worktree and fail verification. Exposes `BuildCorrectionPrompt` for the validator-driven correction loop (re-sends invalid tasks.json + errors to Claude, up to 2 attempts). |
 | `PlanValidator.cs` | Validates tasks.json: cycles, dangling deps, duplicate IDs, file overlaps, sensitive paths, eval-string body checks. `errors` trigger the auto-correction loop in `PlanCommand`; `warnings` pass through. |
 | `PrdCritic.cs` | Static analysis of tasks.json — finds parallelism gaps, missing verification commands, dependency oddities. Backs `--critique`. |
 | `LlmCritic.cs` | Optional LLM-driven critique of the generated plan against the original PRD. Triggered by `--llm-critique` after `--plan`. |
@@ -117,6 +117,7 @@ ralph --interactive              # Run tasks interactively
 ralph --prompts                  # Show all task prompts
 ralph --reset                    # Reset all tasks to pending
 ralph --worktree-cleanup         # Clean up stale worktrees
+ralph --version                  # Print ralph version (alias: -v)
 ```
 
 ## Dependencies

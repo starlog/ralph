@@ -10,6 +10,16 @@ public static class DisplayHelpers
 {
     public const string Version = "1.22";
 
+    /// <summary>
+    /// 세션 시작 시 한 번 출력하는 ralph 버전 배너. 이후의 Model/그래프 스캔/실행 모드/
+    /// 진행률 라인이 모두 이 배너 아래에 모이도록, 배너는 더 이상 <see cref="ShowProgress"/>가
+    /// 직접 그리지 않는다 (ShowProgress는 SequentialRunner 루프 안에서 반복 호출되기 때문).
+    /// </summary>
+    public static void ShowBanner()
+    {
+        AnsiConsole.Write(new Rule($"[green]RALPH - Task Orchestrator[/] [cyan]v{Version}[/]").RuleStyle("grey"));
+    }
+
     public static void ShowProgress(TaskManager tm, RalphLogger? logger)
     {
         var total = tm.Data.Tasks.Count;
@@ -18,7 +28,6 @@ public static class DisplayHelpers
         var blocked = pending.Count(t => !tm.CheckDependencies(t.Id, out _));
         var ready = pending.Count - blocked;
 
-        AnsiConsole.Write(new Rule($"[green]RALPH - Task Orchestrator[/] [cyan]v{Version}[/]").RuleStyle("grey"));
         AnsiConsole.MarkupLine(
             $"Total: {total} | [green]Done: {done}[/] | [yellow]Ready: {ready}[/] | [red]Blocked: {blocked}[/]");
         if (ready > 1)
