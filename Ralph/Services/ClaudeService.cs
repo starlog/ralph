@@ -91,6 +91,10 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
     /// 그대로 propagate하므로 사용자 Ctrl+C와 timeout이 구분됩니다.
     /// </summary>
     public int? TaskTimeoutSec { get; set; }
+
+    /// <summary>테스트 전용: Task.Delay 대신 주입할 지연 함수. null이면 실제 Task.Delay 사용.</summary>
+    internal Func<int, CancellationToken, Task>? DelayOverride;
+
     private static string BuildArgsSummary(ProcessStartInfo psi)
     {
         var args = string.Join(" ", psi.ArgumentList.Select(a =>
@@ -117,7 +121,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         Console.Write("\r" + new string(' ', maxLen + 2) + "\r");
     }
 
-    public async Task<ClaudeResult> RunStreamAsync(
+    public virtual async Task<ClaudeResult> RunStreamAsync(
         string prompt,
         string? model = null,
         string? workingDirectory = null,
@@ -775,7 +779,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                     output?.WriteLine($"\n=== Retry {attempt}/{maxRetries} (previous exit={lastResult.ExitCode}) ===");
                 }
                 logger?.Info($"분류={prevKind}, backoff={delaySec}초({backoffSource}), 시도{attempt}/{maxRetries}");
-                await Task.Delay(delaySec * 1000, ct);
+                var delayMs = delaySec * 1000;
+                await (DelayOverride?.Invoke(delayMs, ct) ?? Task.Delay(delayMs, ct));
             }
             else
             {
