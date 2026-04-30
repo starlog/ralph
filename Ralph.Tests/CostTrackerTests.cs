@@ -12,21 +12,17 @@ public class CostTrackerTests : IDisposable
     {
         _tempDir = Path.Combine(Path.GetTempPath(), $"ralph-cost-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);
-        CostTracker.SetLogDirForTesting(_tempDir);
-        CostTracker.ResetForTesting();
     }
 
     public void Dispose()
     {
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.Delete(_tempDir, recursive: true); } catch { }
     }
 
     [Fact]
     public async Task RecordAsync_with_null_result_writes_placeholder_and_does_not_increment()
     {
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         await cost.RecordAsync("missing-task", "opus", result: null);
 
         var total = await cost.GetTotalUsdAsync();
@@ -39,7 +35,7 @@ public class CostTrackerTests : IDisposable
     [Fact]
     public async Task RecordAsync_with_usage_increments_cumulative_total()
     {
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         var usage = new TokenUsage(1_000_000, 1_000_000, 0, 0); // opus: $15 + $75 = $90
         var result = new ClaudeResult { Success = true, Usage = usage, Duration = TimeSpan.FromSeconds(2) };
         await cost.RecordAsync("t1", "opus", result);
@@ -110,7 +106,7 @@ public class CostTrackerTests : IDisposable
     [Fact]
     public async Task PrintSummary_separates_conflict_section_when_conflict_entries_exist()
     {
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         var usage = new TokenUsage(1_000_000, 1_000_000, 0, 0); // opus: $90 per call
         var result = new ClaudeResult { Success = true, Usage = usage, Duration = TimeSpan.FromSeconds(1) };
 
@@ -130,7 +126,7 @@ public class CostTrackerTests : IDisposable
     [Fact]
     public async Task PrintSummary_excludes_conflict_rows_from_top_task_table()
     {
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         var usage = new TokenUsage(1_000_000, 1_000_000, 0, 0);
         var result = new ClaudeResult { Success = true, Usage = usage, Duration = TimeSpan.FromSeconds(1) };
 
@@ -153,7 +149,7 @@ public class CostTrackerTests : IDisposable
     [Fact]
     public async Task PrintSummary_omits_conflict_section_when_no_conflict_entries()
     {
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         var usage = new TokenUsage(1_000_000, 1_000_000, 0, 0);
         var result = new ClaudeResult { Success = true, Usage = usage, Duration = TimeSpan.FromSeconds(1) };
 

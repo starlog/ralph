@@ -15,14 +15,10 @@ public class CostTrackerConcurrencyTests : IDisposable
         _output = output;
         _tempDir = Path.Combine(Path.GetTempPath(), $"ralph-conc-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);
-        CostTracker.SetLogDirForTesting(_tempDir);
-        CostTracker.ResetForTesting();
     }
 
     public void Dispose()
     {
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.Delete(_tempDir, recursive: true); } catch { }
     }
 
@@ -42,7 +38,7 @@ public class CostTrackerConcurrencyTests : IDisposable
 
         // 단일 CostTracker 인스턴스를 모든 writer가 공유 — 프로덕션 동작 (CommandContext.Cost)과 일치.
         // 인스턴스별 _writeLock이 라인 손실을 막는 단일 직렬화 지점이다.
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
 
         var tasks = Enumerable.Range(0, writers).Select(async i =>
         {
@@ -60,7 +56,7 @@ public class CostTrackerConcurrencyTests : IDisposable
 
         await Task.WhenAll(tasks);
 
-        var path = new CostTracker().LogFilePath;
+        var path = new CostTracker(_tempDir).LogFilePath;
         Assert.True(File.Exists(path), $"cost.jsonl 미생성: {path}");
 
         var lines = await File.ReadAllLinesAsync(path);

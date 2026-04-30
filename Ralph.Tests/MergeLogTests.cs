@@ -40,16 +40,12 @@ public class MergeLogTests : IDisposable
 
         Directory.SetCurrentDirectory(_repoDir);
 
-        CostTracker.SetLogDirForTesting(Path.Combine(_repoDir, ".ralph-logs"));
-        CostTracker.ResetForTesting();
         _logger = new RalphLogger(Path.Combine(_repoDir, ".ralph-logs"));
     }
 
     public void Dispose()
     {
         try { _logger.Dispose(); } catch { }
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.SetCurrentDirectory(_origCwd); } catch { }
         try { Directory.Delete(_root, recursive: true); } catch { }
     }

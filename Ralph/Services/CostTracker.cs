@@ -82,10 +82,6 @@ public sealed class CostTracker
     // P1-2: hung 디스크에서 finally 블록이 무한정 막히지 않도록 timeout 가드.
     private static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
 
-    // 레거시 테스트 호환용: SetLogDirForTesting이 설정한 ambient override.
-    // 신규 코드는 생성자 인자로 logDir을 명시 — fix1-test 태스크가 모든 호출지를 옮기면 제거 예정.
-    private static string? _logDirOverride;
-
     private readonly string _logDir;
 
     // 인스턴스 단위 누적 캐시. 첫 호출 시 cost.jsonl로부터 hydrate.
@@ -103,12 +99,12 @@ public sealed class CostTracker
     private long _failureCount;
 
     /// <summary>
-    /// 단일 CostTracker 인스턴스 생성. logDir이 null이면 SetLogDirForTesting override를 거쳐
-    /// 최종적으로 RalphPaths.LogDir로 fallback. 한 세션은 CommandContext.Cost로 인스턴스를 공유한다.
+    /// 단일 CostTracker 인스턴스 생성. logDir이 null이면 RalphPaths.LogDir로 fallback.
+    /// 한 세션은 CommandContext.Cost로 인스턴스를 공유한다.
     /// </summary>
     public CostTracker(string? logDir = null)
     {
-        _logDir = logDir ?? _logDirOverride ?? RalphPaths.LogDir;
+        _logDir = logDir ?? RalphPaths.LogDir;
     }
 
     public string LogFilePath => Path.Combine(_logDir, RalphPaths.CostLedgerFileName);
@@ -117,20 +113,6 @@ public sealed class CostTracker
 
     /// <summary>cost.jsonl 기록 실패 누적 카운트. fallback append 성공 시에만 증가.</summary>
     public long FailureCount => Interlocked.Read(ref _failureCount);
-
-    /// <summary>
-    /// 레거시 테스트 호환용 — 인스턴스 누적 캐시는 인스턴스 단위이므로 이 호출은 no-op이다.
-    /// 신규 테스트는 <c>new CostTracker(tempDir)</c>로 직접 격리하라. fix1-test 태스크에서 제거된다.
-    /// </summary>
-    [Obsolete("인스턴스 재생성으로 대체. fix1-test 태스크에서 제거 예정.")]
-    internal static void ResetForTesting() { /* no-op: 누적 캐시는 인스턴스 필드. */ }
-
-    /// <summary>
-    /// 레거시 테스트 호환용 — 인자 없는 <c>new CostTracker()</c> 호출이 사용할 ambient logDir override.
-    /// 신규 코드는 생성자 인자로 logDir을 명시하라. fix1-test 태스크에서 제거된다.
-    /// </summary>
-    [Obsolete("CostTracker(logDir) 생성자 인자로 대체. fix1-test 태스크에서 제거 예정.")]
-    internal static void SetLogDirForTesting(string? path) => _logDirOverride = path;
 
     /// <summary>
     /// 호출 결과를 jsonl에 1줄 기록하고 누적 캐시를 갱신합니다. result가 null이거나

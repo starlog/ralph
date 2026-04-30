@@ -38,8 +38,6 @@ public class MergeOrchestratorFailureTests : IDisposable
         Directory.CreateDirectory(_logDir);
 
         Directory.SetCurrentDirectory(_repoDir);
-        CostTracker.SetLogDirForTesting(_logDir);
-        CostTracker.ResetForTesting();
 
         _logger = new RalphLogger(_logDir);
     }
@@ -47,8 +45,6 @@ public class MergeOrchestratorFailureTests : IDisposable
     public void Dispose()
     {
         try { _logger.Dispose(); } catch { /* best-effort */ }
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.SetCurrentDirectory(_origCwd); } catch { /* best-effort */ }
         try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
     }

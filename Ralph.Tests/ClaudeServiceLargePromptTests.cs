@@ -19,14 +19,10 @@ public class ClaudeServiceLargePromptTests : IDisposable
     {
         _tempDir = Path.Combine(Path.GetTempPath(), $"ralph-large-prompt-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);
-        CostTracker.SetLogDirForTesting(_tempDir);
-        CostTracker.ResetForTesting();
     }
 
     public void Dispose()
     {
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.Delete(_tempDir, recursive: true); } catch { }
     }
 
@@ -123,7 +119,7 @@ public class ClaudeServiceLargePromptTests : IDisposable
             PromptBytes = ExpectedPromptBytes,
         };
 
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         await cost.RecordAsync("large-prompt-task", "sonnet", result);
 
         Assert.True(File.Exists(cost.LogFilePath));

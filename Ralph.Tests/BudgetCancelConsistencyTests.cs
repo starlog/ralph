@@ -22,14 +22,10 @@ public class BudgetCancelConsistencyTests : IDisposable
     {
         _tempDir = Path.Combine(Path.GetTempPath(), $"ralph-budget-cancel-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);
-        CostTracker.SetLogDirForTesting(_tempDir);
-        CostTracker.ResetForTesting();
     }
 
     public void Dispose()
     {
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.Delete(_tempDir, recursive: true); } catch { }
     }
 
@@ -46,7 +42,7 @@ public class BudgetCancelConsistencyTests : IDisposable
     [Fact]
     public async Task BudgetGate_returns_false_and_sets_Reached_when_cost_exceeds_budget()
     {
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         // opus input 단가 $15/1M → 500K tokens ≈ $7.50, budget $5 → 초과
         await cost.RecordAsync("task1", "opus", MakePricedResult(500_000));
 
@@ -65,7 +61,7 @@ public class BudgetCancelConsistencyTests : IDisposable
         var logDir = Path.Combine(_tempDir, "log-budget");
         using var logger = new RalphLogger(logDir);
 
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         await cost.RecordAsync("task1", "opus", MakePricedResult(500_000));
 
         var gate = new BudgetGate(5.0, cost, logger);
@@ -129,7 +125,7 @@ public class BudgetCancelConsistencyTests : IDisposable
 
         // CostTracker 누적으로 budget gate 차단 재현
         // (mock IAgentRunner 대신 RecordAsync 직접 호출 — 결정적으로 재현 가능)
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         for (var i = 0; i < 3; i++)
             await cost.RecordAsync($"task-{(char)('a' + i)}", "opus", MakePricedResult(200_000));
         // 3 × 200K tokens × $15/1M = ~$9.00 > $1 budget
@@ -166,7 +162,7 @@ public class BudgetCancelConsistencyTests : IDisposable
     public async Task Multiple_accumulated_costs_trigger_budget_gate_deterministically()
     {
         // 여러 RecordAsync 호출로 비용을 누적시켜 BudgetGate 차단을 결정적으로 재현
-        var cost = new CostTracker();
+        var cost = new CostTracker(_tempDir);
         for (var i = 0; i < 3; i++)
         {
             await cost.RecordAsync($"task-{i}", "opus",

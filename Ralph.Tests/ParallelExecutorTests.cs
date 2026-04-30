@@ -43,18 +43,12 @@ public class ParallelExecutorTests : IDisposable
         // 모든 산출물이 _root 아래로 격리된다.
         Directory.SetCurrentDirectory(_repoDir);
 
-        // CostTracker 정적 캐시 격리
-        CostTracker.SetLogDirForTesting(Path.Combine(_repoDir, ".ralph-logs"));
-        CostTracker.ResetForTesting();
-
         _logger = new RalphLogger(Path.Combine(_repoDir, ".ralph-logs"));
     }
 
     public void Dispose()
     {
         try { _logger.Dispose(); } catch { /* best-effort */ }
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.SetCurrentDirectory(_origCwd); } catch { /* best-effort */ }
         try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
     }

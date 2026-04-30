@@ -47,16 +47,12 @@ public class AutoRollbackTests : IDisposable
         // ParallelExecutor 내 git/cost 호출이 cwd에 의존하므로 _repoDir로 전환.
         Directory.SetCurrentDirectory(_repoDir);
 
-        CostTracker.SetLogDirForTesting(Path.Combine(_repoDir, ".ralph-logs"));
-        CostTracker.ResetForTesting();
         _logger = new RalphLogger(Path.Combine(_repoDir, ".ralph-logs"));
     }
 
     public void Dispose()
     {
         try { _logger.Dispose(); } catch { }
-        CostTracker.ResetForTesting();
-        CostTracker.SetLogDirForTesting(null);
         try { Directory.SetCurrentDirectory(_origCwd); } catch { }
         try { Directory.Delete(_root, recursive: true); } catch { }
     }
