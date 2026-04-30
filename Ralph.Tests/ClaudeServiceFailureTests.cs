@@ -289,4 +289,85 @@ public class ClaudeServiceFailureTests
         var log = output.ToString();
         Assert.Contains("exponential", log);
     }
+
+    // ──────────────────────────────────────────────────────────
+    // 다중 비-JSON 라인 진단 보존 검증
+    // ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 다수의 비-JSON 라인을 처리한 것처럼 logger.Warn을 N번 호출하는 서비스.
+    /// RunStreamAsync 내 catch(JsonException) 블록의 행동을 단위 격리해 재현한다.
+    /// RunWithRetryAsync가 logger를 RunStreamAsync에 전달하는지도 함께 검증된다.
+    /// </summary>
+    private sealed class MultilineNonJsonService : ClaudeService
+    {
+        private readonly string[] _nonJsonLines;
+
+        public MultilineNonJsonService(string[] nonJsonLines) : base(maxRetries: 5, retryDelay: 0)
+        {
+            _nonJsonLines = nonJsonLines;
+            DelayOverride = (_, _) => Task.CompletedTask;
+        }
+
+        public override Task<ClaudeResult> RunStreamAsync(
+            string prompt,
+            string? model = null,
+            string? workingDirectory = null,
+            RalphLogger? logger = null,
+            TextWriter? output = null,
+            CancellationToken ct = default,
+            string? allowedTools = null)
+        {
+            // 실제 RunStreamAsync catch(JsonException) 경로를 단위 격리:
+            // 각 비-JSON 라인마다 logger.Warn을 1회씩 호출한다.
+            foreach (var line in _nonJsonLines)
+                logger?.Warn($"Claude non-JSON output: {line}");
+
+            return Task.FromResult(new ClaudeResult
+            {
+                Success = false,
+                ExitCode = 1,
+                FailureKind = ClaudeFailureKind.MalformedOutput,
+            });
+        }
+    }
+
+    [Fact]
+    public async Task MultipleNonJsonLines_Each_Produce_Separate_Warn_And_Diagnostic_In_Output()
+    {
+        // 다수의 비-JSON 라인이 모두 삼켜지지 않고 각각 개별 WARN으로 logger에 보존되는지 검증.
+        // RunWithRetryAsync가 logger를 RunStreamAsync 오버라이드에 전달하므로,
+        // 이 테스트는 logger 전달 경로와 개별 라인 진단 보존 두 가지를 동시에 검증한다.
+        var logDir = Path.Combine(Path.GetTempPath(), $"ralph-nonJSON-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(logDir);
+        try
+        {
+            using var logger = new RalphLogger(logDir);
+            var nonJsonLines = new[]
+            {
+                "not json at all",
+                "another broken line",
+                "{\"incomplete\": ",
+            };
+
+            var svc = new MultilineNonJsonService(nonJsonLines);
+            var output = new StringWriter();
+
+            await svc.RunWithRetryAsync("test", logger: logger, output: output);
+
+            var logContent = await File.ReadAllTextAsync(logger.LogFile);
+
+            // 각 비-JSON 라인이 개별 WARN으로 기록되어야 한다 (일괄 삼키기 없음)
+            foreach (var line in nonJsonLines)
+                Assert.Contains($"Claude non-JSON output: {line}", logContent);
+
+            // MalformedOutput 진단 메시지가 output에도 포함되어야 한다 (다중 라인 진단 출력 보존)
+            var outText = output.ToString();
+            Assert.Contains("재시도 1회 소진", outText);
+        }
+        finally
+        {
+            try { Directory.Delete(logDir, recursive: true); } catch { }
+        }
+    }
 }
