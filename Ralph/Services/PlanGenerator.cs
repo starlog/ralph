@@ -30,6 +30,29 @@ public partial class PlanGenerator
             ? "\n[yellow]Re-generating task plan with Claude Code (correction pass)...[/]\n"
             : "\n[cyan]Generating task plan with Claude Code...[/]\n");
 
+        // 청킹 의사결정: PRD 크기/추정 토큰을 임계치와 비교한다. 1차 PR에서는 단일 호출 path를
+        // 그대로 사용하되 박스를 출력해 가시화하고, 응답이 truncated 면 §4.2 안내로 종료한다.
+        // 본격 2단계(outline → per-area) 호출은 후속 PR에서 chunked path를 채워 넣는다.
+        ChunkingDecision? decision = null;
+        try
+        {
+            var prdContent = await File.ReadAllTextAsync(prdFile, ct);
+            decision = PlanChunker.Decide(prdContent);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            // PRD 읽기 실패는 plan 자체 실패로 이어지지만, 여기서는 청킹 분기에만 영향이 있고
+            // Claude도 같은 파일을 읽으므로 동일 원인으로 곧 실패한다. 진단 로그만 남기고 진행.
+            logger.Warn($"PlanChunker.Decide skipped — PRD 읽기 실패: {ex.Message}");
+        }
+
+        if (decision is not null && !isCorrection)
+        {
+            AnsiConsole.Markup(PlanChunker.FormatDecisionBox(decision));
+            AnsiConsole.WriteLine();
+        }
+
         // Build prompt with the caller-supplied (typically relative) paths.
         // 절대 경로를 주입하면 모델이 "프로젝트 루트는 이 디렉토리" 라고 추론해 생성된 각
         // task의 prompt 에 그 절대 경로를 그대로 박아넣는 경향이 있다. 그러면 worktree 에서
@@ -84,6 +107,16 @@ public partial class PlanGenerator
 
         if (jsonContent == null)
         {
+            // Truncation 휴리스틱: 응답이 출력 토큰 한계로 잘렸으면 같은 PRD로 재호출해도
+            // 같은 자리에서 또 잘리므로 correction loop 대신 명확한 가이드를 주고 종료한다.
+            // 신규 exit code(3)로 일반 실패(1)와 구분 — CI 스크립트가 PRD 분할 필요를 식별 가능.
+            if (PlanChunker.LooksTruncated(result))
+            {
+                AnsiConsole.Markup(PlanChunker.BuildTruncationGuidance(decision));
+                logger.Error("Plan generation 응답 truncation 감지 — PRD 분할 권장");
+                return PlanChunker.ExitCodePlanTruncated;
+            }
+
             AnsiConsole.MarkupLine("[red]Error: No valid JSON found in Claude output.[/]");
             return 1;
         }
