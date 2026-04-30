@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Ralph.Models;
 using Ralph.Services;
+using Ralph.Tests.Helpers;
 using Xunit;
 
 namespace Ralph.Tests;
@@ -67,7 +68,7 @@ public class BudgetCancelConsistencyTests : IDisposable
         var gate = new BudgetGate(5.0, cost, logger);
         await gate.CheckAsync();
 
-        var logContent = await File.ReadAllTextAsync(logger.LogFile);
+        var logContent = await LogReader.ReadOpenLogAsync(logger.LogFile);
         // BudgetGate 내 _logger.Error("[budget] reached: ...")
         Assert.Contains("budget", logContent, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("reached", logContent, StringComparison.OrdinalIgnoreCase);

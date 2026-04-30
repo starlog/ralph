@@ -1,4 +1,5 @@
 using Ralph.Services;
+using Ralph.Tests.Helpers;
 using Xunit;
 
 namespace Ralph.Tests;
@@ -355,7 +356,7 @@ public class ClaudeServiceFailureTests
 
             await svc.RunWithRetryAsync("test", logger: logger, output: output);
 
-            var logContent = await File.ReadAllTextAsync(logger.LogFile);
+            var logContent = await LogReader.ReadOpenLogAsync(logger.LogFile);
 
             // 각 비-JSON 라인이 개별 WARN으로 기록되어야 한다 (일괄 삼키기 없음)
             foreach (var line in nonJsonLines)

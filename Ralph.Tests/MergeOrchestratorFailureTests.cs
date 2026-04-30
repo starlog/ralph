@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Ralph.Models;
 using Ralph.Services;
+using Ralph.Tests.Helpers;
 using Xunit;
 
 namespace Ralph.Tests;
@@ -127,7 +128,7 @@ public class MergeOrchestratorFailureTests : IDisposable
         // 5. "수동 복구" 안내 출력 검증: logger 기록으로 간접 확인
         //    ReportStateWriteFailure가 호출되면 AnsiConsole에 "수동 복구 필요" 메시지를 출력하는
         //    동시에 logger에 "[merge:done-mark] ... state save failed after retries"를 기록한다.
-        var logContent = File.ReadAllText(_logger.LogFile);
+        var logContent = LogReader.ReadOpenLog(_logger.LogFile);
         Assert.Contains("[merge:done-mark]", logContent);
         Assert.Contains("state save failed after retries", logContent);
     }
