@@ -96,6 +96,28 @@ public class PlanValidatorTests
     }
 
     [Fact]
+    public async Task Explicit_empty_string_prompt_is_error()
+    {
+        var tm = await Tm("""
+        {"tasks":[{"id":"a","title":"A","done":false,"prompt":""}]}
+        """);
+        var r = PlanValidator.Validate(tm);
+        Assert.True(r.HasErrors);
+        Assert.Contains(r.Errors, e => e.Contains("prompt가 비어"));
+    }
+
+    [Fact]
+    public async Task Whitespace_only_prompt_is_error()
+    {
+        var tm = await Tm("""
+        {"tasks":[{"id":"a","title":"A","done":false,"prompt":"   "}]}
+        """);
+        var r = PlanValidator.Validate(tm);
+        Assert.True(r.HasErrors);
+        Assert.Contains(r.Errors, e => e.Contains("prompt가 비어"));
+    }
+
+    [Fact]
     public async Task Sensitive_file_in_modifiedFiles_is_error()
     {
         var tm = await Tm("""
