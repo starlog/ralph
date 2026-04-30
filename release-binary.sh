@@ -219,6 +219,51 @@ if [[ $CREATE_TAG -eq 1 && $DRY_RUN -eq 0 ]]; then
     fi
 fi
 
+# ─── Generate bilingual release notes via claude CLI ──────────────────────
+# Builds a Markdown body with two sections — English "What's Changed" and
+# Korean "변경 사항" — derived from the commit log between the previous tag
+# and $VERSION, plus a Full Changelog compare link. Replaces the default
+# `--generate-notes` body which is just a compare URL.
+build_release_notes() {
+    local version="$1" prev_tag="$2" out="$3"
+    need claude
+
+    local commits
+    commits=$(git log --format='- %s' "${prev_tag}..${version}" 2>/dev/null || true)
+    if [[ -z "$commits" ]]; then
+        commits=$(git log --format='- %s' -n 20 "${version}" 2>/dev/null || true)
+    fi
+    [[ -n "$commits" ]] || commits="(no commits found between ${prev_tag} and ${version})"
+
+    local prompt
+    prompt=$(cat <<EOF
+Write GitHub release notes for Ralph ${version} based on these commits since ${prev_tag}:
+
+${commits}
+
+Output exactly this Markdown structure and nothing else (no preamble, no code fences, no trailing text):
+
+## What's Changed
+
+<2-5 bullet points summarising user-facing changes in English. Group related commits. Drop noise like the version-bump / release commits ("릴리스: 버전을 ..."). Each bullet starts with a past-tense verb.>
+
+## 변경 사항
+
+<Same bullets translated into natural Korean. Match the count and ordering of the English bullets.>
+
+**Full Changelog**: https://github.com/${REPO}/compare/${prev_tag}...${version}
+EOF
+)
+    claude --dangerously-skip-permissions -p "$prompt" > "$out"
+    [[ -s "$out" ]] || err "Failed to generate release notes via claude"
+}
+
+GENERATED_NOTES_FILE=""
+cleanup_generated_notes() {
+    [[ -n "$GENERATED_NOTES_FILE" && -f "$GENERATED_NOTES_FILE" ]] && rm -f "$GENERATED_NOTES_FILE" || true
+}
+trap cleanup_generated_notes EXIT
+
 # ─── Tag (before build, so a build failure leaves no orphan tag pushed) ────
 if [[ $CREATE_TAG -eq 1 && $DRY_RUN -eq 0 ]]; then
     if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
@@ -308,9 +353,26 @@ fi
 # ─── Publish via gh ────────────────────────────────────────────────────────
 cd "$SCRIPT_DIR"
 
+# Generate bilingual notes if the user didn't pass --notes
+if [[ -z "$NOTES_FILE" && $GENERATE_NOTES -eq 1 ]]; then
+    PREV_TAG="$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -v "^${VERSION}$" | head -n1 || true)"
+    if [[ -n "$PREV_TAG" ]]; then
+        GENERATED_NOTES_FILE="$(mktemp -t ralph-release-notes.XXXXXX)"
+        log "Generating bilingual release notes (${PREV_TAG} → ${VERSION}) via claude CLI"
+        build_release_notes "$VERSION" "$PREV_TAG" "$GENERATED_NOTES_FILE"
+        NOTES_FILE="$GENERATED_NOTES_FILE"
+    else
+        log "No previous tag found; release will have no body"
+    fi
+fi
+
 if gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
     log "Release $VERSION already exists on $REPO; uploading assets (clobber)"
     gh release upload "$VERSION" "${ARTIFACTS[@]}" --repo "$REPO" --clobber
+    if [[ -n "$NOTES_FILE" ]]; then
+        log "Updating release body with bilingual notes"
+        gh release edit "$VERSION" --repo "$REPO" --notes-file "$NOTES_FILE"
+    fi
 else
     log "Creating release $VERSION on $REPO"
     CREATE_ARGS=("$VERSION" --repo "$REPO" --title "$VERSION")
@@ -318,8 +380,6 @@ else
     [[ $PRERELEASE -eq 1 ]] && CREATE_ARGS+=(--prerelease)
     if [[ -n "$NOTES_FILE" ]]; then
         CREATE_ARGS+=(--notes-file "$NOTES_FILE")
-    elif [[ $GENERATE_NOTES -eq 1 ]]; then
-        CREATE_ARGS+=(--generate-notes)
     fi
     gh release create "${CREATE_ARGS[@]}" "${ARTIFACTS[@]}"
 fi

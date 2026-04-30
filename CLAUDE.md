@@ -16,7 +16,7 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 - **Ralph.Tests/** — xUnit test project (worktree integration tests, plan validator tests, parallel batch transition tests, etc.).
 - **ralph-schema.json** — JSON Schema (2020-12) defining the `tasks.json` structure: tasks array (id/title/done/prompt/dependsOn/outputFiles/modifiedFiles/subtasks/verification), workflow settings (parallel, notifications, logRetentionDays, budgetUsd, taskTimeoutSec, maxRetries, retryDelay, verifyRetries, smokeTest, categories), and optional apiSpecs/samplePages. Embedded in the binary as `EmbeddedResource`.
 - **pricing.json** — Per-model token pricing used by `CostTracker`. Embedded as `EmbeddedResource`; can be overridden by `~/.ralph/pricing.json`.
-- **install.sh / install.ps1 / install-binary.sh / release-binary.sh** — install + release scripts. Homebrew/Scoop manifests under `Formula/` and `scoop/` track the latest GitHub release.
+- **install.sh / install.ps1 / install-binary.sh / release-binary.sh / release-binary.ps1** — install + release scripts. The PowerShell release script mirrors the bash one for native Windows hosts (auto bump-detection, claude-CLI-driven version-ref sync, UTF-8 console encoding to keep Korean commit summaries from killing the run). Homebrew/Scoop manifests under `Formula/` and `scoop/` track the latest GitHub release.
 
 ### Key Services (Ralph/Services/)
 
@@ -24,13 +24,15 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 |---|---|
 | `IAgentRunner.cs` | Abstraction over an LLM agent runner (Claude). Allows tests/mocks to substitute the real CLI. |
 | `ClaudeService.cs` | Runs Claude Code with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY), per-call timeout. Implements `IAgentRunner`. |
-| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus model) to produce tasks.json. Atomic write (tmp + rename). Honors `workflow.categories` for non-default stage patterns. |
-| `PlanValidator.cs` | Validates tasks.json: cycles, dangling deps, duplicate IDs, file overlaps, sensitive paths, eval-string body checks. |
+| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus model) to produce tasks.json. Atomic write (tmp + rename). Honors `workflow.categories` for non-default stage patterns. Exposes `BuildCorrectionPrompt` for the validator-driven correction loop (re-sends invalid tasks.json + errors to Claude, up to 2 attempts). |
+| `PlanValidator.cs` | Validates tasks.json: cycles, dangling deps, duplicate IDs, file overlaps, sensitive paths, eval-string body checks. `errors` trigger the auto-correction loop in `PlanCommand`; `warnings` pass through. |
 | `PrdCritic.cs` | Static analysis of tasks.json — finds parallelism gaps, missing verification commands, dependency oddities. Backs `--critique`. |
 | `LlmCritic.cs` | Optional LLM-driven critique of the generated plan against the original PRD. Triggered by `--llm-critique` after `--plan`. |
 | `PromptBuilder.cs` | Builds the prompt sent to Claude — adds Scope, dependency outputs, sibling context, hard prohibitions. |
 | `TaskManager.cs` | Loads/saves/queries tasks.json; dependency DAG traversal, parallel batch grouping, topological layering. Atomic save (tmp + rename). |
-| `ParallelExecutor.cs` | Worktree-based parallel execution entrypoint with live dashboard. Delegates merge to `MergeOrchestrator` and per-task work to `WorktreeTaskRunner`. Also exposes `InferSmokeTestCommand` for repo-root marker-based smoke test inference. |
+| `ParallelExecutor.cs` | Worktree-based parallel execution entrypoint with live dashboard. Delegates merge to `MergeOrchestrator`, per-task work to `WorktreeTaskRunner`, and post-merge smoke test resolution to `SmokeTestPlanner`. |
+| `SmokeTestPlanner.cs` | Pure smoke-test resolution logic: `--no-smoke-test` → CLI override → env (`RALPH_SMOKE_TEST_COMMAND`) → `workflow.smokeTest` → repo-root marker auto-inference (multi-marker `&&` combination supported). Skips inferred commands when changed files are docs-only; respects explicit overrides. |
+| `HostPlatform.cs` | Single source of truth for host-OS-dependent interpreter names (e.g. `python` on Windows vs `python3` on POSIX) and human-readable OS labels surfaced in plan prompts. Centralises Windows-vs-POSIX divergence so plan generation and smoke-test inference agree. |
 | `WorktreeTaskRunner.cs` | Runs a single task inside its worktree: prompt build → Claude → verification loop. |
 | `SequentialRunner.cs` | In-place sequential execution path (no worktrees). Used for single-task runs and merge `abort` fallback. |
 | `MergeOrchestrator.cs` | Worktree merge pipeline: pre-merge tasks.json normalization, declared-vs-actual file validation, rebase-advance, merge with strategy chain, conflict resolution (auto-* or Claude), done-marking, tasks.json commit, post-merge smoke test. |

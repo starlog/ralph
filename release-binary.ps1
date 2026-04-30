@@ -187,6 +187,52 @@ if (-not $NoTag -and -not $DryRun) {
     }
 }
 
+# ─── Generate bilingual release notes via claude CLI ──────────────────────
+# Builds a Markdown body with two sections — English "What's Changed" and
+# Korean "변경 사항" — derived from the commit log between the previous tag
+# and $Version, plus a Full Changelog compare link. Replaces the default
+# `--generate-notes` body which is just a compare URL.
+function Build-ReleaseNotes {
+    param(
+        [string]$VersionTag,
+        [string]$PrevTag,
+        [string]$OutPath
+    )
+
+    Need claude
+
+    $commits = git log --format='- %s' "$PrevTag..$VersionTag" 2>$null
+    if (-not $commits) {
+        $commits = git log --format='- %s' -n 20 $VersionTag 2>$null
+    }
+    $commitsText = if ($commits) { ($commits -join "`n") } else { "(no commits found between $PrevTag and $VersionTag)" }
+
+    $prompt = @"
+Write GitHub release notes for Ralph $VersionTag based on these commits since ${PrevTag}:
+
+$commitsText
+
+Output exactly this Markdown structure and nothing else (no preamble, no code fences, no trailing text):
+
+## What's Changed
+
+<2-5 bullet points summarising user-facing changes in English. Group related commits. Drop noise like the version-bump / release commits ("릴리스: 버전을 ..."). Each bullet starts with a past-tense verb.>
+
+## 변경 사항
+
+<Same bullets translated into natural Korean. Match the count and ordering of the English bullets.>
+
+**Full Changelog**: https://github.com/$Repo/compare/$PrevTag...$VersionTag
+"@
+
+    $output = claude --dangerously-skip-permissions -p $prompt
+    if ($LASTEXITCODE -ne 0 -or -not $output) { Fail "Failed to generate release notes via claude" }
+    if ($output -is [array]) { $output = $output -join "`n" }
+    Set-Content -Path $OutPath -Value $output -Encoding UTF8
+}
+
+$GeneratedNotesFile = $null
+
 # ─── Tag (before build, so a build failure leaves no orphan tag pushed) ────
 if (-not $NoTag -and -not $DryRun) {
     git rev-parse -q --verify "refs/tags/$Version" *> $null
@@ -300,27 +346,52 @@ if ($DryRun) {
 # ─── Publish via gh ────────────────────────────────────────────────────────
 Set-Location $ScriptDir
 
-gh release view $Version --repo $Repo *> $null
-$exists = ($LASTEXITCODE -eq 0)
-
-if ($exists) {
-    Write-Step "Release $Version already exists on $Repo; uploading assets (clobber)"
-    gh release upload $Version @Artifacts --repo $Repo --clobber
-    if ($LASTEXITCODE -ne 0) { Fail "gh release upload failed" }
-}
-else {
-    Write-Step "Creating release $Version on $Repo"
-    $createArgs = @($Version, '--repo', $Repo, '--title', $Version)
-    if ($Draft)       { $createArgs += '--draft' }
-    if ($Prerelease)  { $createArgs += '--prerelease' }
-    if ($Notes) {
-        $createArgs += @('--notes-file', $Notes)
+# Generate bilingual notes if user didn't pass -Notes
+if (-not $Notes) {
+    $prevTag = git tag --list 'v[0-9]*' --sort=-v:refname |
+        Where-Object { $_ -ne $Version } |
+        Select-Object -First 1
+    if ($prevTag) {
+        $GeneratedNotesFile = [System.IO.Path]::GetTempFileName()
+        Write-Step "Generating bilingual release notes ($prevTag → $Version) via claude CLI"
+        Build-ReleaseNotes -VersionTag $Version -PrevTag $prevTag -OutPath $GeneratedNotesFile
+        $Notes = $GeneratedNotesFile
     }
     else {
-        $createArgs += '--generate-notes'
+        Write-Step "No previous tag found; release will have no body"
     }
-    gh release create @createArgs @Artifacts
-    if ($LASTEXITCODE -ne 0) { Fail "gh release create failed" }
+}
+
+try {
+    gh release view $Version --repo $Repo *> $null
+    $exists = ($LASTEXITCODE -eq 0)
+
+    if ($exists) {
+        Write-Step "Release $Version already exists on $Repo; uploading assets (clobber)"
+        gh release upload $Version @Artifacts --repo $Repo --clobber
+        if ($LASTEXITCODE -ne 0) { Fail "gh release upload failed" }
+        if ($Notes) {
+            Write-Step "Updating release body with bilingual notes"
+            gh release edit $Version --repo $Repo --notes-file $Notes
+            if ($LASTEXITCODE -ne 0) { Fail "gh release edit failed" }
+        }
+    }
+    else {
+        Write-Step "Creating release $Version on $Repo"
+        $createArgs = @($Version, '--repo', $Repo, '--title', $Version)
+        if ($Draft)       { $createArgs += '--draft' }
+        if ($Prerelease)  { $createArgs += '--prerelease' }
+        if ($Notes) {
+            $createArgs += @('--notes-file', $Notes)
+        }
+        gh release create @createArgs @Artifacts
+        if ($LASTEXITCODE -ne 0) { Fail "gh release create failed" }
+    }
+}
+finally {
+    if ($GeneratedNotesFile -and (Test-Path $GeneratedNotesFile)) {
+        Remove-Item $GeneratedNotesFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Step "Done. View at: https://github.com/$Repo/releases/tag/$Version"

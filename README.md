@@ -120,6 +120,9 @@ Full PRD: [bugfix.md](bugfix.md)
 | v0.7 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `--graph` task dependency visualization |
 | v1.0 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Cost tracker, plan validator, prompt builder, webhook notifications, log rotation |
 | v1.1 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Verification gate, conflict-strategy chain, post-merge smoke test, `--task-timeout`, `--budget-usd`, `--strict-files`, `--shared-worktrees`, `--critique` / `--llm-critique`, worktree rebase-advance |
+| v1.2 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `IAgentRunner` abstraction + live cost display, longest-prefix pricing match, `MockAgentRunner` test helper, smoke-test auto-infer + opt-out, `--llm-critique`, `--shared-worktrees`, conflict-cost summary, package-manager manifests (Homebrew tap, Scoop), parallel-executor refactor + integration tests |
+| v1.21 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Plan-validator auto-correction loop (re-sends invalid plan + errors to Claude, up to 2 attempts), `SmokeTestPlanner` separation with framework-aware multi-marker inference, Python marker support, `HostPlatform` for Windows interpreter resolution, release-automation hardening |
+| v1.22 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Release script auto-syncs version references via the claude CLI; UTF-8 console encoding fix so Korean commit summaries don't kill the release run on Windows |
 
 ## Requirements
 
@@ -163,8 +166,8 @@ Grab the matching binary from [GitHub Releases](https://github.com/starlog/ralph
 
 ```bash
 # Example: Linux
-curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.1.0-linux-x64.tar.gz
-tar -xzf ralph-v1.1.0-linux-x64.tar.gz
+curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.22-linux-x64.tar.gz
+tar -xzf ralph-v1.22-linux-x64.tar.gz
 sudo mv ralph /usr/local/bin/
 ```
 
@@ -738,8 +741,11 @@ dotnet test ralph.sln
 # Publish a self-contained binary for the current OS
 dotnet publish Ralph/Ralph.csproj -c Release -r osx-arm64 --self-contained true
 
-# Release script (uses gh CLI)
-./release-binary.sh v1.1.0
+# Release script (uses gh CLI). Auto-bumps the version from the latest tag,
+# tags + pushes, builds per-platform binaries, generates bilingual (EN/KO)
+# release notes via the claude CLI, and uploads to GitHub.
+./release-binary.sh                  # POSIX hosts
+./release-binary.ps1                 # Windows hosts (PowerShell 7+)
 ```
 
 The repo layout:

@@ -120,6 +120,9 @@ Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들�
 | v0.7 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `--graph` 태스크 의존성 그래프 |
 | v1.0 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 비용 추적, 플랜 검증, prompt builder, webhook 알림, 로그 로테이션 |
 | v1.1 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 검증 게이트, 충돌 전략 chain, 머지 후 smoke test, `--task-timeout`, `--budget-usd`, `--strict-files`, `--shared-worktrees`, `--critique` / `--llm-critique`, 머지 직전 worktree rebase |
+| v1.2 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `IAgentRunner` 추상화 + 실시간 비용 표시, longest-prefix 가격표 매칭, `MockAgentRunner` 테스트 헬퍼, smoke test 자동 추론 + opt-out, `--llm-critique`, `--shared-worktrees`, 충돌 비용 별도 요약, 패키지 매니저 매니페스트(Homebrew tap, Scoop), ParallelExecutor 리팩토링 + 통합 테스트 |
+| v1.21 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Plan 검증 자동 정정 루프(invalid plan + errors를 Claude에게 재전송, 최대 2회), `SmokeTestPlanner` 분리 및 다중 marker 인식, Python marker 지원, Windows 인터프리터 해석을 위한 `HostPlatform`, 릴리스 자동화 강화 |
+| v1.22 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 릴리스 스크립트가 claude CLI로 버전 표기 자동 동기화, Windows에서 한국어 커밋 요약이 stdout 쓰기 실패로 릴리스를 죽이지 않도록 UTF-8 콘솔 인코딩 고정 |
 
 ## 필수 의존성
 
@@ -163,8 +166,8 @@ cd ralph
 
 ```bash
 # 예: Linux
-curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.1.0-linux-x64.tar.gz
-tar -xzf ralph-v1.1.0-linux-x64.tar.gz
+curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.22-linux-x64.tar.gz
+tar -xzf ralph-v1.22-linux-x64.tar.gz
 sudo mv ralph /usr/local/bin/
 ```
 
@@ -738,8 +741,11 @@ dotnet test ralph.sln
 # 현재 OS용 self-contained 바이너리 publish
 dotnet publish Ralph/Ralph.csproj -c Release -r osx-arm64 --self-contained true
 
-# 릴리스 스크립트 (gh CLI 사용)
-./release-binary.sh v1.1.0
+# 릴리스 스크립트 (gh CLI 사용). 최신 태그를 기준으로 버전을 자동 산출하고
+# 태그 생성/푸시, 플랫폼별 바이너리 빌드, claude CLI로 영문/한글 릴리스 노트
+# 자동 작성, GitHub에 업로드까지 일괄 수행한다.
+./release-binary.sh                  # POSIX 호스트
+./release-binary.ps1                 # Windows 호스트 (PowerShell 7+)
 ```
 
 repo 레이아웃:
