@@ -39,9 +39,25 @@ For full features / configuration / internals / troubleshooting, see **[TECHNICA
 
 ## ⚠️ Security note — read this first
 
-Ralph runs Claude Code on your host with `--dangerously-skip-permissions`. That means **Claude can freely read and write files on your machine** — `.env`, SSH keys, AWS credentials are all reachable.
+Ralph **always** runs Claude Code with `--dangerously-skip-permissions` (opt out with `--safe-permissions` or `RALPH_REQUIRE_PERMISSIONS=true`, see below). This means:
 
-If the PRD is something *you* wrote and understand, running it on your dev box is fine. But for any **PRD or `tasks.json` someone else gave you**, run it inside a separate user account, VM, or container.
+- Claude can **read and write anywhere on the host filesystem** without permission prompts.
+- The worktree directory (`.ralph-worktrees/`) looks isolated but **is not isolated at the OS level** — `.env`, `~/.ssh`, `~/.aws/credentials` are all reachable.
+- Automated flows (`--run`, `--task`) have no way to respond to permission prompts, making permission-request mode fundamentally incompatible with automation.
+
+### Operational recommendations
+
+| Situation | Recommendation |
+|---|---|
+| PRD you wrote and understand | Your normal dev box is fine |
+| PRD or `tasks.json` from someone else | Run inside a separate user account, VM, or container |
+| Sensitive environment (production-adjacent, holds secrets) | Isolated VM/container + least-privilege user |
+| One-off plan review | `ralph --plan PRD.md --safe-permissions` (Claude asks for approval before each tool call) |
+
+### Opt-out options
+
+- **`--safe-permissions`** — Use standard permission mode for this invocation. Blocked for automated commands (`--run`/`--task`/`--dry-run`) when running in parallel or without a TTY — only meaningful with `--plan` or `--interactive`.
+- **`RALPH_REQUIRE_PERMISSIONS=true`** — Organization/CI-level enforcement. All commands run in safe mode; automated commands are blocked the same way as above.
 
 ---
 

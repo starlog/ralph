@@ -89,6 +89,12 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
     public bool Debug { get; set; }
 
     /// <summary>
+    /// true이면 --dangerously-skip-permissions를 부착하지 않는다 (Claude가 권한 요청 prompt 표시).
+    /// 자동화 환경에서는 비실용적이지만 일회성 plan / 수동 검토 시 유용. 기본 false (현행 동작).
+    /// </summary>
+    public bool SafePermissions { get; set; }
+
+    /// <summary>
     /// Claude 호출 한 번(per attempt)의 wall-clock timeout. null/0/음수면 timeout 미적용.
     /// 초과 시 process tree kill + TimedOut=true 결과 반환. 외부 ct로 인한 정상 cancel은
     /// 그대로 propagate하므로 사용자 Ctrl+C와 timeout이 구분됩니다.
@@ -162,7 +168,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
 
         // Build arguments via ArgumentList (safe escaping)
         psi.ArgumentList.Add("-p");
-        psi.ArgumentList.Add("--dangerously-skip-permissions");
+        if (!SafePermissions)
+            psi.ArgumentList.Add("--dangerously-skip-permissions");
         psi.ArgumentList.Add("--output-format");
         psi.ArgumentList.Add("stream-json");
         psi.ArgumentList.Add("--include-partial-messages");

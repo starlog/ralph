@@ -46,6 +46,9 @@ public static class ArgParser
         var envTaskTimeoutSec = envTaskTimeoutSecRaw is > 0 ? envTaskTimeoutSecRaw : null;
         var envSmokeTestCommandRaw = Environment.GetEnvironmentVariable("RALPH_SMOKE_TEST_COMMAND");
         var envSmokeTestCommand = string.IsNullOrWhiteSpace(envSmokeTestCommandRaw) ? null : envSmokeTestCommandRaw;
+        var envRequirePermissions = string.Equals(
+            Environment.GetEnvironmentVariable("RALPH_REQUIRE_PERMISSIONS"), "true",
+            StringComparison.OrdinalIgnoreCase);
 
         // ─── CLI flags (boolean) ─────────────────────────────────────────────
         var argList = argv.ToList();
@@ -56,6 +59,7 @@ public static class ArgParser
         var cliSharedWorktrees = argList.Remove("--shared-worktrees");
         var cliNoSmokeTest = argList.Remove("--no-smoke-test");
         var llmCritique = argList.Remove("--llm-critique");
+        var cliSafePermissions = argList.Remove("--safe-permissions");
 
         // ─── --max-parallel ─────────────────────────────────────────────────
         var maxParallelArg = 0;
@@ -206,6 +210,8 @@ public static class ArgParser
             EnvBudgetUsd = envBudgetUsd,
             EnvTaskTimeoutSec = envTaskTimeoutSec,
             EnvSmokeTestCommand = envSmokeTestCommand,
+            CliSafePermissions = cliSafePermissions,
+            EnvRequirePermissions = envRequirePermissions,
         };
     }
 

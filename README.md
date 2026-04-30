@@ -37,9 +37,25 @@
 
 ## ⚠️ 보안 주의 — 먼저 읽어 주세요
 
-Ralph는 호스트 머신에서 Claude Code를 `--dangerously-skip-permissions`로 직접 실행합니다. 즉, **Claude가 여러분의 컴퓨터에 있는 파일을 자유롭게 읽고 쓸 수 있습니다** — `.env`, SSH 키, AWS 자격증명 등이 노출될 수 있습니다.
+Ralph는 **항상** 호스트 머신에서 Claude Code를 `--dangerously-skip-permissions` 플래그와 함께 실행합니다 (`--safe-permissions` 또는 `RALPH_REQUIRE_PERMISSIONS=true`로 옵트아웃 가능, 아래 참고). 이는 다음을 의미합니다:
 
-본인이 작성한/이해하는 PRD라면 일반 개발 환경에서 써도 괜찮지만, **남이 준 PRD나 `tasks.json`** 은 반드시 별도 사용자 계정 / VM / 컨테이너에서 돌리세요.
+- Claude가 권한 요청 prompt 없이 **호스트 파일시스템 전체를 읽고 쓸 수 있습니다**.
+- 워크트리(`.ralph-worktrees/`)가 격리 디렉토리로 보이지만, **OS 권한 차원에서는 격리가 아닙니다** — `.env`, `~/.ssh`, `~/.aws/credentials` 모두 접근 가능합니다.
+- 자동화 흐름(`--run`, `--task`)은 prompt 응답 수단이 없어 권한 요청 모드와 근본적으로 호환되지 않습니다.
+
+### 운영 권장 사항
+
+| 상황 | 권장 |
+|---|---|
+| 본인이 작성/검토한 PRD | 일반 개발 환경 OK |
+| 외부 PRD / `tasks.json` | 별도 사용자 계정, VM, 컨테이너에서 실행 |
+| 민감 환경 (production-adjacent, secrets 보유) | 격리된 VM/컨테이너 + 최소 권한 사용자 |
+| 일회성 plan 검토 | `ralph --plan PRD.md --safe-permissions` (Claude가 각 tool 호출 전 사용자 승인 요청) |
+
+### 옵트아웃 옵션
+
+- **`--safe-permissions`** — 이번 명령에 한해 표준 권한 모드 사용. 자동화 명령(`--run`/`--task`/`--dry-run`)에서 parallel 실행이거나 TTY 미연결이면 차단됩니다 — `--plan` / `--interactive`에만 의미가 있습니다.
+- **`RALPH_REQUIRE_PERMISSIONS=true`** — 조직/CI 차원에서 강제. 모든 명령이 safe 모드로 동작하며, 자동화 명령은 위와 동일하게 차단됩니다.
 
 ---
 
