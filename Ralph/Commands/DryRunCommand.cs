@@ -21,17 +21,24 @@ public sealed class DryRunCommand : ICommand
         using var logger = new RalphLogger();
         logger.Info("Exec mode: dry-run");
 
-        var model = _ctx.ResolveModel("sonnet");
-        var modelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
-        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(model)} [dim]({modelSource})[/]");
-        logger.Info($"Model: {model} ({modelSource})");
+        var modelOverride = string.IsNullOrEmpty(_ctx.ModelArg) ? null : _ctx.ModelArg;
+        if (modelOverride != null)
+        {
+            AnsiConsole.MarkupLine($"[cyan]Model:[/] {DisplayHelpers.FormatModel(modelOverride)} [dim](--model — 모든 태스크에 강제)[/]");
+            logger.Info($"Model override: {modelOverride}");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[cyan]Model:[/] per-task [dim](task.model 또는 [/]{DisplayHelpers.FormatModel("sonnet")}[dim] 기본)[/]");
+            logger.Info("Model: per-task (task.model or sonnet default)");
+        }
 
         var backupJson = await File.ReadAllTextAsync(_ctx.TasksFile, ct);
 
         int result;
         try
         {
-            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, model, new CostTracker());
+            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, modelOverride, new CostTracker());
             result = await runner.RunAutoLoopAsync(
                 dryRun: true, commitOnComplete: false, budgetUsd: null,
                 cost: new CostTracker(), ct);

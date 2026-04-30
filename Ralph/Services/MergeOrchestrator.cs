@@ -286,15 +286,18 @@ internal sealed class MergeOrchestrator
 
         AnsiConsole.MarkupLine($"[cyan]Claude Code로 충돌 해결 중 ({mergeResult.ConflictFiles.Count}개 파일, repo: {Markup.Escape(repoRoot)})...[/]");
 
+        // 머지 충돌 해결은 특정 task가 아니라 batch 결과에 대한 작업이므로 task.model을 쓰지 않고
+        // 명시적 override 또는 기본값(sonnet)을 사용한다.
+        var conflictModel = ModelResolver.ResolveForNonTask(_model);
         ClaudeResult? result = null;
         try
         {
             result = await _claude.RunWithRetryAsync(
-                prompt, model: _model, workingDirectory: repoRoot, logger: _logger, ct: ct);
+                prompt, model: conflictModel, workingDirectory: repoRoot, logger: _logger, ct: ct);
         }
         finally
         {
-            await _cost.RecordAsync($"conflict:{taskId}", _model ?? "opus", result, CancellationToken.None);
+            await _cost.RecordAsync($"conflict:{taskId}", conflictModel, result, CancellationToken.None);
         }
         if (result == null || !result.Success)
         {

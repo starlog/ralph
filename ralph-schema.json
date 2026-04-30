@@ -277,6 +277,11 @@
             "$ref": "#/$defs/subtask"
           }
         },
+        "model": {
+          "type": "string",
+          "enum": ["opus", "sonnet"],
+          "description": "Claude model to use when running this task. Set by the planner based on task complexity (opus for reasoning-heavy work like plan/architecture/migration; sonnet for routine impl/test/commit). User-specified --model on the run CLI overrides this for all tasks. Omitted → defaults to 'sonnet'."
+        },
         "verification": {
           "type": "object",
           "description": "External verification command run AFTER Claude finishes the task. Exit code 0 = pass; non-zero = task failed (with stdout/stderr fed back to Claude for one self-fix retry). Use this on testing/build tasks so success is determined by tools (pytest, go test, tsc --noEmit, dotnet test, eslint, ...) rather than Claude's self-report.",

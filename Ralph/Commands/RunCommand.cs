@@ -25,12 +25,26 @@ public sealed class RunCommand : ICommand
         // 모든 세션 출력은 배너 아래에 모인다 — 배너 먼저, 그 다음 Model/그래프 스캔/실행 모드/진행률.
         DisplayHelpers.ShowBanner();
 
-        // Model 결정 + 표시 — 사용자가 --model을 안 줬을 때 default가 opus 였다가 sonnet으로
-        // 바뀌어 비용/품질에 직접 영향이 가므로 실행 시작 시 어떤 모델을 쓰는지 명확히 알린다.
-        var model = _ctx.ResolveModel("sonnet");
-        var modelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
-        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(model)} [dim]({modelSource})[/]");
-        logger.Info($"Model: {model} ({modelSource})");
+        // Model 결정 + 표시. --model이 명시되면 모든 태스크에서 그 값이 강제 적용되고,
+        // 그렇지 않으면 task.model(plan이 채움) → 없으면 sonnet 기본값을 태스크별로 사용한다.
+        var modelOverride = string.IsNullOrEmpty(_ctx.ModelArg) ? null : _ctx.ModelArg;
+        if (modelOverride != null)
+        {
+            AnsiConsole.MarkupLine($"[cyan]Model:[/] {DisplayHelpers.FormatModel(modelOverride)} [dim](--model — 모든 태스크에 강제)[/]");
+            logger.Info($"Model override: {modelOverride}");
+        }
+        else
+        {
+            var opusCount = tm.Data.Tasks.Count(t => string.Equals(t.Model, "opus", StringComparison.OrdinalIgnoreCase));
+            var sonnetCount = tm.Data.Tasks.Count(t => string.Equals(t.Model, "sonnet", StringComparison.OrdinalIgnoreCase));
+            var unsetCount = tm.Data.Tasks.Count - opusCount - sonnetCount;
+            var breakdown = DisplayHelpers.FormatModelBreakdown(opusCount, sonnetCount, unsetCount, "(sonnet으로 적용)");
+            AnsiConsole.MarkupLine($"[cyan]Model:[/] per-task {breakdown}");
+            // logger는 평문 — markup 코드가 로그에 새지 않도록 별도 문자열 사용
+            var plainBreakdown = $"opus: {opusCount} / sonnet: {sonnetCount}"
+                + (unsetCount > 0 ? $" / 미지정: {unsetCount} (sonnet으로 적용)" : "");
+            logger.Info($"Model: per-task ({plainBreakdown})");
+        }
 
         // 세션 시작 시 자동 로그 rotation (silent)
         LogRotator.Rotate(retentionDays: tm.Data.Workflow?.LogRetentionDays, quiet: true);
@@ -106,7 +120,7 @@ public sealed class RunCommand : ICommand
                 ? true
                 : _ctx.EnvSharedWorktrees ?? tm.Data.Workflow?.Parallel?.SharedWorktreeObjects ?? false;
             var executor = new ParallelExecutor(
-                tm, claude, git, worktree, logger, _ctx.TasksFile, model,
+                tm, claude, git, worktree, logger, _ctx.TasksFile, modelOverride,
                 strictFiles: _ctx.StrictFiles, budgetUsd: _ctx.EffectiveBudgetUsd(tm), cost: costTracker,
                 sharedWorktrees: sharedWorktrees, noSmokeTest: _ctx.NoSmokeTest,
                 smokeTestCommandOverride: _ctx.SmokeTestCommandOverride);
@@ -118,7 +132,7 @@ public sealed class RunCommand : ICommand
             logger.Info("Exec mode: sequential");
             AnsiConsole.MarkupLine("[yellow]순차 실행 모드[/]");
 
-            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, model, costTracker);
+            var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, modelOverride, costTracker);
             exitCode = await runner.RunAutoLoopAsync(
                 dryRun: false, commitOnComplete: true,
                 _ctx.EffectiveBudgetUsd(tm), costTracker, ct);

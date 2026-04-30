@@ -143,6 +143,9 @@ public partial class PlanGenerator
         // Analyze parallelism potential
         var noDeps = parsed.Tasks.Count(t => t.DependsOn is not { Count: > 0 });
         var withModFiles = parsed.Tasks.Count(t => t.ModifiedFiles is { Count: > 0 });
+        var opusCount = parsed.Tasks.Count(t => string.Equals(t.Model, "opus", StringComparison.OrdinalIgnoreCase));
+        var sonnetCount = parsed.Tasks.Count(t => string.Equals(t.Model, "sonnet", StringComparison.OrdinalIgnoreCase));
+        var unsetCount = parsed.Tasks.Count - opusCount - sonnetCount;
 
         // Summary
         AnsiConsole.MarkupLine("\n[green]Plan generated successfully![/]");
@@ -157,6 +160,10 @@ public partial class PlanGenerator
             table.AddRow($"[cyan]{Markup.Escape(cat)}[/]", $"{count} tasks");
         table.AddRow("[green]Root tasks (no deps)[/]", $"{noDeps} (parallel start points)");
         table.AddRow("[green]With modifiedFiles[/]", $"{withModFiles} tasks");
+        // 모델명만 컬러 강조 (sonnet=sky-blue, opus=amber-gold). 라벨/숫자/구분자는 평문.
+        var modelBreakdown = $"[bold #d4a017]opus[/]: {opusCount} / [bold #6cb6ff]sonnet[/]: {sonnetCount}"
+            + (unsetCount > 0 ? $" / unset: {unsetCount} (will default to [bold #6cb6ff]sonnet[/])" : "");
+        table.AddRow("[green]Model distribution[/]", modelBreakdown);
         AnsiConsole.Write(table);
 
         AnsiConsole.Write(new Rule().RuleStyle("blue"));
@@ -296,6 +303,18 @@ public partial class PlanGenerator
                root" or simply "create `add.py`".
 
             9. **Workflow settings:** Set `workflow.onTaskComplete.commitChanges` to `true`. Include `workflow.parallel.enabled: true`.
+
+            9.5. **Per-task `model` field (cost vs quality tradeoff).** Set `"model"` on every task with one of the allowed values:
+               - `"opus"` — reasoning-heavy, slow, expensive. Use ONLY when the task genuinely benefits from deeper reasoning:
+                 * Plan tasks (architecture/design, multi-file impact analysis, schema migration planning)
+                 * Complex implementation tasks: cross-cutting refactors, non-trivial algorithms, concurrency, schema migrations, security-sensitive code, public API design
+                 * Tasks whose verification command is expensive (slow integration tests, heavy build) where a retry from a cheap-model failure costs more than running opus once
+               - `"sonnet"` — fast, cheap, good general default. Use for:
+                 * Straightforward implementation tasks (most CRUD, single-feature additions, well-scoped changes)
+                 * Testing tasks (writing unit tests against an already-clear feature)
+                 * Commit tasks (mechanical even with the Korean message + scope checks)
+                 * Doc/config/version-bump tasks
+               When in doubt, pick `"sonnet"`. The user can override all tasks at run time via `--model opus|sonnet`, so an aggressive `"sonnet"` default is safe.
 
             10. **All tasks start with `"done": false`.**
 

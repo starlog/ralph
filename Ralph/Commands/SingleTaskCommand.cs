@@ -72,12 +72,12 @@ public sealed class SingleTaskCommand : ICommand
         var git = new GitService();
         using var logger = new RalphLogger();
 
-        var model = _ctx.ResolveModel("sonnet");
-        var modelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
-        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(model)} [dim]({modelSource})[/]");
-        logger.Info($"Model: {model} ({modelSource})");
+        var modelOverride = string.IsNullOrEmpty(_ctx.ModelArg) ? null : _ctx.ModelArg;
+        var (resolved, source) = ModelResolver.Resolve(modelOverride, task);
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {DisplayHelpers.FormatModel(resolved)} [dim]({source})[/]");
+        logger.Info($"Model: {resolved} ({source})");
 
-        var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, model, new CostTracker());
+        var runner = new SequentialRunner(tm, claude, git, logger, _ctx.TasksFile, modelOverride, new CostTracker());
         return await runner.RunTaskAsync(
             taskId, dryRun: false, commitOnComplete: tm.CommitOnComplete, ct, force: true);
     }

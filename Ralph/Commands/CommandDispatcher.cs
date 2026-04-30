@@ -19,6 +19,7 @@ public static class CommandDispatcher
         "--prompts" or "-p"    => new PromptsCommand(ctx),
         "--status" or "-s"     => new StatusCommand(ctx),
         "--reset" or "-r"      => new ResetCommand(ctx),
+        "--rollback"           => new RollbackCommand(ctx),
         "--logs"               => new LogsCommand(ctx),
         "--cost"               => new CostCommand(),
         "--show-prompt"        => new ShowPromptCommand(ctx),

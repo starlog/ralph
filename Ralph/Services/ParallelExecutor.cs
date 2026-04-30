@@ -20,7 +20,7 @@ public class ParallelExecutor
     private readonly WorktreeService _worktree;
     private readonly RalphLogger _logger;
     private readonly string _tasksFile;
-    private readonly string? _model;
+    private readonly string? _modelOverride;
     private readonly bool _sharedWorktrees;
     private readonly CostTracker _cost;
     private readonly BudgetGate _budgetGate;
@@ -38,7 +38,7 @@ public class ParallelExecutor
 
     public ParallelExecutor(
         TaskManager taskManager, IAgentRunner claude, GitService git,
-        WorktreeService worktree, RalphLogger logger, string tasksFile, string? model = null,
+        WorktreeService worktree, RalphLogger logger, string tasksFile, string? modelOverride = null,
         bool strictFiles = false, double? budgetUsd = null,
         CostTracker? cost = null, BudgetGate? budgetGate = null,
         bool sharedWorktrees = false, bool noSmokeTest = false,
@@ -50,7 +50,7 @@ public class ParallelExecutor
         _worktree = worktree;
         _logger = logger;
         _tasksFile = tasksFile;
-        _model = model;
+        _modelOverride = modelOverride;
         _sharedWorktrees = sharedWorktrees;
         _cost = cost ?? new CostTracker();
         _budgetGate = budgetGate ?? new BudgetGate(budgetUsd, _cost, logger);
@@ -60,11 +60,11 @@ public class ParallelExecutor
 
         _worktreeRunner = new WorktreeTaskRunner(
             _taskManager, _git, _logger, _verificationLoop,
-            _tasksFile, _model, strictFiles, verifyRetries);
+            _tasksFile, _modelOverride, strictFiles, verifyRetries);
 
         _mergeOrchestrator = new MergeOrchestrator(
             _taskManager, _claude, _git, _worktree, _logger, _verifier, _cost,
-            _tasksFile, _model, strictFiles, noSmokeTest, smokeTestCommandOverride)
+            _tasksFile, _modelOverride, strictFiles, noSmokeTest, smokeTestCommandOverride)
         {
             // abort 전략 시 fallback으로 sequential RunSingle 호출.
             RerunSequential = (taskId, ct) => RunSingleTaskAsync(taskId, ct),
@@ -232,6 +232,9 @@ public class ParallelExecutor
     {
         var basePrompt = PromptBuilder.Build(task, _taskManager, _tasksFile, siblings: null);
         var maxVerifyRetries = Math.Max(0, _taskManager.Data.Workflow?.VerifyRetries ?? 1);
+        var (resolvedModel, modelSource) = ModelResolver.Resolve(_modelOverride, task);
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Ralph.Commands.DisplayHelpers.FormatModel(resolvedModel)} [dim]({modelSource})[/]");
+        _logger.Info($"[{task.Id}] Model: {resolvedModel} ({modelSource})");
 
         var callbacks = new VerificationCallbacks
         {
@@ -256,7 +259,7 @@ public class ParallelExecutor
             task, basePrompt, maxVerifyRetries,
             claudeWorkingDirectory: null, // 단일 path는 호출 프로세스 cwd 상속
             verifierWorkingDirectory: Directory.GetCurrentDirectory(),
-            output: null, model: _model, callbacks: callbacks, ct: ct);
+            output: null, model: resolvedModel, callbacks: callbacks, ct: ct);
     }
 
     /// <summary>

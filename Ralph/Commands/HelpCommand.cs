@@ -29,6 +29,7 @@ public sealed class HelpCommand : ICommand
         table.AddRow("[green]--critique[/]", "Analyze tasks.json for parallelism / verification gaps");
         table.AddRow("[green]--status[/], -s", "Show progress status (with parallel batch info)");
         table.AddRow("[green]--reset[/], -r", "Reset all tasks to pending");
+        table.AddRow("[green]--rollback[/]", "Rollback to previous state (after-run→after-plan, after-plan→pre-ralph). Destructive — asks confirmation");
         table.AddRow("[green]--logs[/] [[task-id]]", "Show logs (task log or session log list)");
         table.AddRow("[green]--logs --live[/] <task-id>", "Live tail a task log (like tail -f)");
         table.AddRow("[green]--logs --cleanup[/]", "Delete logs older than retention period");
@@ -50,7 +51,7 @@ public sealed class HelpCommand : ICommand
         AnsiConsole.MarkupLine("  [green]--llm-critique[/]       --plan 직후 LLM 기반 PRD/plan 비평 추가 1회 실행 (기본 off, 추가 비용)");
         AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
         AnsiConsole.MarkupLine("  [green]--task-timeout[/] <dur> Per-Claude-call timeout (예: 30m, 1h, 90s, 1800). hang 방지");
-        AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model (sonnet, opus; default: opus for --plan, sonnet for --run/--task/--dry-run/--interactive)");
+        AnsiConsole.MarkupLine("  [green]--model[/] <name>       Model ([bold #6cb6ff]sonnet[/], [bold #d4a017]opus[/]; default: [bold #d4a017]opus[/] for --plan, [bold #6cb6ff]sonnet[/] for --run/--task/--dry-run/--interactive)");
         AnsiConsole.MarkupLine("  [green]--debug[/]              Show Claude stream events for diagnostics");
 
         AnsiConsole.MarkupLine("\n[blue]Workflow:[/]");

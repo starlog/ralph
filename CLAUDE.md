@@ -24,7 +24,8 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 |---|---|
 | `IAgentRunner.cs` | Abstraction over an LLM agent runner (Claude). Allows tests/mocks to substitute the real CLI. |
 | `ClaudeService.cs` | Runs Claude Code with streaming JSON output, retry logic (MAX_RETRIES/RETRY_DELAY), per-call timeout. Implements `IAgentRunner`. |
-| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus by default) to produce tasks.json. Atomic write (tmp + rename). Honors `workflow.categories` for non-default stage patterns. Passes the caller's relative paths through unchanged and instructs the planner to emit only relative paths in task prompts — embedding absolute planner-host paths makes worktree-executed tasks write outside their worktree and fail verification. Exposes `BuildCorrectionPrompt` for the validator-driven correction loop (re-sends invalid tasks.json + errors to Claude, up to 2 attempts). |
+| `PlanGenerator.cs` | Sends PRD + schema to Claude (tools disabled, opus by default) to produce tasks.json. Atomic write (tmp + rename). Honors `workflow.categories` for non-default stage patterns. Passes the caller's relative paths through unchanged and instructs the planner to emit only relative paths in task prompts — embedding absolute planner-host paths makes worktree-executed tasks write outside their worktree and fail verification. Also instructs the planner to set per-task `model` (`opus` for reasoning-heavy work, `sonnet` for routine impl/test/commit) — see `ModelResolver`. Exposes `BuildCorrectionPrompt` for the validator-driven correction loop (re-sends invalid tasks.json + errors to Claude, up to 2 attempts). |
+| `ModelResolver.cs` | Per-task model resolution. Priority: CLI `--model` (forces all tasks) > `task.model` (planner-assigned) > `"sonnet"` default. Allowed values: `opus`, `sonnet`. |
 | `PlanValidator.cs` | Validates tasks.json: cycles, dangling deps, duplicate IDs, file overlaps, sensitive paths, eval-string body checks. `errors` trigger the auto-correction loop in `PlanCommand`; `warnings` pass through. |
 | `PrdCritic.cs` | Static analysis of tasks.json — finds parallelism gaps, missing verification commands, dependency oddities. Backs `--critique`. |
 | `LlmCritic.cs` | Optional LLM-driven critique of the generated plan against the original PRD. Triggered by `--llm-critique` after `--plan`. |
@@ -95,9 +96,12 @@ ralph --run --task-timeout 30m   # Per-Claude-call timeout (30m, 1h, 90s, or sec
 ralph --run --strict-files       # Validate declared vs actual modifiedFiles after merge; abort on undeclared
 ralph --run --shared-worktrees   # git worktree add --shared (saves disk/IO; auto-fallback)
 ralph --run --no-smoke-test      # Skip post-merge smoke test
-ralph --run --model opus         # Model override. Defaults: opus for --plan (reasoning-heavy),
-                                 # sonnet for --run/--task/--dry-run/--interactive (throughput).
-                                 # The selected model is printed at the start of each run.
+ralph --run --model opus         # Model override — applies to ALL tasks for this run.
+                                 # When omitted, each task runs on its planner-assigned model
+                                 # (`task.model`: opus for reasoning-heavy, sonnet for routine),
+                                 # falling back to sonnet if the planner left it unset.
+                                 # --plan itself still defaults to opus (reasoning-heavy).
+                                 # Each task's chosen model is printed/logged at task start.
 
 # Single task
 ralph --task <id>                # Honors dependsOn

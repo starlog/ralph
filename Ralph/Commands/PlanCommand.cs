@@ -34,7 +34,7 @@ public sealed class PlanCommand : ICommand
         DisplayHelpers.ShowBanner();
         var planModel = _ctx.ResolveModel("opus");
         var planModelSource = string.IsNullOrEmpty(_ctx.ModelArg) ? "default" : "--model";
-        AnsiConsole.MarkupLine($"[cyan]Model:[/] {Markup.Escape(planModel)} [dim]({planModelSource})[/]");
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {DisplayHelpers.FormatModel(planModel)} [dim]({planModelSource})[/]");
         AnsiConsole.MarkupLine($"[cyan]Input:[/]  {Markup.Escape(prdFile)}");
         AnsiConsole.MarkupLine($"[cyan]Output:[/] {Markup.Escape(_ctx.TasksFile)}");
 
@@ -56,6 +56,20 @@ public sealed class PlanCommand : ICommand
 
         if (!await git.IsRepoInitializedAsync(ct))
             await git.InitAsync(logger, ct);
+
+        // --rollback 지원: --plan 직전 상태(pre-plan)를 스냅샷으로 저장.
+        // 이전 post-plan은 새 plan과 함께 stale이 되므로 CaptureBeforePlanAsync 안에서 정리한다.
+        // 이 시점에선 worktree 지원을 위한 초기 커밋이 아직 없을 수 있으므로 먼저 보장한다 (HEAD 필요).
+        await git.EnsureInitialCommitAsync(logger, ct);
+        var rollback = new RollbackService();
+        try
+        {
+            await rollback.CaptureBeforePlanAsync(git, _ctx.TasksFile, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"pre-plan rollback snapshot 저장 실패 (계속 진행): {ex.Message}");
+        }
 
         // 기존 tasks.json이 있으면 거기서 workflow.categories를 읽어 plan generator에 전달.
         IReadOnlyList<string>? configuredCategories = null;
@@ -158,6 +172,16 @@ public sealed class PlanCommand : ICommand
         AnsiConsole.MarkupLine($"\n[green]플랜 생성 완료[/] [dim]({sw.Elapsed.Minutes}분 {sw.Elapsed.Seconds}초)[/]");
         if (correctionAttempt > 0)
             AnsiConsole.MarkupLine($"[dim](AI 정정 {correctionAttempt}회 후 검증 통과)[/]");
+
+        // --rollback 지원: plan 성공 직후 상태(post-plan) 스냅샷 저장.
+        try
+        {
+            await rollback.CaptureAfterPlanAsync(git, _ctx.TasksFile, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"post-plan rollback snapshot 저장 실패 (계속 진행): {ex.Message}");
+        }
 
         if (report.HasWarnings)
         {

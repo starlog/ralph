@@ -16,4 +16,5 @@ namespace Ralph.Models;
 [JsonSerializable(typeof(PricingFile))]
 [JsonSerializable(typeof(PricingEntry))]
 [JsonSerializable(typeof(ValidationLogEntry))]
+[JsonSerializable(typeof(RollbackSnapshot))]
 internal partial class RalphJsonContext : JsonSerializerContext;

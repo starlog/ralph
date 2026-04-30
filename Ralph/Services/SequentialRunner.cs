@@ -15,19 +15,19 @@ public sealed class SequentialRunner
     private readonly GitService _git;
     private readonly RalphLogger _logger;
     private readonly string _tasksFile;
-    private readonly string? _model;
+    private readonly string? _modelOverride;
     private readonly VerificationLoop _verificationLoop;
 
     public SequentialRunner(
         TaskManager tm, IAgentRunner claude, GitService git, RalphLogger logger,
-        string tasksFile, string? model, CostTracker cost)
+        string tasksFile, string? modelOverride, CostTracker cost)
     {
         _tm = tm;
         _claude = claude;
         _git = git;
         _logger = logger;
         _tasksFile = tasksFile;
-        _model = model;
+        _modelOverride = modelOverride;
         _verificationLoop = new VerificationLoop(claude, new VerificationRunner(), cost, logger);
     }
 
@@ -345,10 +345,14 @@ public sealed class SequentialRunner
             },
         };
 
+        var (resolvedModel, modelSource) = ModelResolver.Resolve(_modelOverride, task);
+        AnsiConsole.MarkupLine($"[cyan]Model:[/] {DisplayHelpers.FormatModel(resolvedModel)} [dim]({modelSource})[/]");
+        _logger.Info($"[{task.Id}] Model: {resolvedModel} ({modelSource})");
+
         return _verificationLoop.ExecuteAsync(
             task, basePrompt, maxVerifyRetries,
             claudeWorkingDirectory: null,
             verifierWorkingDirectory: Directory.GetCurrentDirectory(),
-            output: null, model: _model, callbacks: callbacks, ct: ct);
+            output: null, model: resolvedModel, callbacks: callbacks, ct: ct);
     }
 }

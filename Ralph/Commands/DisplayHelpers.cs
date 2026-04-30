@@ -80,6 +80,45 @@ public static class DisplayHelpers
         AnsiConsole.WriteLine();
     }
 
+    /// <summary>
+    /// 모델명을 Spectre 마크업으로 강조해서 반환한다 (Option B 팔레트).
+    ///   sonnet → bold sky-blue (#6cb6ff), opus → bold amber-gold (#d4a017).
+    /// 알 수 없는 값/빈 문자열은 escape만 한 평문 반환 (잘못된 마크업 출력 방지).
+    /// "Model:" 같은 헤더는 호출자가 직접 그린다 — 이 함수는 모델명만 책임진다.
+    /// </summary>
+    public static string FormatModel(string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model)) return "[dim]-[/]";
+        return model.Trim().ToLowerInvariant() switch
+        {
+            "sonnet" => "[bold #6cb6ff]sonnet[/]",
+            "opus"   => "[bold #d4a017]opus[/]",
+            _        => Markup.Escape(model),
+        };
+    }
+
+    /// <summary>
+    /// "opus: N / sonnet: M" 같은 breakdown 문자열을 두 모델명만 컬러 강조해 만든다.
+    /// 라벨/숫자/구분자는 dim 톤을 유지해 모델명이 두드러지게 한다.
+    /// </summary>
+    public static string FormatModelBreakdown(int opusCount, int sonnetCount, int unsetCount, string? unsetSuffix = null)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("[dim]([/]");
+        sb.Append("[bold #d4a017]opus[/]");
+        sb.Append($"[dim]: {opusCount} / [/]");
+        sb.Append("[bold #6cb6ff]sonnet[/]");
+        sb.Append($"[dim]: {sonnetCount}[/]");
+        if (unsetCount > 0)
+        {
+            sb.Append($"[dim] / unset: {unsetCount}[/]");
+            if (!string.IsNullOrEmpty(unsetSuffix))
+                sb.Append($"[dim] {Markup.Escape(unsetSuffix)}[/]");
+        }
+        sb.Append("[dim])[/]");
+        return sb.ToString();
+    }
+
     public static void RequireFile(string path)
     {
         if (File.Exists(path)) return;

@@ -22,6 +22,7 @@ public class TaskProgressEntry
     public Stopwatch Stopwatch { get; } = new();
     public string? LogFile { get; set; }
     public long OutputBytes { get; set; }
+    public string? Model { get; set; }
 }
 
 public class TaskProgressTracker
@@ -58,6 +59,12 @@ public class TaskProgressTracker
             Title = title,
             LogFile = logFile,
         };
+    }
+
+    public void SetModel(string taskId, string model)
+    {
+        if (_entries.TryGetValue(taskId, out var entry))
+            entry.Model = model;
     }
 
     public void UpdateStatus(string taskId, TaskProgressStatus status)
@@ -117,6 +124,7 @@ public class TaskProgressTracker
             .Border(TableBorder.Rounded)
             .Title(titleMarkup)
             .AddColumn("[bold]Task ID[/]")
+            .AddColumn("[bold]Model[/]")
             .AddColumn("[bold]Status[/]")
             .AddColumn(new TableColumn("[bold]Elapsed[/]").RightAligned())
             .AddColumn(new TableColumn("[bold]Output[/]").RightAligned())
@@ -142,8 +150,10 @@ public class TaskProgressTracker
             var outputStr = FormatBytes(entry.OutputBytes);
             var logFile = entry.LogFile != null ? Path.GetFileName(entry.LogFile) : "-";
 
+            var modelStr = Ralph.Commands.DisplayHelpers.FormatModel(entry.Model);
             table.AddRow(
                 Markup.Escape(entry.TaskId),
+                modelStr,
                 statusMarkup,
                 elapsedStr,
                 outputStr,

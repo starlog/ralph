@@ -175,6 +175,20 @@ public static class PlanValidator
             }
         }
 
+        // 7.5. task.model이 지정되어 있으면 허용 값(opus|sonnet)인지 확인.
+        //      잘못된 값(haiku, gpt-4 등)이 들어오면 ClaudeService 실행 시 알 수 없는 모델로
+        //      넘어가 fail할 수 있으니 plan 단계에서 차단.
+        foreach (var task in tasks)
+        {
+            if (string.IsNullOrEmpty(task.Model)) continue;
+            if (!ModelResolver.Allowed.Contains(task.Model, StringComparer.OrdinalIgnoreCase))
+            {
+                report.Errors.Add(
+                    $"'{task.Id}'의 model 값 '{task.Model}'이 허용되지 않습니다. " +
+                    $"허용: {string.Join(" | ", ModelResolver.Allowed)}");
+            }
+        }
+
         // 8. 민감 파일이 modifiedFiles/outputFiles에 명시되어 있으면 error
         foreach (var task in tasks)
         {

@@ -18,21 +18,21 @@ internal sealed class WorktreeTaskRunner
     private readonly RalphLogger _logger;
     private readonly VerificationLoop _verificationLoop;
     private readonly string _tasksFile;
-    private readonly string? _model;
+    private readonly string? _modelOverride;
     private readonly bool _strictFiles;
     private readonly int _verifyRetries;
 
     public WorktreeTaskRunner(
         TaskManager taskManager, GitService git, RalphLogger logger,
         VerificationLoop verificationLoop,
-        string tasksFile, string? model, bool strictFiles, int verifyRetries)
+        string tasksFile, string? modelOverride, bool strictFiles, int verifyRetries)
     {
         _taskManager = taskManager;
         _git = git;
         _logger = logger;
         _verificationLoop = verificationLoop;
         _tasksFile = tasksFile;
-        _model = model;
+        _modelOverride = modelOverride;
         _strictFiles = strictFiles;
         _verifyRetries = verifyRetries;
     }
@@ -56,12 +56,16 @@ internal sealed class WorktreeTaskRunner
         {
             await using var logWriter = new StreamWriter(logFile, append: false) { AutoFlush = true };
             await logWriter.WriteLineAsync($"=== Task: {taskId} - {task.Title} ===");
+            var (resolvedModel, modelSource) = ModelResolver.Resolve(_modelOverride, task);
+            await logWriter.WriteLineAsync($"=== Model: {resolvedModel} ({modelSource}) ===");
             await logWriter.WriteLineAsync($"=== Started: {DateTime.Now} ===\n");
+            tracker.SetModel(taskId, resolvedModel);
+            _logger.Info($"[{taskId}] Model: {resolvedModel} ({modelSource})");
 
             if (!string.IsNullOrEmpty(task.Prompt))
             {
                 var ok = await RunPromptWithVerificationAsync(
-                    task, siblings, worktreePath, logWriter, tracker, ct);
+                    task, siblings, worktreePath, logWriter, tracker, resolvedModel, ct);
                 if (!ok) return false;
             }
 
@@ -110,7 +114,7 @@ internal sealed class WorktreeTaskRunner
     /// </summary>
     private async Task<bool> RunPromptWithVerificationAsync(
         TaskItem task, IReadOnlyList<TaskItem> siblings, string worktreePath,
-        TextWriter logWriter, TaskProgressTracker tracker, CancellationToken ct)
+        TextWriter logWriter, TaskProgressTracker tracker, string model, CancellationToken ct)
     {
         var basePrompt = PromptBuilder.Build(task, _taskManager, _tasksFile, siblings);
 
@@ -147,7 +151,7 @@ internal sealed class WorktreeTaskRunner
             claudeWorkingDirectory: worktreePath,
             verifierWorkingDirectory: worktreePath,
             output: logWriter,
-            model: _model,
+            model: model,
             callbacks: callbacks,
             ct: ct);
     }

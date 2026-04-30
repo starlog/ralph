@@ -59,6 +59,14 @@ public class TaskItem
     [JsonPropertyName("verification")]
     public VerificationSpec? Verification { get; set; }
 
+    /// <summary>
+    /// 이 태스크 실행 시 사용할 Claude 모델 (`opus` 또는 `sonnet`). PlanGenerator가 태스크의
+    /// 복잡도/스코프를 보고 채워준다. 사용자가 CLI `--model`을 지정하면 모든 태스크에서
+    /// 그 값이 우선하고 이 필드는 무시된다. 미지정 시 기본 `sonnet`.
+    /// </summary>
+    [JsonPropertyName("model")]
+    public string? Model { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }

@@ -90,7 +90,7 @@ public class ParallelExecutorTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, model: "opus",
+            tasksFile: _tasksFile, modelOverride: "opus",
             noSmokeTest: true);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
@@ -148,7 +148,7 @@ public class ParallelExecutorTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, model: "opus",
+            tasksFile: _tasksFile, modelOverride: "opus",
             noSmokeTest: true);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
@@ -204,7 +204,7 @@ public class ParallelExecutorTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, model: "opus",
+            tasksFile: _tasksFile, modelOverride: "opus",
             noSmokeTest: false); // smoke test 활성화
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
