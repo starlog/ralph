@@ -61,10 +61,10 @@ public class MergeLogTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, MakeRunner(), git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: false,
-            smokeTestCommandOverride: PassSmokeCmd,
-            autoRollbackOnSmokeFail: false);
+            new RunOptions(
+                TasksFile: _tasksFile, ModelOverride: "opus",
+                NoSmokeTest: false, SmokeTestCommandOverride: PassSmokeCmd,
+                AutoRollbackOnSmokeFail: false));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);

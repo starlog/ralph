@@ -85,8 +85,7 @@ public class ParallelExecutorTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: true);
+            new RunOptions(TasksFile: _tasksFile, ModelOverride: "opus", NoSmokeTest: true));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);
@@ -143,8 +142,7 @@ public class ParallelExecutorTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: true);
+            new RunOptions(TasksFile: _tasksFile, ModelOverride: "opus", NoSmokeTest: true));
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);
@@ -200,8 +198,7 @@ public class ParallelExecutorTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: true);
+            new RunOptions(TasksFile: _tasksFile, ModelOverride: "opus", NoSmokeTest: true));
 
         // 200ms 후 ct(= linked cleanupCts.Token)가 취소되어 Delay가 중단된다.
         executor.CleanupTimeout = TimeSpan.FromMilliseconds(200);
@@ -256,8 +253,7 @@ public class ParallelExecutorTests : IDisposable
         var cts = new CancellationTokenSource();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: true);
+            new RunOptions(TasksFile: _tasksFile, ModelOverride: "opus", NoSmokeTest: true));
 
         // timeout은 60초로 충분히 길게 설정 — 타임아웃이 아닌 부모 CT 취소로 중단되는지 확인
         executor.CleanupTimeout = TimeSpan.FromSeconds(60);
@@ -318,8 +314,7 @@ public class ParallelExecutorTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, runner, git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: false); // smoke test 활성화
+            new RunOptions(TasksFile: _tasksFile, ModelOverride: "opus", NoSmokeTest: false)); // smoke test 활성화
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);

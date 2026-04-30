@@ -19,9 +19,7 @@ public class ParallelExecutor
     private readonly GitService _git;
     private readonly WorktreeService _worktree;
     private readonly RalphLogger _logger;
-    private readonly string _tasksFile;
-    private readonly string? _modelOverride;
-    private readonly bool _sharedWorktrees;
+    private readonly RunOptions _options;
     private readonly CostTracker _cost;
     private readonly BudgetGate _budgetGate;
     private readonly VerificationRunner _verifier = new();
@@ -45,34 +43,27 @@ public class ParallelExecutor
 
     public ParallelExecutor(
         TaskManager taskManager, IAgentRunner claude, GitService git,
-        WorktreeService worktree, RalphLogger logger, string tasksFile, string? modelOverride = null,
-        bool strictFiles = false, double? budgetUsd = null,
-        CostTracker? cost = null, BudgetGate? budgetGate = null,
-        bool sharedWorktrees = false, bool noSmokeTest = false,
-        string? smokeTestCommandOverride = null, bool autoRollbackOnSmokeFail = false)
+        WorktreeService worktree, RalphLogger logger, RunOptions options,
+        CostTracker? cost = null, BudgetGate? budgetGate = null)
     {
         _taskManager = taskManager;
         _claude = claude;
         _git = git;
         _worktree = worktree;
         _logger = logger;
-        _tasksFile = tasksFile;
-        _modelOverride = modelOverride;
-        _sharedWorktrees = sharedWorktrees;
+        _options = options;
         _cost = cost ?? new CostTracker();
-        _budgetGate = budgetGate ?? new BudgetGate(budgetUsd, _cost, logger);
+        _budgetGate = budgetGate ?? new BudgetGate(options.BudgetUsd, _cost, logger);
 
         _verificationLoop = new VerificationLoop(_claude, _verifier, _cost, _logger);
         var verifyRetries = Math.Max(0, _taskManager.Data.Workflow?.VerifyRetries ?? 1);
 
         _worktreeRunner = new WorktreeTaskRunner(
             _taskManager, _git, _logger, _verificationLoop,
-            _tasksFile, _modelOverride, strictFiles, verifyRetries);
+            _options.TasksFile, _options.ModelOverride, _options.StrictFiles, verifyRetries);
 
         _mergeOrchestrator = new MergeOrchestrator(
-            _taskManager, _claude, _git, _worktree, _logger, _verifier, _cost,
-            _tasksFile, _modelOverride, strictFiles, noSmokeTest, smokeTestCommandOverride,
-            autoRollbackOnSmokeFail)
+            _taskManager, _claude, _git, _worktree, _logger, _verifier, _cost, _options)
         {
             // abort 전략 시 fallback으로 sequential RunSingle 호출.
             RerunSequential = (taskId, ct) => RunSingleTaskAsync(taskId, ct),
@@ -247,9 +238,9 @@ public class ParallelExecutor
     /// </summary>
     private Task<bool> RunSingleWithVerificationAsync(TaskItem task, CancellationToken ct)
     {
-        var basePrompt = PromptBuilder.Build(task, _taskManager, _tasksFile, siblings: null);
+        var basePrompt = PromptBuilder.Build(task, _taskManager, _options.TasksFile, siblings: null);
         var maxVerifyRetries = Math.Max(0, _taskManager.Data.Workflow?.VerifyRetries ?? 1);
-        var (resolvedModel, modelSource) = ModelResolver.Resolve(_modelOverride, task);
+        var (resolvedModel, modelSource) = ModelResolver.Resolve(_options.ModelOverride, task);
         AnsiConsole.MarkupLine($"[cyan]Model:[/] {Ralph.Commands.DisplayHelpers.FormatModel(resolvedModel)} [dim]({modelSource})[/]");
         _logger.Info($"[{task.Id}] Model: {resolvedModel} ({modelSource})");
 
@@ -301,7 +292,7 @@ public class ParallelExecutor
             foreach (var taskId in taskIds)
             {
                 var path = await _worktree.CreateWorktreeAsync(
-                    taskId, baseBranch, _logger, sharedObjects: _sharedWorktrees, ct: ct);
+                    taskId, baseBranch, _logger, sharedObjects: _options.SharedWorktrees, ct: ct);
                 worktrees[taskId] = path;
 
                 var logFile = Path.GetFullPath(Path.Combine(logDir, $"{taskId}.log"));

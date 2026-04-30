@@ -138,12 +138,18 @@ public sealed class RunCommand : ICommand
                 logger.Info($"auto-rollback-on-smoke-fail enabled (source: {origin})");
             }
 
+            var runOptions = new RunOptions(
+                TasksFile: _ctx.TasksFile,
+                ModelOverride: modelOverride,
+                StrictFiles: _ctx.StrictFiles,
+                BudgetUsd: _ctx.EffectiveBudgetUsd(tm),
+                SharedWorktrees: sharedWorktrees,
+                NoSmokeTest: _ctx.NoSmokeTest,
+                SmokeTestCommandOverride: _ctx.SmokeTestCommandOverride,
+                AutoRollbackOnSmokeFail: autoRollbackOnSmokeFail);
+
             var executor = new ParallelExecutor(
-                tm, claude, git, worktree, logger, _ctx.TasksFile, modelOverride,
-                strictFiles: _ctx.StrictFiles, budgetUsd: _ctx.EffectiveBudgetUsd(tm), cost: costTracker,
-                sharedWorktrees: sharedWorktrees, noSmokeTest: _ctx.NoSmokeTest,
-                smokeTestCommandOverride: _ctx.SmokeTestCommandOverride,
-                autoRollbackOnSmokeFail: autoRollbackOnSmokeFail);
+                tm, claude, git, worktree, logger, runOptions, cost: costTracker);
             exitCode = await executor.RunAsync(concurrency, ct);
             if (exitCode == 0 && executor.BudgetReached) exitCode = 2;
         }

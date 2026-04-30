@@ -68,10 +68,10 @@ public class AutoRollbackTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, MakeRunner(), git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: false,
-            smokeTestCommandOverride: FailSmokeCmd,
-            autoRollbackOnSmokeFail: false); // opt-in OFF
+            new RunOptions(
+                TasksFile: _tasksFile, ModelOverride: "opus",
+                NoSmokeTest: false, SmokeTestCommandOverride: FailSmokeCmd,
+                AutoRollbackOnSmokeFail: false)); // opt-in OFF
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);
@@ -107,10 +107,10 @@ public class AutoRollbackTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, MakeRunner(), git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: false,
-            smokeTestCommandOverride: FailSmokeCmd,
-            autoRollbackOnSmokeFail: true); // opt-in ON
+            new RunOptions(
+                TasksFile: _tasksFile, ModelOverride: "opus",
+                NoSmokeTest: false, SmokeTestCommandOverride: FailSmokeCmd,
+                AutoRollbackOnSmokeFail: true)); // opt-in ON
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);
@@ -145,10 +145,10 @@ public class AutoRollbackTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, MakeRunner(), git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: false,
-            smokeTestCommandOverride: FailSmokeCmd,
-            autoRollbackOnSmokeFail: true); // opt-in ON
+            new RunOptions(
+                TasksFile: _tasksFile, ModelOverride: "opus",
+                NoSmokeTest: false, SmokeTestCommandOverride: FailSmokeCmd,
+                AutoRollbackOnSmokeFail: true)); // opt-in ON
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);
@@ -184,10 +184,10 @@ public class AutoRollbackTests : IDisposable
         var (git, worktree) = MakeGitServices();
         var executor = new ParallelExecutor(
             manager, MakeRunner(), git, worktree, _logger,
-            tasksFile: _tasksFile, modelOverride: "opus",
-            noSmokeTest: false,
-            smokeTestCommandOverride: PassSmokeCmd,
-            autoRollbackOnSmokeFail: true); // opt-in ON이지만 smoke 성공
+            new RunOptions(
+                TasksFile: _tasksFile, ModelOverride: "opus",
+                NoSmokeTest: false, SmokeTestCommandOverride: PassSmokeCmd,
+                AutoRollbackOnSmokeFail: true)); // opt-in ON이지만 smoke 성공
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var exit = await executor.RunAsync(maxConcurrent: 4, cts.Token);
