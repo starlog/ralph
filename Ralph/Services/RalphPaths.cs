@@ -79,6 +79,15 @@ public static class RalphPaths
     /// <summary>`.ralph-logs/cost-failures.jsonl` 상대 경로 (Path.Combine).</summary>
     public static string CostFailuresLedgerRelative => Path.Combine(LogDir, CostFailuresLedgerFileName);
 
+    /// <summary>머지 트랜잭션 로그 basename.</summary>
+    public const string MergeLogFileName = "merge-log.jsonl";
+
+    /// <summary>const string 컨텍스트에서 사용 가능한 `.ralph-logs/merge-log.jsonl` 표기.</summary>
+    public const string MergeLogRelativePath = LogDir + "/" + MergeLogFileName;
+
+    /// <summary>`.ralph-logs/merge-log.jsonl` 상대 경로 (Path.Combine).</summary>
+    public static string MergeLogRelative => Path.Combine(LogDir, MergeLogFileName);
+
     /// <summary>주어진 디렉토리 산하의 `.ralph-logs` 경로 합성.</summary>
     public static string LogDirUnder(string parentDir) => Path.Combine(parentDir, LogDir);
 }

@@ -250,4 +250,25 @@ public sealed class RollbackService
             return null;
         }
     }
+
+    // ─── fix2 #8: merge-log 진단 헬퍼 ────────────────────────────────────────────
+
+    /// <summary>
+    /// 복원 대상 스냅샷 이후 기록된 merge-log entry 목록을 반환한다.
+    /// RollbackCommand가 복원 직전 사용자에게 "어느 머지가 사라지는지" 요약하는 데 사용.
+    /// 파일이 없거나 파싱 실패 시 빈 리스트를 반환 (legacy 호환).
+    /// </summary>
+    public static async Task<IReadOnlyList<Models.MergeLogEntry>> GetMergeLogEntriesSinceSnapshotAsync(
+        RollbackSnapshot snapshot, string repoRoot, CancellationToken ct = default)
+    {
+        var logSvc = new MergeLogService(repoRoot, RalphLogger.Null);
+        var all = await logSvc.ReadAllAsync(ct);
+        if (all.Count == 0) return all;
+
+        // 스냅샷 타임스탬프 이후 entry만 필터 (ts는 ISO-8601 문자열 — 사전순 비교 가능).
+        var snapshotTs = snapshot.Timestamp ?? "";
+        return string.IsNullOrEmpty(snapshotTs)
+            ? all
+            : all.Where(e => string.CompareOrdinal(e.Ts, snapshotTs) > 0).ToList();
+    }
 }

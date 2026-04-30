@@ -4,7 +4,8 @@ using Spectre.Console;
 namespace Ralph.Commands;
 
 /// <summary>
-/// <c>ralph --status</c> — 진행률 + 병렬 batch + 현재 worktree (live/idle 검출).
+/// <c>ralph --status</c> — 진행률 + 병렬 batch + 현재 worktree (live/idle 검출) +
+/// fix2 #8 머지 트랜잭션 로그 섹션 (merge-log.jsonl 존재 시).
 /// </summary>
 public sealed class StatusCommand : ICommand
 {
@@ -73,6 +74,84 @@ public sealed class StatusCommand : ICommand
             }
         }
 
+        // fix2 #8: merge-log 섹션 (파일 존재 시만 표시 — legacy 호환)
+        await ShowMergeLogSectionAsync(tm, ct);
+
         return 0;
     }
+
+    /// <summary>
+    /// merge-log.jsonl을 읽어 마지막 batch, smoke 결과, 최근 머지, 이력 건수를 표시한다.
+    /// 파일이 없거나 entry가 없으면 섹션 자체를 생략한다 (legacy 호환).
+    /// </summary>
+    private static async Task ShowMergeLogSectionAsync(TaskManager tm, CancellationToken ct)
+    {
+        var repoRoot = Directory.GetCurrentDirectory();
+        var logSvc = new MergeLogService(repoRoot, RalphLogger.Null);
+        IReadOnlyList<Models.MergeLogEntry> entries;
+        try
+        {
+            entries = await logSvc.ReadAllAsync(ct);
+        }
+        catch
+        {
+            return;
+        }
+
+        if (entries.Count == 0) return;
+
+        var mergeEntries = entries.Where(e => string.IsNullOrEmpty(e.Event) || e.Event == "merge").ToList();
+        var rollbackEntries = entries.Where(e => e.Event == "rollback").ToList();
+
+        // 마지막 batch 기준 정보
+        var lastBatchNo = entries.Max(e => e.Batch);
+        var lastBatchMerges = mergeEntries.Where(e => e.Batch == lastBatchNo).ToList();
+        var lastBatchRollbacks = rollbackEntries.Where(e => e.Batch == lastBatchNo).ToList();
+        var lastTs = entries.Last().Ts;
+        var lastSmoke = lastBatchMerges.FirstOrDefault()?.SmokeTest ?? "?";
+
+        AnsiConsole.MarkupLine($"\n[cyan]머지 트랜잭션 로그[/] [dim]({RalphPaths.MergeLogRelativePath}):[/]");
+        AnsiConsole.MarkupLine($"  [cyan]마지막 batch :[/] #{lastBatchNo}  [dim]({Markup.Escape(lastTs)})[/]");
+
+        var smokeColor = lastSmoke switch { "passed" => "green", "failed" => "red", _ => "dim" };
+        AnsiConsole.MarkupLine($"  [cyan]smoke test   :[/] [{smokeColor}]{Markup.Escape(lastSmoke)}[/{smokeColor}]");
+
+        if (lastBatchRollbacks.Count > 0)
+        {
+            var revertSha = ShortSha(lastBatchRollbacks[0].RollbackRevertSha ?? "");
+            AnsiConsole.MarkupLine(
+                $"  [cyan]자동 롤백    :[/] [red]revert {Markup.Escape(revertSha)} ({lastBatchRollbacks.Count} task pending 복귀)[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("  [cyan]자동 롤백    :[/] [dim]없음[/]");
+        }
+
+        if (lastBatchMerges.Count > 0)
+        {
+            AnsiConsole.MarkupLine("  [cyan]최근 머지    :[/]");
+            foreach (var e in lastBatchMerges)
+            {
+                var shortSha = ShortSha(e.MergedSha);
+                var stateLabel = e.StateMarked ? "[dim]state=marked[/]" : "[red]state=unmarked[/]";
+                AnsiConsole.MarkupLine(
+                    $"    [dim]-[/] {Markup.Escape(e.TaskId)}  [dim]merged={Markup.Escape(shortSha)}[/]  {stateLabel}");
+            }
+        }
+
+        AnsiConsole.MarkupLine(
+            $"  [cyan]history      :[/] [dim]merge entry {mergeEntries.Count}건, rollback entry {rollbackEntries.Count}건[/]");
+
+        // state.json 불일치 경고 (merge-log stateMarked=true인데 state.json done=false인 경우)
+        var mismatchCount = mergeEntries.Count(e => e.StateMarked && !tm.IsDone(e.TaskId));
+        if (mismatchCount > 0)
+        {
+            AnsiConsole.MarkupLine(
+                $"\n[yellow]⚠ state.json과 merge-log의 stateMarked 불일치 {mismatchCount}건. " +
+                "--rollback 검토를 권장합니다.[/]");
+        }
+    }
+
+    private static string ShortSha(string sha) =>
+        string.IsNullOrEmpty(sha) ? "?" : sha.Length <= 7 ? sha : sha[..7];
 }

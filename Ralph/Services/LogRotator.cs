@@ -15,6 +15,7 @@ public static class LogRotator
     {
         RalphPaths.CostLedgerFileName,
         RalphPaths.ValidationLedgerFileName,
+        RalphPaths.MergeLogFileName,
     };
 
     /// <summary>

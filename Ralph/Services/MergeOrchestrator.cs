@@ -24,6 +24,10 @@ internal sealed class MergeOrchestrator
     private readonly string? _smokeTestCommandOverride;
     private readonly bool _autoRollbackOnSmokeFail;
 
+    // fix2 #8: 머지 트랜잭션 로그. MergeAndFinalizeAsync 첫 호출 시 lazy-init.
+    private MergeLogService? _mergeLog;
+    private int _batchCounter;
+
     /// <summary>RunSingle path를 머지가 abort 시 fallback으로 호출하기 위한 콜백.</summary>
     public Func<string, CancellationToken, Task<int>>? RerunSequential { get; set; }
 
@@ -75,6 +79,12 @@ internal sealed class MergeOrchestrator
         var batchSnapshot = !string.IsNullOrEmpty(preMergeSha)
             ? RollbackService.CaptureBatchSnapshot(baseBranch, preMergeSha!, taskIds.ToList())
             : null;
+
+        // fix2 #8: 머지 트랜잭션 로그. lazy-init + batch 인덱스 할당.
+        var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+        _mergeLog ??= new MergeLogService(repoRoot, _logger);
+        var batchIndex = Interlocked.Increment(ref _batchCounter);
+        var mergeShaBytaskId = new Dictionary<string, string>();
 
         // 순차적으로 메인에 병합. Live scope는 이미 종료되어 있으므로 진행률만 콘솔로 표시.
         AnsiConsole.MarkupLine(
@@ -165,6 +175,8 @@ internal sealed class MergeOrchestrator
             if (mergeResult.Success)
             {
                 AnsiConsole.MarkupLine($"  [green]✓[/] {Markup.Escape(taskId)} 병합 완료");
+                // fix2 #8: 머지 커밋 SHA 기록
+                mergeShaBytaskId[taskId] = await CaptureCurrentShaAsync(ct) ?? "";
             }
             else
             {
@@ -184,6 +196,8 @@ internal sealed class MergeOrchestrator
                     reportCleanupFailures(cleanupFailures);
                     return 1;
                 }
+                // fix2 #8: 충돌 해결 후 커밋 SHA 기록
+                mergeShaBytaskId[taskId] = await CaptureCurrentShaAsync(ct) ?? "";
             }
         }
 
@@ -192,6 +206,7 @@ internal sealed class MergeOrchestrator
         // 머지는 이미 base에 반영된 상태이므로, done 마킹이 누락된 채 다음 batch로 넘어가면
         // 다음 --run에서 동일 task가 재dispatch되어 worktree 충돌이 발생한다 (fix1.md 1번).
         var mergedTasks = taskIds.Where(id => !rebaseFailedTasks.Contains(id)).ToList();
+        var stateMarkResults = new Dictionary<string, bool>(); // fix2 #8: per-task done-mark 결과
         var marked = new List<string>();
         var pending = new List<string>(mergedTasks);
         foreach (var taskId in mergedTasks)
@@ -199,6 +214,7 @@ internal sealed class MergeOrchestrator
             try
             {
                 await MarkTaskDoneThreadSafeAsync(taskId, ct);
+                stateMarkResults[taskId] = true;
                 marked.Add(taskId);
                 pending.Remove(taskId);
                 var task = _taskManager.GetTask(taskId)!;
@@ -208,8 +224,13 @@ internal sealed class MergeOrchestrator
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
+                stateMarkResults[taskId] = false;
                 ReportStateWriteFailure(taskId, ex, marked, pending);
                 // smoke test는 실행하지 않는다 — state가 깨진 상태에서 추가 신호를 섞지 않는다.
+                // fix2 #8: batch abort 전 머지된 task들을 smokeTest="skipped"으로 기록
+                await AppendMergeLogEntriesAsync(
+                    mergedTasks, mergeShaBytaskId, stateMarkResults, "skipped",
+                    preMergeSha ?? "", batchIndex, ct);
                 return 1;
             }
         }
@@ -219,13 +240,27 @@ internal sealed class MergeOrchestrator
 
         // 5.5 머지 후 smoke test
         var smoke = await RunPostMergeSmokeTestAsync(preMergeSha, ct);
+        var smokeStr = smoke.Skipped ? "skipped" : smoke.Passed ? "passed" : "failed";
+
+        // fix2 #8: 모든 머지된 task에 대해 merge-log entry append (batch 단위 일괄)
+        await AppendMergeLogEntriesAsync(
+            mergedTasks, mergeShaBytaskId, stateMarkResults, smokeStr,
+            preMergeSha ?? "", batchIndex, ct);
+
         if (!smoke.Skipped && !smoke.Passed)
         {
             // fix2 #7: opt-in 자동 롤백. 실행 여부와 무관하게 batch는 실패(1)로 종료한다 —
             // 자동 롤백 성공도 base를 batch 이전 상태로 되돌렸을 뿐 "smoke가 통과한" 것은 아님.
             if (_autoRollbackOnSmokeFail && batchSnapshot is not null && mergedTasks.Count > 0)
             {
-                await TryAutoRollbackAsync(batchSnapshot, mergedTasks, smoke, ct);
+                // fix2 #8: TryAutoRollbackAsync는 revert SHA(성공) 또는 null(실패) 반환
+                var revertSha = await TryAutoRollbackAsync(batchSnapshot, mergedTasks, smoke, ct);
+                if (revertSha is not null)
+                {
+                    await AppendRollbackLogEntriesAsync(
+                        mergedTasks, mergeShaBytaskId, revertSha,
+                        preMergeSha ?? "", batchIndex, ct);
+                }
             }
             return 1;
         }
@@ -685,7 +720,8 @@ internal sealed class MergeOrchestrator
     /// state.json done 비트를 pending으로 재설정한다. revert 자체가 충돌나면 abort 후 보류.
     /// 보류/실패는 사용자 안내 + logger 기록으로 끝나고 batch는 항상 exit 1.
     /// </summary>
-    private async Task<bool> TryAutoRollbackAsync(
+    // fix2 #8: 반환값 변경 — null=실패/보류, non-null string=성공(revert commit SHA)
+    private async Task<string?> TryAutoRollbackAsync(
         BatchRollbackSnapshot snapshot,
         IReadOnlyList<string> mergedTasks,
         SmokePhaseResult smoke,
@@ -702,7 +738,7 @@ internal sealed class MergeOrchestrator
         {
             PrintAutoRollbackHeld(snapshot, mergedTasks, smoke, safety);
             _logger.Warn($"[auto-rollback] held — {safety.Reason}");
-            return false;
+            return null;
         }
 
         // base..HEAD 사이의 머지 커밋들 (오래된 것 → 최신 순으로 정렬). mergedTasks와 1:1 매핑.
@@ -712,7 +748,7 @@ internal sealed class MergeOrchestrator
             AnsiConsole.MarkupLine(
                 "[yellow]자동 롤백 대상 머지 커밋을 찾지 못했습니다 — base가 이미 batch 시작 시점입니다.[/]");
             _logger.Warn("[auto-rollback] no merge commits in base..HEAD; skipping revert");
-            return false;
+            return null;
         }
 
         var pairs = PairMergesWithTasks(mergeShas, mergedTasks);
@@ -730,7 +766,7 @@ internal sealed class MergeOrchestrator
             await _git.RunAsync(["revert", "--abort"], ct: ct);
             PrintAutoRollbackFailed(snapshot, mergeShas, rOut);
             _logger.Error($"[auto-rollback] revert failed: {rOut.Trim()}");
-            return false;
+            return null;
         }
 
         // 단일 revert 커밋으로 묶기. --allow-empty는 staged가 비었을 때(이미 동일 상태) 안전망.
@@ -741,8 +777,12 @@ internal sealed class MergeOrchestrator
             await _git.RunAsync(["revert", "--abort"], ct: ct);
             PrintAutoRollbackFailed(snapshot, mergeShas, cOut);
             _logger.Error($"[auto-rollback] commit failed after revert: {cOut.Trim()}");
-            return false;
+            return null;
         }
+
+        // fix2 #8: revert 커밋 SHA 획득 (merge-log rollback entry에 기록)
+        var (revHeadExit, revHeadOut) = await _git.RunAsync(["rev-parse", "HEAD"], ct: ct);
+        var revertCommitSha = revHeadExit == 0 ? revHeadOut.Trim() : "";
 
         // state.json: 해당 task들을 다시 pending으로. revert 성공 후 실패해도 깨진 상태가 남지 않게
         // best-effort로 진행하되, 실패는 사용자에게 명시적으로 안내.
@@ -775,7 +815,7 @@ internal sealed class MergeOrchestrator
             foreach (var id in statePending)
                 AnsiConsole.MarkupLine($"    - {Markup.Escape(id)}");
             _logger.Error($"[auto-rollback] state save failed after revert: {ex.Message}");
-            return false;
+            return null;
         }
 
         PrintAutoRollbackSucceeded(snapshot, mergedTasks, mergeShas, smoke);
@@ -787,7 +827,7 @@ internal sealed class MergeOrchestrator
             foreach (var (id, err) in stateFailed)
                 _logger.Error($"[auto-rollback] state pending failed for {id}: {err}");
         }
-        return true;
+        return revertCommitSha; // fix2 #8: revert SHA 반환 (비어있어도 성공 신호)
     }
 
     /// <summary>
@@ -988,6 +1028,85 @@ internal sealed class MergeOrchestrator
 
     private static string Short(string sha) =>
         string.IsNullOrEmpty(sha) ? "?" : sha.Length <= 7 ? sha : sha[..7];
+
+    // ─── fix2 #8: merge-log 헬퍼 ─────────────────────────────────────────────────
+
+    /// <summary>현재 브랜치 HEAD SHA를 가져온다. 실패 시 null.</summary>
+    private async Task<string?> CaptureCurrentShaAsync(CancellationToken ct)
+    {
+        try
+        {
+            var (exit, output) = await _git.RunAsync(["rev-parse", "HEAD"], ct: ct);
+            if (exit != 0) return null;
+            var sha = output.Trim();
+            return string.IsNullOrEmpty(sha) ? null : sha;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// 머지된 task 목록에 대해 merge-log entry를 일괄 append한다.
+    /// mergeShaBytaskId에 없는 task는 mergedSha=""로 기록한다.
+    /// stateMarkResults에 없는 task는 stateMarked=false로 기록한다.
+    /// append 실패는 warn 후 silent — batch를 중단하지 않는다.
+    /// </summary>
+    private async Task AppendMergeLogEntriesAsync(
+        IReadOnlyList<string> mergedTasks,
+        IReadOnlyDictionary<string, string> mergeShaBytaskId,
+        IReadOnlyDictionary<string, bool> stateMarkResults,
+        string smokeStr,
+        string baseSha,
+        int batchIndex,
+        CancellationToken ct)
+    {
+        if (_mergeLog is null) return;
+        foreach (var taskId in mergedTasks)
+        {
+            var mergedSha = mergeShaBytaskId.TryGetValue(taskId, out var s) ? s : "";
+            var stateMarked = stateMarkResults.TryGetValue(taskId, out var ok) && ok;
+            await _mergeLog.AppendMergeAsync(new MergeLogEntry
+            {
+                Ts = DateTime.UtcNow.ToString("o"),
+                Batch = batchIndex,
+                TaskId = taskId,
+                BaseSha = baseSha,
+                MergedSha = mergedSha,
+                StateMarked = stateMarked,
+                SmokeTest = smokeStr,
+            }, ct);
+        }
+    }
+
+    /// <summary>
+    /// 자동 롤백 발동 시 rollback entry를 일괄 append한다.
+    /// append 실패는 warn 후 silent.
+    /// </summary>
+    private async Task AppendRollbackLogEntriesAsync(
+        IReadOnlyList<string> mergedTasks,
+        IReadOnlyDictionary<string, string> mergeShaBytaskId,
+        string revertSha,
+        string baseSha,
+        int batchIndex,
+        CancellationToken ct)
+    {
+        if (_mergeLog is null) return;
+        foreach (var taskId in mergedTasks)
+        {
+            var mergedSha = mergeShaBytaskId.TryGetValue(taskId, out var s) ? s : "";
+            await _mergeLog.AppendRollbackAsync(new MergeLogEntry
+            {
+                Ts = DateTime.UtcNow.ToString("o"),
+                Batch = batchIndex,
+                TaskId = taskId,
+                BaseSha = baseSha,
+                MergedSha = mergedSha,
+                StateMarked = false,
+                SmokeTest = "failed",
+                Event = "rollback",
+                RollbackRevertSha = revertSha,
+            }, ct);
+        }
+    }
 
     private sealed record RollbackSafety(
         bool Safe,
