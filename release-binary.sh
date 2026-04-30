@@ -156,14 +156,74 @@ if [[ -n "$NOTES_FILE" && ! -f "$NOTES_FILE" ]]; then
     err "Notes file not found: $NOTES_FILE"
 fi
 
+# ─── Update version references in source/docs via claude CLI ───────────────
+# Files that display the current version and must be kept in sync:
+#   - Ralph/Commands/DisplayHelpers.cs  (const Version, without the "v" prefix)
+#   - CLAUDE.md                          ("Current version: **vX.Y**.")
+#   - README.md                          ("Current version: **vX.Y**.")
+#   - README.ko.md                       ("현재 버전: **vX.Y**.")
+update_version_refs() {
+    local new_version="$1"
+    local stripped="${new_version#v}"
+
+    need claude
+    log "Updating version references to $new_version via claude CLI"
+
+    local prompt
+    prompt=$(cat <<EOF
+Bump the Ralph project version to ${new_version}. Make exactly these edits and nothing else:
+
+1. File: Ralph/Commands/DisplayHelpers.cs
+   Replace the existing Version constant value so the line reads:
+       public const string Version = "${stripped}";
+   (no leading "v" — this constant holds the bare number).
+
+2. File: CLAUDE.md
+   In the "## Project Overview" paragraph, replace the existing "Current version: **vX.Y**." sentence so it reads "Current version: **${new_version}**.".
+
+3. File: README.md
+   On the first paragraph after the H1, replace the existing "Current version: **vX.Y**." sentence so it reads "Current version: **${new_version}**.".
+
+4. File: README.ko.md
+   On the first paragraph after the H1, replace the existing "현재 버전: **vX.Y**." sentence so it reads "현재 버전: **${new_version}**.".
+
+Use the Edit tool for each file. Do not modify any other lines, files, or formatting. Do not create new files. Do not run git or any other shell commands.
+EOF
+)
+    claude --dangerously-skip-permissions -p "$prompt"
+}
+
+if [[ $CREATE_TAG -eq 1 && $DRY_RUN -eq 0 ]]; then
+    if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+        log "Tag $VERSION already exists locally; skipping version-ref update"
+    else
+        if [[ $ALLOW_DIRTY -eq 0 ]] && ! git diff-index --quiet HEAD --; then
+            err "Working tree has uncommitted changes; commit/stash or pass --allow-dirty"
+        fi
+
+        update_version_refs "$VERSION"
+
+        VERSION_FILES=(
+            "Ralph/Commands/DisplayHelpers.cs"
+            "CLAUDE.md"
+            "README.md"
+            "README.ko.md"
+        )
+        if ! git diff --quiet -- "${VERSION_FILES[@]}"; then
+            log "Committing version bump to $VERSION"
+            git add -- "${VERSION_FILES[@]}"
+            git commit -m "릴리스: 버전을 $VERSION 으로 업데이트"
+        else
+            log "Version references already at $VERSION; nothing to commit"
+        fi
+    fi
+fi
+
 # ─── Tag (before build, so a build failure leaves no orphan tag pushed) ────
 if [[ $CREATE_TAG -eq 1 && $DRY_RUN -eq 0 ]]; then
     if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
         log "Tag $VERSION already exists locally; skipping creation"
     else
-        if [[ $ALLOW_DIRTY -eq 0 ]] && ! git diff-index --quiet HEAD --; then
-            err "Working tree has uncommitted changes; commit/stash or pass --allow-dirty"
-        fi
         log "Creating annotated tag $VERSION at HEAD"
         git tag -a "$VERSION" -m "Release $VERSION"
     fi

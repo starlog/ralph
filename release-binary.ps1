@@ -107,6 +107,81 @@ if ($Version -notmatch '^v[0-9]') {
     Fail "Version must start with 'v' followed by a digit (e.g. v1.3), got: $Version"
 }
 
+# ─── Update version references in source/docs via claude CLI ───────────────
+# Files that display the current version and must be kept in sync:
+#   - Ralph/Commands/DisplayHelpers.cs  (const Version, without the "v" prefix)
+#   - CLAUDE.md                          ("Current version: **vX.Y**.")
+#   - README.md                          ("Current version: **vX.Y**.")
+#   - README.ko.md                       ("현재 버전: **vX.Y**.")
+function Update-VersionRefs {
+    param([string]$NewVersion)
+
+    Need claude
+    $stripped = $NewVersion -replace '^v', ''
+    Write-Step "Updating version references to $NewVersion via claude CLI"
+
+    $prompt = @"
+Bump the Ralph project version to $NewVersion. Make exactly these edits and nothing else:
+
+1. File: Ralph/Commands/DisplayHelpers.cs
+   Replace the existing Version constant value so the line reads:
+       public const string Version = "$stripped";
+   (no leading "v" — this constant holds the bare number).
+
+2. File: CLAUDE.md
+   In the "## Project Overview" paragraph, replace the existing "Current version: **vX.Y**." sentence so it reads "Current version: **$NewVersion**.".
+
+3. File: README.md
+   On the first paragraph after the H1, replace the existing "Current version: **vX.Y**." sentence so it reads "Current version: **$NewVersion**.".
+
+4. File: README.ko.md
+   On the first paragraph after the H1, replace the existing "현재 버전: **vX.Y**." sentence so it reads "현재 버전: **$NewVersion**.".
+
+Use the Edit tool for each file. Do not modify any other lines, files, or formatting. Do not create new files. Do not run git or any other shell commands.
+"@
+
+    claude --dangerously-skip-permissions -p $prompt
+    if ($LASTEXITCODE -ne 0) { Fail "claude version-ref update failed" }
+}
+
+if (-not $NoTag -and -not $DryRun) {
+    git rev-parse -q --verify "refs/tags/$Version" *> $null
+    $tagExistsForBump = ($LASTEXITCODE -eq 0)
+
+    if ($tagExistsForBump) {
+        Write-Step "Tag $Version already exists locally; skipping version-ref update"
+    }
+    else {
+        if (-not $AllowDirty) {
+            git diff-index --quiet HEAD -- *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Fail "Working tree has uncommitted changes; commit/stash or pass -AllowDirty"
+            }
+        }
+
+        Update-VersionRefs -NewVersion $Version
+
+        $versionFiles = @(
+            'Ralph/Commands/DisplayHelpers.cs',
+            'CLAUDE.md',
+            'README.md',
+            'README.ko.md'
+        )
+        git diff --quiet -- @versionFiles *> $null
+        $unchanged = ($LASTEXITCODE -eq 0)
+        if (-not $unchanged) {
+            Write-Step "Committing version bump to $Version"
+            git add -- @versionFiles
+            if ($LASTEXITCODE -ne 0) { Fail "git add failed" }
+            git commit -m "릴리스: 버전을 $Version 으로 업데이트"
+            if ($LASTEXITCODE -ne 0) { Fail "git commit failed" }
+        }
+        else {
+            Write-Step "Version references already at $Version; nothing to commit"
+        }
+    }
+}
+
 # ─── Tag (before build, so a build failure leaves no orphan tag pushed) ────
 if (-not $NoTag -and -not $DryRun) {
     git rev-parse -q --verify "refs/tags/$Version" *> $null
@@ -116,12 +191,6 @@ if (-not $NoTag -and -not $DryRun) {
         Write-Step "Tag $Version already exists locally; skipping creation"
     }
     else {
-        if (-not $AllowDirty) {
-            git diff-index --quiet HEAD -- *> $null
-            if ($LASTEXITCODE -ne 0) {
-                Fail "Working tree has uncommitted changes; commit/stash or pass -AllowDirty"
-            }
-        }
         Write-Step "Creating annotated tag $Version at HEAD"
         git tag -a $Version -m "Release $Version"
         if ($LASTEXITCODE -ne 0) { Fail "git tag failed" }
