@@ -363,7 +363,11 @@ public class ParallelExecutor
                 if (taskIds.Count == 0) return 1;
             }
 
-            // 머지 단계 위임
+            // 머지 단계 위임. mergeExit != 0 인 경우는 다음 중 하나:
+            //   - 머지 phase 자체 실패 (충돌 미해결, strict-files 위반 등)
+            //   - state.json 쓰기 실패로 batch 중단 (fix #1: silent 진행 금지)
+            //   - 머지 후 smoke test 실패
+            // 어느 경우든 다음 batch 진입을 차단하고 비-0으로 종료한다.
             var mergeExit = await _mergeOrchestrator.MergeAndFinalizeAsync(
                 taskIds, baseBranch, primaryStrategy, strategyChain,
                 reportCleanupFailures: extra => _cleanupFailures += extra,
