@@ -114,7 +114,7 @@ public sealed class StatusCommand : ICommand
         AnsiConsole.MarkupLine($"  [cyan]마지막 batch :[/] #{lastBatchNo}  [dim]({Markup.Escape(lastTs)})[/]");
 
         var smokeColor = lastSmoke switch { "passed" => "green", "failed" => "red", _ => "dim" };
-        AnsiConsole.MarkupLine($"  [cyan]smoke test   :[/] [{smokeColor}]{Markup.Escape(lastSmoke)}[/{smokeColor}]");
+        AnsiConsole.MarkupLine($"  [cyan]smoke test   :[/] [{smokeColor}]{Markup.Escape(lastSmoke)}[/]");
 
         if (lastBatchRollbacks.Count > 0)
         {
