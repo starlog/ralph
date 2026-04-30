@@ -114,7 +114,12 @@ public class ParallelExecutor
         if (stale.Count > 0)
         {
             AnsiConsole.MarkupLine($"[yellow]잔존 worktree {stale.Count}개 감지 (clean). 정리합니다...[/]");
-            await _worktree.CleanupAllAsync(_logger, ct);
+            using var staleCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            try { await _worktree.CleanupAllAsync(_logger, staleCts.Token); }
+            catch (OperationCanceledException)
+            {
+                _logger.Warn("잔존 worktree 전체 정리 타임아웃 (30초). 'ralph --worktree-cleanup'으로 정리하세요.");
+            }
         }
 
         while (true)
@@ -177,7 +182,12 @@ public class ParallelExecutor
             }
         }
 
-        await _worktree.CleanupAllAsync(_logger, ct);
+        using var finalCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try { await _worktree.CleanupAllAsync(_logger, finalCts.Token); }
+        catch (OperationCanceledException)
+        {
+            _logger.Warn("최종 worktree 전체 정리 타임아웃 (30초). 'ralph --worktree-cleanup'으로 정리하세요.");
+        }
         return 0;
     }
 
@@ -366,8 +376,18 @@ public class ParallelExecutor
             AnsiConsole.MarkupLine("\n[dim]Worktree 정리 중...[/]");
             foreach (var taskId in worktrees.Keys)
             {
-                if (!await _worktree.CleanupWorktreeAsync(taskId, _logger, CancellationToken.None))
-                    _cleanupFailures++;
+                using var cleanupCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cleanupCts.CancelAfter(TimeSpan.FromSeconds(30));
+                try
+                {
+                    if (!await _worktree.CleanupWorktreeAsync(taskId, _logger, cleanupCts.Token))
+                        Interlocked.Increment(ref _cleanupFailures);
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.Warn($"Cleanup timed out or cancelled for {taskId}; 수동 정리: ralph --worktree-cleanup");
+                    Interlocked.Increment(ref _cleanupFailures);
+                }
             }
 
             if (_cleanupFailures > 0)
