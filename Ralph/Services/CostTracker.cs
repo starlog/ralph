@@ -18,6 +18,8 @@ public class CostEntry
     public double DurationSec { get; set; }
     /// <summary>true이면 stream-json result에 usage 정보가 누락된 placeholder 기록.</summary>
     public bool UsageMissing { get; set; }
+    /// <summary>stdin으로 전송한 prompt의 UTF-8 바이트 수. 0이면 미기록(구버전 항목).</summary>
+    public long PromptBytes { get; set; }
 }
 
 public sealed class PricingEntry
@@ -135,6 +137,7 @@ public class CostTracker
                 EstimatedUsd = 0.0,
                 DurationSec = result?.Duration.TotalSeconds ?? 0.0,
                 UsageMissing = true,
+                PromptBytes = result?.PromptBytes ?? 0,
             };
             var ph = JsonSerializer.Serialize(placeholder, JsonOpts) + "\n";
             await WriteLock.WaitAsync(ct);
@@ -159,6 +162,7 @@ public class CostTracker
             CacheCreationTokens = u.CacheCreationTokens,
             EstimatedUsd = estimated,
             DurationSec = result.Duration.TotalSeconds,
+            PromptBytes = result.PromptBytes,
         };
 
         var line = JsonSerializer.Serialize(entry, JsonOpts) + "\n";

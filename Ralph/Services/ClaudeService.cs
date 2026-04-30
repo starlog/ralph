@@ -70,6 +70,9 @@ public class ClaudeResult
     /// flag 호환을 위해 둘 다 유지한다(TimedOut=true ⇔ Timeout, RateLimited=true ⇔ RateLimited).
     /// </summary>
     public ClaudeFailureKind FailureKind { get; init; }
+
+    /// <summary>stdin으로 전송한 prompt의 UTF-8 바이트 수. cost ledger의 promptBytes 필드에 기록된다.</summary>
+    public long PromptBytes { get; init; }
 }
 
 public record TokenUsage(
@@ -183,6 +186,9 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         if (!string.IsNullOrEmpty(workingDirectory))
             logger?.Info($"Working directory: {workingDirectory}");
 
+        const int PipeBufferWarningBytes = 32 * 1024;
+        var promptByteCount = (long)Encoding.UTF8.GetByteCount(prompt);
+
         using var process = new Process { StartInfo = psi };
         var outputBuf = new StringBuilder();
         var streamedOutput = new StringBuilder();
@@ -230,6 +236,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                 ErrorMessages = ex.Message,
                 ExitCode = -1,
                 FailureKind = startKind,
+                PromptBytes = promptByteCount,
             };
         }
         DebugLog($"Process started (PID: {process.Id})");
@@ -237,42 +244,13 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         // Read stderr in background to prevent deadlocks
         var stderrTask = process.StandardError.ReadToEndAsync(effectiveCt);
 
-        // Always pipe prompt via stdin (avoids argument length limits and escaping issues)
-        try
-        {
-            DebugLog($"Sending prompt ({prompt.Length:N0} chars)...");
-            await process.StandardInput.WriteAsync(prompt);
-            process.StandardInput.Close();
-            DebugLog("Prompt sent, waiting for response...");
-        }
-        catch (IOException ex)
-        {
-            // Process exited before we finished writing — read stderr for diagnostics
-            var earlyStderr = await stderrTask;
-            await process.WaitForExitAsync(effectiveCt);
-            var errMsg = !string.IsNullOrWhiteSpace(earlyStderr) ? earlyStderr : ex.Message;
-            if (output == null)
-                AnsiConsole.MarkupLine($"[red]Claude process failed to start: {Markup.Escape(errMsg.Trim())}[/]");
-            logger?.Error($"Claude stdin pipe broken: {errMsg.Trim()}");
-            var pipeKind = ClassifyFailure(
-                exitCode: process.ExitCode,
-                timedOut: false,
-                rateLimited: false,
-                stderr: earlyStderr,
-                errorMessages: ex.Message,
-                jsonParseFailures: 0,
-                gotAnyAssistantMessage: false);
-            logger?.Info($"[ClaudeClassify] kind={pipeKind} exit={process.ExitCode} jsonFails=0 gotMsg=False");
-            return new ClaudeResult
-            {
-                Success = false,
-                Output = "",
-                Stderr = earlyStderr,
-                ErrorMessages = ex.Message,
-                ExitCode = process.ExitCode,
-                FailureKind = pipeKind,
-            };
-        }
+        // Always pipe prompt via stdin (avoids argument length limits and escaping issues).
+        // Write in background (concurrent with stdout reading) to prevent deadlock when prompt
+        // exceeds the OS pipe buffer — writer would block waiting for reader; reader hasn't started yet.
+        if (promptByteCount > PipeBufferWarningBytes)
+            logger?.Warn($"prompt 크기 {promptByteCount:N0}바이트, OS pipe buffer 초과 가능 — 청크 write 사용");
+        DebugLog($"Sending prompt ({prompt.Length:N0} chars, {promptByteCount:N0} bytes)...");
+        var stdinTask = WritePromptChunkedAsync(process.StandardInput, prompt, effectiveCt);
 
         // Show spinner while waiting for Claude's first response (console mode only, not in debug)
         var spinnerMsg = "Claude 응답 대기 중...";
@@ -459,6 +437,42 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         streamSw.Stop();
         DebugLog($"Stream ended (totalChars: {totalChars:N0}, hasStreamDeltas: {hasStreamDeltas})");
 
+        // Await stdin write task (started concurrently to prevent large-prompt deadlock)
+        IOException? stdinIoEx = null;
+        try { await stdinTask; }
+        catch (IOException ex) { stdinIoEx = ex; }
+        catch (OperationCanceledException) { /* handled by outer catch below */ }
+
+        if (stdinIoEx != null)
+        {
+            // Process exited before stdin was fully read — read stderr for diagnostics
+            stderr = await stderrTask;
+            await process.WaitForExitAsync(effectiveCt);
+            var errMsg = !string.IsNullOrWhiteSpace(stderr) ? stderr : stdinIoEx.Message;
+            if (output == null)
+                AnsiConsole.MarkupLine($"[red]Claude process failed to start: {Markup.Escape(errMsg.Trim())}[/]");
+            logger?.Error($"Claude stdin pipe broken: {errMsg.Trim()}");
+            var pipeKind = ClassifyFailure(
+                exitCode: process.ExitCode,
+                timedOut: false,
+                rateLimited: false,
+                stderr: stderr,
+                errorMessages: stdinIoEx.Message,
+                jsonParseFailures: 0,
+                gotAnyAssistantMessage: false);
+            logger?.Info($"[ClaudeClassify] kind={pipeKind} exit={process.ExitCode} jsonFails=0 gotMsg=False");
+            return new ClaudeResult
+            {
+                Success = false,
+                Output = "",
+                Stderr = stderr,
+                ErrorMessages = stdinIoEx.Message,
+                ExitCode = process.ExitCode,
+                FailureKind = pipeKind,
+                PromptBytes = promptByteCount,
+            };
+        }
+
         // Drain stderr
         stderr = await stderrTask;
         await process.WaitForExitAsync(effectiveCt);
@@ -473,6 +487,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             // process tree 강제 종료 (claude 자식 프로세스까지)
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
             try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+            // stdin task 관찰 (process kill 후 pipe broken 예외를 silent-consume)
+            try { await stdinTask.ConfigureAwait(false); } catch { }
 
             if (!timedOut) throw;
 
@@ -497,6 +513,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                 Duration = elapsed,
                 TimedOut = true,
                 FailureKind = ClaudeFailureKind.Timeout,
+                PromptBytes = promptByteCount,
             };
         }
 
@@ -553,7 +570,27 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             RateLimited = rateLimited,
             RetryAfterSec = retryAfter,
             FailureKind = failureKind,
+            PromptBytes = promptByteCount,
         };
+    }
+
+    /// <summary>
+    /// prompt를 32KB 청크 단위로 stdin에 비동기 write+flush 후 스트림을 닫습니다.
+    /// 백그라운드 태스크로 실행해 stdout 읽기와 동시에 진행함으로써 대형 prompt 데드락을 방지합니다.
+    /// </summary>
+    private static async Task WritePromptChunkedAsync(
+        StreamWriter writer, string prompt, CancellationToken ct)
+    {
+        const int ChunkSize = 32 * 1024;
+        var offset = 0;
+        while (offset < prompt.Length)
+        {
+            var length = Math.Min(ChunkSize, prompt.Length - offset);
+            await writer.WriteAsync(prompt.AsMemory(offset, length), ct);
+            await writer.FlushAsync(ct);
+            offset += length;
+        }
+        writer.Close();
     }
 
     /// <summary>
