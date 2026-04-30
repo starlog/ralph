@@ -50,6 +50,19 @@ public sealed class PlanPromptCommand : ICommand
 
         AnsiConsole.Write(new Rule("[green]RALPH - Plan Prompt Preview[/]").RuleStyle("blue"));
         AnsiConsole.MarkupLine($"[cyan]PRD File:[/] {Markup.Escape(prdFile)}");
+
+        try
+        {
+            var prdContent = await File.ReadAllTextAsync(prdFullPath, ct);
+            var decision = PlanChunker.Decide(prdContent);
+            AnsiConsole.Markup(PlanChunker.FormatDecisionBox(decision));
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine(
+                $"[yellow]경고: 청킹 결정 박스 생략 — PRD 읽기 실패 ({Markup.Escape(ex.Message)})[/]");
+        }
+
         AnsiConsole.Write(new Rule().RuleStyle("blue"));
         AnsiConsole.WriteLine(prompt);
 
