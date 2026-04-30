@@ -73,7 +73,7 @@ public class StateStore
         try
         {
             EnsureTaskState(taskId).Done = true;
-            await SaveInternalAsync(ct);
+            await SaveWithRetryAsync(ct);
         }
         finally { _lock.Release(); }
     }
@@ -86,7 +86,7 @@ public class StateStore
             var ts = EnsureTaskState(taskId);
             ts.Subtasks ??= new Dictionary<string, bool>();
             ts.Subtasks[subtaskId] = true;
-            await SaveInternalAsync(ct);
+            await SaveWithRetryAsync(ct);
         }
         finally { _lock.Release(); }
     }
@@ -154,6 +154,33 @@ public class StateStore
             _data.Tasks[taskId] = ts;
         }
         return ts;
+    }
+
+    /// <summary>
+    /// SaveInternalAsync를 transient I/O 에러 한정으로 짧게 재시도한다.
+    /// 재시도 대상: <see cref="IOException"/>, <see cref="UnauthorizedAccessException"/>.
+    /// 재시도 안 함: <see cref="OperationCanceledException"/>, <see cref="JsonException"/>, 기타.
+    /// 모두 실패하면 마지막 예외를 그대로 rethrow하여 호출자가 원인 타입을 식별할 수 있게 한다.
+    /// </summary>
+    private async Task SaveWithRetryAsync(CancellationToken ct)
+    {
+        const int maxRetries = 2;
+        const int delayMs = 100;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await SaveInternalAsync(ct);
+                return;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+                when ((ex is IOException || ex is UnauthorizedAccessException)
+                      && attempt < maxRetries)
+            {
+                await Task.Delay(delayMs, ct);
+            }
+        }
     }
 
     private async Task SaveInternalAsync(CancellationToken ct)

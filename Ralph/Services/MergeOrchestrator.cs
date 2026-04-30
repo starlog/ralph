@@ -142,11 +142,18 @@ internal sealed class MergeOrchestrator
         }
 
         // 4. 상태 업데이트 (thread-safe).
+        // state.json 쓰기 실패 시 silent 진행하지 않고 즉시 batch를 중단한다.
+        // 머지는 이미 base에 반영된 상태이므로, done 마킹이 누락된 채 다음 batch로 넘어가면
+        // 다음 --run에서 동일 task가 재dispatch되어 worktree 충돌이 발생한다 (fix1.md 1번).
+        var marked = new List<string>();
+        var pending = new List<string>(taskIds);
         foreach (var taskId in taskIds)
         {
             try
             {
                 await MarkTaskDoneThreadSafeAsync(taskId, ct);
+                marked.Add(taskId);
+                pending.Remove(taskId);
                 var task = _taskManager.GetTask(taskId)!;
                 AnsiConsole.MarkupLine($"[green]태스크 완료: {Markup.Escape(task.Title)}[/]");
                 _logger.TaskEnd(taskId, "completed");
@@ -154,9 +161,9 @@ internal sealed class MergeOrchestrator
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                AnsiConsole.MarkupLine(
-                    $"[red]✗[/] {Markup.Escape(taskId)} done 마킹 실패: {Markup.Escape(ex.Message)}");
-                _logger.Error($"MarkTaskDone failed for {taskId}: {ex.Message}");
+                ReportStateWriteFailure(taskId, ex, marked, pending);
+                // smoke test는 실행하지 않는다 — state가 깨진 상태에서 추가 신호를 섞지 않는다.
+                return 1;
             }
         }
 
@@ -168,6 +175,66 @@ internal sealed class MergeOrchestrator
             return smokeFail;
 
         return 0;
+    }
+
+    /// <summary>
+    /// done 마킹 실패 시 사용자에게 batch 중단 사유와 복구 안내를 표시하고 logger에 기록한다.
+    /// 이미 머지된 변경분은 base 브랜치에 남아있으며 자동 롤백하지 않는다 (정책).
+    /// </summary>
+    private void ReportStateWriteFailure(
+        string failedTaskId, Exception ex, List<string> marked, List<string> pending)
+    {
+        var stateFilePath = _taskManager.State.FilePath;
+        var exceptionType = ex.GetType().FullName ?? ex.GetType().Name;
+
+        AnsiConsole.MarkupLine(
+            $"\n[red]✗[/] {Markup.Escape(failedTaskId)} done 마킹 실패: {Markup.Escape(ex.Message)}");
+        AnsiConsole.MarkupLine($"  [dim]원인: {Markup.Escape(exceptionType)}[/]");
+        AnsiConsole.MarkupLine(
+            "  [red]state.json 쓰기 실패로 batch 중단; 수동 복구 필요.[/]");
+        AnsiConsole.MarkupLine(
+            "  [yellow]이미 머지된 변경분은 base 브랜치에 남아 있습니다 (자동 롤백하지 않음).[/]");
+
+        AnsiConsole.MarkupLine("\n  [green]완료 처리된 task (state.json 반영 완료):[/]");
+        if (marked.Count == 0)
+        {
+            AnsiConsole.MarkupLine("    [dim](없음)[/]");
+        }
+        else
+        {
+            foreach (var id in marked)
+                AnsiConsole.MarkupLine($"    - {Markup.Escape(id)}");
+        }
+
+        AnsiConsole.MarkupLine("  [yellow]미처리 task (머지는 됐으나 done 마킹 안 됨):[/]");
+        if (pending.Count == 0)
+        {
+            AnsiConsole.MarkupLine("    [dim](없음)[/]");
+        }
+        else
+        {
+            foreach (var id in pending)
+            {
+                var marker = id == failedTaskId ? "  [red]← 실패 지점[/]" : "";
+                AnsiConsole.MarkupLine($"    - {Markup.Escape(id)}{marker}");
+            }
+        }
+
+        AnsiConsole.MarkupLine("\n  [cyan]복구 안내:[/]");
+        AnsiConsole.MarkupLine(
+            $"    1) [dim]{Markup.Escape(stateFilePath)}[/] 의 디스크 / 권한 / 잠금을 확인하세요.");
+        AnsiConsole.MarkupLine(
+            "    2) 미처리 task의 변경이 base 브랜치에 적용되었는지 직접 확인 후, " +
+            "필요 시 state.json의 tasks[\"<id>\"].done = true 로 수동 편집하세요.");
+        AnsiConsole.MarkupLine(
+            "    3) 수동 정리 후 [cyan]ralph --run[/] 으로 재개하세요.");
+
+        _logger.Error(
+            $"[merge:done-mark] {failedTaskId} state save failed after retries: " +
+            $"{exceptionType}: {ex.Message}");
+        _logger.Error(
+            $"[merge:done-mark] marked=[{string.Join(",", marked)}] " +
+            $"pending=[{string.Join(",", pending)}]");
     }
 
     /// <summary>
