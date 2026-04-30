@@ -3,7 +3,7 @@
 [한국어](README.md) | **English**
 
 > One page of intent → many Claudes working in parallel → automatically merged into a finished project.
-> Single self-contained binary on .NET 8. Windows / macOS / Linux. Current version: **v1.22**.
+> Single self-contained binary on .NET 8. Windows / macOS / Linux. Current version: **v1.32**.
 
 ---
 
