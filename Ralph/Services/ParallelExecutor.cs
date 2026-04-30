@@ -33,7 +33,7 @@ public class ParallelExecutor
     /// <summary>Per-worktree cleanup timeout. Tests can override to a short value.</summary>
     internal TimeSpan CleanupTimeout = TimeSpan.FromSeconds(30);
     /// <summary>Tests can inject a custom cleanup function to simulate slow/hung cleanup.</summary>
-    internal Func<string, RalphLogger?, CancellationToken, Task<bool>>? CleanupDelegate;
+    internal Func<string, RalphLogger, CancellationToken, Task<bool>>? CleanupDelegate;
     /// <summary>Accumulated cleanup failure count, exposed for testing.</summary>
     internal int CleanupFailureCount => _cleanupFailures;
 
@@ -344,7 +344,8 @@ public class ParallelExecutor
                     await Task.WhenAll(execTasks);
 
                     refreshTimer.Dispose();
-                    try { await refreshTask; } catch (OperationCanceledException) { }
+                    try { await refreshTask; }
+                    catch (OperationCanceledException) { /* refresh task drain — cancellation은 정상 종료 신호 */ }
 
                     tracker.RefreshAllOutputSizes();
                     ctx.UpdateTarget(tracker.BuildTable());

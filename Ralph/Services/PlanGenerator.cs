@@ -23,6 +23,7 @@ public partial class PlanGenerator
         string? correctionContext = null,
         CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         categories ??= DefaultCategories;
         var isCorrection = !string.IsNullOrEmpty(correctionContext);
         AnsiConsole.MarkupLine(isCorrection
@@ -136,7 +137,8 @@ public partial class PlanGenerator
         }
         catch
         {
-            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            try { if (File.Exists(tmp)) File.Delete(tmp); }
+            catch { /* tmp 정리 실패는 의도적 무시: 원인 예외 보존이 우선 */ }
             throw;
         }
 

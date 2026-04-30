@@ -84,15 +84,15 @@ public class PlanValidatorTests
     }
 
     [Fact]
-    public async Task Empty_prompt_is_warning_not_error()
+    public async Task Empty_prompt_is_error()
     {
+        // fix5: 빈 prompt는 silent 마스킹을 유발하므로 plan 단계에서 error로 차단한다.
         var tm = await Tm("""
         {"tasks":[{"id":"a","title":"A","done":false}]}
         """);
         var r = PlanValidator.Validate(tm);
-        Assert.False(r.HasErrors);
-        Assert.True(r.HasWarnings);
-        Assert.Contains(r.Warnings, w => w.Contains("prompt가 비어"));
+        Assert.True(r.HasErrors);
+        Assert.Contains(r.Errors, e => e.Contains("prompt가 비어"));
     }
 
     [Fact]

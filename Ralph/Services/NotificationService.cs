@@ -31,6 +31,7 @@ public class NotificationService
         RalphLogger? logger = null,
         CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var url = success
             ? settings?.OnComplete ?? Environment.GetEnvironmentVariable("RALPH_WEBHOOK_URL")
             : settings?.OnFailure ?? settings?.OnComplete ?? Environment.GetEnvironmentVariable("RALPH_WEBHOOK_URL");
@@ -50,19 +51,19 @@ public class NotificationService
             using var response = await HttpClient.PostAsync(url, content, ct);
             if (response.IsSuccessStatusCode)
             {
-                logger?.Info($"Notification sent: {url} (format: {format}, status: {(int)response.StatusCode})");
+                logger.Info($"Notification sent: {url} (format: {format}, status: {(int)response.StatusCode})");
             }
             else
             {
                 var body = await response.Content.ReadAsStringAsync(ct);
-                logger?.Warn($"Notification webhook returned {(int)response.StatusCode} (format: {format}): {body.Trim()}");
+                logger.Warn($"Notification webhook returned {(int)response.StatusCode} (format: {format}): {body.Trim()}");
                 AnsiConsole.MarkupLine(
                     $"[yellow]알림 webhook 응답: {(int)response.StatusCode} (format: {format})[/]");
             }
         }
         catch (Exception ex)
         {
-            logger?.Warn($"Notification webhook failed: {ex.Message}");
+            logger.Warn($"Notification webhook failed: {ex.Message}");
             AnsiConsole.MarkupLine($"[yellow]알림 전송 실패: {Markup.Escape(ex.Message)}[/]");
         }
     }

@@ -1,11 +1,13 @@
 namespace Ralph.Services;
 
-public sealed class RalphLogger : IDisposable
+public class RalphLogger : IDisposable
 {
-    private readonly StreamWriter _writer;
+    private readonly StreamWriter? _writer;
     private readonly object _lockObj = new();
 
     public string LogFile { get; }
+
+    public static RalphLogger Null { get; } = new NullLogger();
 
     public RalphLogger(string logDir = RalphPaths.LogDir)
     {
@@ -15,8 +17,15 @@ public sealed class RalphLogger : IDisposable
         _writer.WriteLine($"Ralph session started at {DateTime.Now}");
     }
 
-    public void Log(string level, string message)
+    protected RalphLogger()
     {
+        LogFile = "";
+        _writer = null;
+    }
+
+    public virtual void Log(string level, string message)
+    {
+        if (_writer is null) return;
         lock (_lockObj)
         {
             _writer.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}");
@@ -33,11 +42,17 @@ public sealed class RalphLogger : IDisposable
     public void TaskEnd(string taskId, string status)
         => Info($"=== Task ended: {taskId} - status: {status} ===");
 
-    public void Dispose()
+    public virtual void Dispose()
     {
         lock (_lockObj)
         {
-            _writer.Dispose();
+            _writer?.Dispose();
         }
+    }
+
+    private sealed class NullLogger : RalphLogger
+    {
+        public override void Log(string level, string message) { }
+        public override void Dispose() { }
     }
 }

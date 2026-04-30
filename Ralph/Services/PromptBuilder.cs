@@ -85,7 +85,11 @@ public static class PromptBuilder
 
         // 작업 지시
         sb.AppendLine("## 작업 지시");
-        sb.AppendLine(task.Prompt ?? "(prompt 미지정)");
+        if (string.IsNullOrWhiteSpace(task.Prompt))
+            throw new InvalidOperationException(
+                $"task '{task.Id}'의 prompt가 비어있습니다. " +
+                $"silent 마스킹 대신 명시적 실패 — `ralph --validate`로 plan을 점검하세요.");
+        sb.AppendLine(task.Prompt);
         sb.AppendLine();
 
         // 완료 보고

@@ -69,13 +69,14 @@ public class WorktreeService
         string taskId, string baseBranch, RalphLogger? logger = null,
         bool sharedObjects = false, CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var branchName = RalphPaths.GetBranchName(taskId);
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
 
         // 이미 존재하면 정리
         if (Directory.Exists(worktreePath))
         {
-            logger?.Warn($"Worktree already exists for {taskId}, cleaning up...");
+            logger.Warn($"Worktree already exists for {taskId}, cleaning up...");
             await CleanupWorktreeAsync(taskId, logger, ct);
         }
 
@@ -96,7 +97,7 @@ public class WorktreeService
             }
             var (delExit, delOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
             if (delExit != 0)
-                logger?.Warn($"기존 ralph 브랜치 삭제 실패 ({taskId}): {delOut.Trim()}");
+                logger.Warn($"기존 ralph 브랜치 삭제 실패 ({taskId}): {delOut.Trim()}");
         }
 
         // git worktree add [--shared] -b ralph/{taskId} .ralph-worktrees/{taskId} {baseBranch}
@@ -109,7 +110,7 @@ public class WorktreeService
 
             if (exitCode != 0)
             {
-                logger?.Warn($"--shared not supported, falling back ({taskId}): {output.Trim()}");
+                logger.Warn($"--shared not supported, falling back ({taskId}): {output.Trim()}");
                 (exitCode, output) = await _git.RunAsync(
                     ["worktree", "add", "-b", branchName, worktreePath, baseBranch], ct: ct);
             }
@@ -126,7 +127,7 @@ public class WorktreeService
         // ralph가 만든 브랜치임을 표시 — 후속 cleanup이 사용자 브랜치를 건드리지 않도록.
         await MarkRalphManagedAsync(branchName, ct);
 
-        logger?.Info($"Worktree created: {worktreePath} (branch: {branchName}{(sharedObjects ? ", shared" : "")})");
+        logger.Info($"Worktree created: {worktreePath} (branch: {branchName}{(sharedObjects ? ", shared" : "")})");
         return worktreePath;
     }
 
@@ -138,6 +139,7 @@ public class WorktreeService
         string? mergeStrategy = null,
         RalphLogger? logger = null, CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var branchName = RalphPaths.GetBranchName(taskId);
 
         // 현재 브랜치가 target이 맞는지 확인
@@ -165,7 +167,7 @@ public class WorktreeService
 
         if (exitCode == 0)
         {
-            logger?.Info($"Merged {branchName} into {targetBranch}");
+            logger.Info($"Merged {branchName} into {targetBranch}");
             return new MergeResult { Success = true };
         }
 
@@ -194,14 +196,14 @@ public class WorktreeService
                 }
                 catch (Exception ex)
                 {
-                    logger?.Warn(
+                    logger.Warn(
                         $"[merge:untracked-rescue] {taskId}: '{rel}' 백업 실패 — {ex.Message}");
                 }
             }
 
             if (moved.Count > 0)
             {
-                logger?.Warn(
+                logger.Warn(
                     $"[merge:untracked-rescue] {taskId}: base 워크트리의 untracked {moved.Count}건을 " +
                     $"{backupDir}로 이동 후 머지 재시도 — {string.Join(", ", moved)}");
                 AnsiConsole.MarkupLine(
@@ -211,7 +213,7 @@ public class WorktreeService
                 var (retryExit, retryOut) = await _git.RunAsync(mergeArgs.ToArray(), ct: ct);
                 if (retryExit == 0)
                 {
-                    logger?.Info(
+                    logger.Info(
                         $"Merged {branchName} into {targetBranch} (after relocating {moved.Count} untracked file(s))");
                     return new MergeResult { Success = true };
                 }
@@ -222,7 +224,7 @@ public class WorktreeService
 
         // merge 충돌 감지
         var conflictFiles = await GetConflictFilesAsync(ct);
-        logger?.Error($"Merge conflict for {branchName}: {output}");
+        logger.Error($"Merge conflict for {branchName}: {output}");
 
         return new MergeResult
         {
@@ -243,6 +245,7 @@ public class WorktreeService
     /// </summary>
     internal static List<string> ParseUntrackedOverwrites(string mergeOutput, RalphLogger? logger = null)
     {
+        logger ??= RalphLogger.Null;
         var result = new List<string>();
         if (string.IsNullOrEmpty(mergeOutput)) return result;
         if (!mergeOutput.Contains("untracked working tree files would be overwritten by merge"))
@@ -275,7 +278,7 @@ public class WorktreeService
         if (result.Count == 0)
         {
             var snippet = mergeOutput.Length > 200 ? mergeOutput[..200] + "..." : mergeOutput;
-            logger?.Warn($"[ParseUntrackedOverwrites] 'untracked overwrite' 패턴을 감지했으나 파일 목록 추출 실패. stderr 일부: {snippet}");
+            logger.Warn($"[ParseUntrackedOverwrites] 'untracked overwrite' 패턴을 감지했으나 파일 목록 추출 실패. stderr 일부: {snippet}");
         }
 
         return result;
@@ -302,6 +305,7 @@ public class WorktreeService
         RalphLogger? logger = null,
         CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
 
         try
@@ -314,7 +318,7 @@ public class WorktreeService
             if (diffExit != 0)
             {
                 // diff 자체가 실패한 경우: 머지를 막지 않고 경고만 남긴다
-                logger?.Warn(
+                logger.Warn(
                     $"[guard:pre-merge] NormalizeTasksJson({taskId}): git diff 실패. " +
                     $"머지는 계속 진행됩니다. detail: {diffOut.Trim()}");
                 return false;
@@ -323,7 +327,7 @@ public class WorktreeService
             if (string.IsNullOrWhiteSpace(diffOut))
                 return false; // baseRef와 동일 → no-op
 
-            logger?.Warn(
+            logger.Warn(
                 $"[guard:pre-merge] worktree '{taskId}'의 {tasksFileName}이 {baseRef}와 다릅니다. " +
                 $"강제로 {baseRef} 버전으로 되돌립니다.");
 
@@ -333,7 +337,7 @@ public class WorktreeService
 
             if (checkoutExit != 0)
             {
-                logger?.Warn(
+                logger.Warn(
                     $"[guard:pre-merge] NormalizeTasksJson({taskId}): " +
                     $"git checkout 실패. 머지는 계속 진행됩니다. detail: {checkoutOut.Trim()}");
                 return true;
@@ -347,7 +351,7 @@ public class WorktreeService
 
             if (commitExit != 0)
             {
-                logger?.Warn(
+                logger.Warn(
                     $"[guard:pre-merge] NormalizeTasksJson({taskId}): " +
                     $"정규화 커밋 실패. 머지에서 충돌이 발생할 수 있습니다. detail: {commitOut.Trim()}");
             }
@@ -361,7 +365,7 @@ public class WorktreeService
         }
         catch (Exception ex)
         {
-            logger?.Warn(
+            logger.Warn(
                 $"[guard:pre-merge] NormalizeTasksJson({taskId}): 예외 발생. " +
                 $"머지는 계속 진행됩니다. detail: {ex.Message}");
             return false;
@@ -382,6 +386,7 @@ public class WorktreeService
     public async Task<bool> AdvanceWorktreeOntoBaseAsync(
         string taskId, string baseRef, RalphLogger? logger = null, CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
 
         var (exitCode, output) = await _git.RunAsync(
@@ -389,11 +394,11 @@ public class WorktreeService
 
         if (exitCode == 0)
         {
-            logger?.Info($"[merge:advance] {taskId} rebased onto current {baseRef}");
+            logger.Info($"[merge:advance] {taskId} rebased onto current {baseRef}");
             return true;
         }
 
-        logger?.Warn(
+        logger.Warn(
             $"[merge:advance] {taskId} rebase 실패 — 3-way merge로 fallback. " +
             $"detail: {output.Trim()}");
 
@@ -401,7 +406,7 @@ public class WorktreeService
         var (abortExit, abortOut) = await _git.RunAsync(
             ["rebase", "--abort"], worktreePath, ct);
         if (abortExit != 0)
-            logger?.Warn($"[merge:advance] {taskId} rebase --abort도 실패: {abortOut.Trim()}");
+            logger.Warn($"[merge:advance] {taskId} rebase --abort도 실패: {abortOut.Trim()}");
 
         return false;
     }
@@ -427,6 +432,7 @@ public class WorktreeService
         string validationLogPath = RalphPaths.ValidationLedgerRelativePath,
         CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
         var timestamp = DateTimeOffset.UtcNow;
 
@@ -436,7 +442,7 @@ public class WorktreeService
         if (diffExit != 0)
         {
             var error = diffOut.Trim();
-            logger?.Warn($"[validate:files] {taskId}: git diff 실패 — 검증 스킵. detail: {error}");
+            logger.Warn($"[validate:files] {taskId}: git diff 실패 — 검증 스킵. detail: {error}");
             return new FileValidationResult(
                 taskId, timestamp,
                 Array.Empty<string>(), Array.Empty<string>(),
@@ -470,7 +476,7 @@ public class WorktreeService
         {
             var preview = string.Join(", ", undeclared.Take(3));
             var more = undeclared.Count > 3 ? $" (외 {undeclared.Count - 3}건)" : "";
-            logger?.Warn(
+            logger.Warn(
                 $"[validate:files] {taskId}: undeclared {undeclared.Count}건 — {preview}{more}");
         }
 
@@ -488,7 +494,7 @@ public class WorktreeService
 
     private static async Task AppendValidationLogAsync(
         FileValidationResult result, string validationLogPath,
-        RalphLogger? logger, CancellationToken ct)
+        RalphLogger logger, CancellationToken ct)
     {
         try
         {
@@ -510,7 +516,7 @@ public class WorktreeService
         catch (Exception ex)
         {
             // best-effort: validation 기록이 머지 흐름을 깨뜨리면 안 됨
-            logger?.Warn($"[validate:files] {result.TaskId}: {RalphPaths.ValidationLedgerFileName} 기록 실패 — {ex.Message}");
+            logger.Warn($"[validate:files] {result.TaskId}: {RalphPaths.ValidationLedgerFileName} 기록 실패 — {ex.Message}");
         }
     }
 
@@ -616,6 +622,7 @@ public class WorktreeService
     public async Task<bool> CleanupWorktreeAsync(
         string taskId, RalphLogger? logger = null, CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
         var branchName = RalphPaths.GetBranchName(taskId);
         var ok = true;
@@ -632,12 +639,12 @@ public class WorktreeService
             var (exitCode, output) = await _git.RunAsync(["worktree", "remove", worktreePath, "--force"], ct: ct);
             if (exitCode != 0)
             {
-                logger?.Warn($"git worktree remove 실패 ({taskId}): {output.Trim()}");
+                logger.Warn($"git worktree remove 실패 ({taskId}): {output.Trim()}");
                 // 수동 삭제 시도
                 try { Directory.Delete(worktreePath, true); }
                 catch (Exception ex)
                 {
-                    logger?.Warn($"수동 디렉터리 삭제 실패 ({taskId}): {ex.Message}");
+                    logger.Warn($"수동 디렉터리 삭제 실패 ({taskId}): {ex.Message}");
                     ok = false;
                 }
             }
@@ -652,19 +659,19 @@ public class WorktreeService
                 if (branchExit != 0 && Directory.Exists(worktreePath))
                 {
                     // 디렉터리가 여전히 남아 있고 브랜치도 못 지우면 명백한 실패
-                    logger?.Warn($"git branch -D 실패 ({taskId}): {branchOut.Trim()}");
+                    logger.Warn($"git branch -D 실패 ({taskId}): {branchOut.Trim()}");
                     ok = false;
                 }
             }
             else
             {
-                logger?.Warn(
+                logger.Warn(
                     $"브랜치 '{branchName}'은 ralph가 만든 것이 아니어서 보존합니다. " +
                     $"수동으로 정리하려면 git branch -D {branchName}을 직접 실행하세요.");
             }
         }
 
-        if (ok) logger?.Info($"Cleaned up worktree for {taskId}");
+        if (ok) logger.Info($"Cleaned up worktree for {taskId}");
         return ok;
     }
 
@@ -673,6 +680,7 @@ public class WorktreeService
     /// </summary>
     public async Task CleanupAllAsync(RalphLogger? logger = null, CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         // git worktree prune
         await _git.RunAsync(["worktree", "prune"], ct: ct);
 
@@ -689,11 +697,11 @@ public class WorktreeService
             if (await IsRalphManagedBranchAsync(branch, ct))
             {
                 await _git.RunAsync(["branch", "-D", branch], ct: ct);
-                logger?.Info($"Deleted branch: {branch}");
+                logger.Info($"Deleted branch: {branch}");
             }
             else
             {
-                logger?.Info($"Skipped non-ralph branch: {branch} (ralph가 만든 것이 아님)");
+                logger.Info($"Skipped non-ralph branch: {branch} (ralph가 만든 것이 아님)");
             }
         }
 
@@ -701,10 +709,15 @@ public class WorktreeService
         if (Directory.Exists(_worktreeBase))
         {
             try { Directory.Delete(_worktreeBase, true); }
-            catch { /* best effort */ }
+            catch (Exception ex)
+            {
+                logger.Warn(
+                    $"worktree 베이스 디렉터리 삭제 실패 ({_worktreeBase}): {ex.Message} — " +
+                    $"'ralph --worktree-cleanup'으로 재시도하세요");
+            }
         }
 
-        logger?.Info("All ralph worktrees cleaned up");
+        logger.Info("All ralph worktrees cleaned up");
     }
 
     /// <summary>

@@ -11,7 +11,7 @@ public class BudgetGate
 {
     private readonly double? _budgetUsd;
     private readonly CostTracker _cost;
-    private readonly RalphLogger? _logger;
+    private readonly RalphLogger _logger;
     private bool _warned;
     private bool _reached;
 
@@ -19,7 +19,7 @@ public class BudgetGate
     {
         _budgetUsd = budgetUsd;
         _cost = cost;
-        _logger = logger;
+        _logger = logger ?? RalphLogger.Null;
     }
 
     /// <summary>budget(USD) 임계값 도달로 새 dispatch가 차단되었는지 여부.</summary>
@@ -41,7 +41,7 @@ public class BudgetGate
             var pct = total / budget * 100.0;
             AnsiConsole.MarkupLine(
                 $"[yellow]⚠ 예산 80% 도달[/] (${total:F2} / ${budget:F2}, {pct:F0}%)");
-            _logger?.Warn($"[budget] 80% threshold hit: ${total:F4} / ${budget:F4}");
+            _logger.Warn($"[budget] 80% threshold hit: ${total:F4} / ${budget:F4}");
         }
 
         if (total >= budget)
@@ -53,7 +53,7 @@ public class BudgetGate
             AnsiConsole.MarkupLine(
                 "[dim]다음 실행: [cyan]ralph --run --budget-usd <larger>[/] 또는 " +
                 "[cyan]ralph --run[/] (예산 제한 없음).[/]");
-            _logger?.Error($"[budget] reached: ${total:F4} / ${budget:F4}");
+            _logger.Error($"[budget] reached: ${total:F4} / ${budget:F4}");
             return false;
         }
 

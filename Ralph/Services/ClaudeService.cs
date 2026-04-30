@@ -120,7 +120,10 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                 await Task.Delay(80, ct);
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            // spinner 종료 신호 — 추가 보고 가치 없음
+        }
         Console.Write("\r" + new string(' ', maxLen + 2) + "\r");
     }
 
@@ -133,6 +136,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         CancellationToken ct = default,
         string? allowedTools = null)
     {
+        logger ??= RalphLogger.Null;
         // Per-attempt timeout: 외부 ct에 추가로 CancelAfter를 적용한 linked CTS 생성.
         // 외부 ct가 fire하면 사용자 cancel(Ctrl+C) — 그대로 propagate.
         // localCts만 fire하면 timeout — process kill + TimedOut=true 결과로 graceful 반환.
@@ -182,9 +186,9 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         // Prevent "nested session" error when ralph is invoked from within Claude Code
         psi.Environment.Remove("CLAUDECODE");
 
-        logger?.Info($"Running: {BuildArgsSummary(psi)}");
+        logger.Info($"Running: {BuildArgsSummary(psi)}");
         if (!string.IsNullOrEmpty(workingDirectory))
-            logger?.Info($"Working directory: {workingDirectory}");
+            logger.Info($"Working directory: {workingDirectory}");
 
         const int PipeBufferWarningBytes = 32 * 1024;
         var promptByteCount = (long)Encoding.UTF8.GetByteCount(prompt);
@@ -218,7 +222,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                 5 => ClaudeFailureKind.PermissionDenied,  // Win32 ERROR_ACCESS_DENIED
                 _ => ClaudeFailureKind.Unknown,
             };
-            logger?.Error($"claude process start failed ({startKind}, native={ex.NativeErrorCode}): {ex.Message}");
+            logger.Error($"claude process start failed ({startKind}, native={ex.NativeErrorCode}): {ex.Message}");
             if (output == null)
             {
                 var hint = startKind == ClaudeFailureKind.BinaryNotFound
@@ -248,7 +252,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         // Write in background (concurrent with stdout reading) to prevent deadlock when prompt
         // exceeds the OS pipe buffer — writer would block waiting for reader; reader hasn't started yet.
         if (promptByteCount > PipeBufferWarningBytes)
-            logger?.Warn($"prompt 크기 {promptByteCount:N0}바이트, OS pipe buffer 초과 가능 — 청크 write 사용");
+            logger.Warn($"prompt 크기 {promptByteCount:N0}바이트, OS pipe buffer 초과 가능 — 청크 write 사용");
         DebugLog($"Sending prompt ({prompt.Length:N0} chars, {promptByteCount:N0} bytes)...");
         var stdinTask = WritePromptChunkedAsync(process.StandardInput, prompt, effectiveCt);
 
@@ -316,7 +320,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                     if (capturedRetryAfter == null)
                         capturedRetryAfter = ReadRetryAfterFromError(root);
 
-                    logger?.Error($"Claude stream error: {errorMsg}");
+                    logger.Error($"Claude stream error: {errorMsg}");
                     DebugLog($"error: {errorMsg}{(capturedRetryAfter is { } ra ? $" (retry-after={ra}s)" : "")}");
                     if (output == null)
                     {
@@ -426,7 +430,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             {
                 // Non-JSON line — log and display for diagnostics
                 jsonParseFailures++;
-                logger?.Warn($"Claude non-JSON output: {line}");
+                logger.Warn($"Claude non-JSON output: {line}");
                 DebugLog($"non-JSON: {line}");
                 if (output == null)
                     AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(line)}[/]");
@@ -451,7 +455,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             var errMsg = !string.IsNullOrWhiteSpace(stderr) ? stderr : stdinIoEx.Message;
             if (output == null)
                 AnsiConsole.MarkupLine($"[red]Claude process failed to start: {Markup.Escape(errMsg.Trim())}[/]");
-            logger?.Error($"Claude stdin pipe broken: {errMsg.Trim()}");
+            logger.Error($"Claude stdin pipe broken: {errMsg.Trim()}");
             var pipeKind = ClassifyFailure(
                 exitCode: process.ExitCode,
                 timedOut: false,
@@ -460,7 +464,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                 errorMessages: stdinIoEx.Message,
                 jsonParseFailures: 0,
                 gotAnyAssistantMessage: false);
-            logger?.Info($"[ClaudeClassify] kind={pipeKind} exit={process.ExitCode} jsonFails=0 gotMsg=False");
+            logger.Info($"[ClaudeClassify] kind={pipeKind} exit={process.ExitCode} jsonFails=0 gotMsg=False");
             return new ClaudeResult
             {
                 Success = false,
@@ -486,22 +490,24 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
 
             // process tree 강제 종료 (claude 자식 프로세스까지)
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
-            try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+            try { await process.WaitForExitAsync(CancellationToken.None); }
+            catch { /* kill 후 잔여 wait — 종료 신호 외 진단 가치 없음 */ }
             // stdin task 관찰 (process kill 후 pipe broken 예외를 silent-consume)
-            try { await stdinTask.ConfigureAwait(false); } catch { }
+            try { await stdinTask.ConfigureAwait(false); }
+            catch { /* kill 후 stdin task drain — pipe broken 예외는 정상 종료 신호 */ }
 
             if (!timedOut) throw;
 
             var elapsed = totalSw.Elapsed;
             totalSw.Stop();
-            logger?.Error($"Claude Code timed out after {TaskTimeoutSec}s (elapsed: {elapsed.TotalSeconds:F1}s) — process killed");
+            logger.Error($"Claude Code timed out after {TaskTimeoutSec}s (elapsed: {elapsed.TotalSeconds:F1}s) — process killed");
             if (output == null)
                 AnsiConsole.MarkupLine(
                     $"[red]Claude Code timed out after {TaskTimeoutSec}s — process tree killed.[/]");
             else
                 output.WriteLine($"\n=== TIMEOUT after {TaskTimeoutSec}s — process killed ===");
 
-            logger?.Info($"[ClaudeClassify] kind={ClaudeFailureKind.Timeout} exit=-1 jsonFails={jsonParseFailures} gotMsg={gotAnyAssistantMessage}");
+            logger.Info($"[ClaudeClassify] kind={ClaudeFailureKind.Timeout} exit=-1 jsonFails={jsonParseFailures} gotMsg={gotAnyAssistantMessage}");
             return new ClaudeResult
             {
                 Success = false,
@@ -530,12 +536,12 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         {
             if (output == null)
                 AnsiConsole.MarkupLine($"[yellow]Claude stderr: {Markup.Escape(stderr.Trim())}[/]");
-            logger?.Error($"Claude stderr: {stderr.Trim()}");
+            logger.Error($"Claude stderr: {stderr.Trim()}");
         }
 
         if (process.ExitCode != 0)
         {
-            logger?.Error($"Claude exited with code {process.ExitCode}");
+            logger.Error($"Claude exited with code {process.ExitCode}");
             if (output == null && errorMessages.Length == 0 && string.IsNullOrWhiteSpace(stderr))
                 AnsiConsole.MarkupLine($"[red]Claude exited with code {process.ExitCode} (no error details available)[/]");
         }
@@ -557,7 +563,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             errorMessages: errMsgsText,
             jsonParseFailures: jsonParseFailures,
             gotAnyAssistantMessage: gotAnyAssistantMessage);
-        logger?.Info($"[ClaudeClassify] kind={failureKind} exit={process.ExitCode} jsonFails={jsonParseFailures} gotMsg={gotAnyAssistantMessage}");
+        logger.Info($"[ClaudeClassify] kind={failureKind} exit={process.ExitCode} jsonFails={jsonParseFailures} gotMsg={gotAnyAssistantMessage}");
         return new ClaudeResult
         {
             Success = process.ExitCode == 0,
@@ -765,6 +771,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
         Func<ClaudeResult, string?>? buildRetryContext = null,
         string? allowedTools = null)
     {
+        logger ??= RalphLogger.Null;
         var currentPrompt = prompt;
         ClaudeResult? lastResult = null;
 
@@ -802,7 +809,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                     if (output == null)
                         AnsiConsole.MarkupLine(
                             $"[yellow]Rate limit 감지 — backoff {delaySec}s ({src}, jittered) 대기 (attempt {attempt}/{maxRetries})[/]");
-                    logger?.Warn($"Rate-limit backoff {delaySec}s ({src}) before attempt {attempt}/{maxRetries}");
+                    logger.Warn($"Rate-limit backoff {delaySec}s ({src}) before attempt {attempt}/{maxRetries}");
                     output?.WriteLine($"\n=== Rate-limit backoff {delaySec}s ({src}, jittered) before attempt {attempt}/{maxRetries} ===");
                 }
                 else
@@ -812,22 +819,22 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
                     if (output == null)
                         AnsiConsole.MarkupLine(
                             $"[yellow]Retry attempt {attempt}/{maxRetries} (waiting {delaySec}s)...[/]");
-                    logger?.Info($"Retry attempt {attempt}/{maxRetries} with failure context (exit={lastResult.ExitCode})");
+                    logger.Info($"Retry attempt {attempt}/{maxRetries} with failure context (exit={lastResult.ExitCode})");
                     output?.WriteLine($"\n=== Retry {attempt}/{maxRetries} (previous exit={lastResult.ExitCode}) ===");
                 }
-                logger?.Info($"분류={prevKind}, backoff={delaySec}초({backoffSource}), 시도{attempt}/{maxRetries}");
+                logger.Info($"분류={prevKind}, backoff={delaySec}초({backoffSource}), 시도{attempt}/{maxRetries}");
                 var delayMs = delaySec * 1000;
                 await (DelayOverride?.Invoke(delayMs, ct) ?? Task.Delay(delayMs, ct));
             }
             else
             {
-                logger?.Info($"Running Claude Code (attempt {attempt})");
+                logger.Info($"Running Claude Code (attempt {attempt})");
             }
 
             var result = await RunStreamAsync(currentPrompt, model, workingDirectory, logger, output, ct, allowedTools);
             if (result.Success)
             {
-                logger?.Info("Claude Code execution successful");
+                logger.Info("Claude Code execution successful");
                 return result;
             }
 
@@ -835,8 +842,8 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             var kind = result.FailureKind == ClaudeFailureKind.None
                 ? ClaudeFailureKind.Unknown
                 : result.FailureKind;
-            logger?.Error($"Claude Code failed with exit code {result.ExitCode} (attempt {attempt})");
-            logger?.Warn($"[ClaudeFailure] kind={kind} exit={result.ExitCode} timedOut={result.TimedOut} rateLimited={result.RateLimited}");
+            logger.Error($"Claude Code failed with exit code {result.ExitCode} (attempt {attempt})");
+            logger.Warn($"[ClaudeFailure] kind={kind} exit={result.ExitCode} timedOut={result.TimedOut} rateLimited={result.RateLimited}");
             if (output == null)
             {
                 var consoleHint = kind switch
@@ -855,7 +862,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             if (action == RetryAction.FailFast)
             {
                 var msg = $"Claude {kind} — fail-fast (재시도 의미 없음)";
-                logger?.Error($"[ClaudeRetry] kind={kind} attempt={attempt}/{maxRetries} action=fail-fast");
+                logger.Error($"[ClaudeRetry] kind={kind} attempt={attempt}/{maxRetries} action=fail-fast");
                 if (output == null)
                     AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
                 else
@@ -865,7 +872,7 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
 
             if (action == RetryAction.Skip)
             {
-                logger?.Warn($"[ClaudeRetry] kind={kind} attempt={attempt}/{maxRetries} action=skip");
+                logger.Warn($"[ClaudeRetry] kind={kind} attempt={attempt}/{maxRetries} action=skip");
                 if (kind == ClaudeFailureKind.MalformedOutput || kind == ClaudeFailureKind.Unknown)
                 {
                     var msg = $"{kind} 재시도 1회 소진 — 중단";
@@ -878,10 +885,10 @@ public class ClaudeService(int maxRetries = 2, int retryDelay = 5) : IAgentRunne
             }
 
             // action == Retry: 다음 iteration의 attempt > 1 분기에서 실제 backoff/log가 찍힌다.
-            logger?.Info($"[ClaudeRetry] kind={kind} attempt={attempt}/{maxRetries} action=retry");
+            logger.Info($"[ClaudeRetry] kind={kind} attempt={attempt}/{maxRetries} action=retry");
         }
 
-        logger?.Error($"Claude Code failed after {maxRetries} attempts");
+        logger.Error($"Claude Code failed after {maxRetries} attempts");
         if (output == null)
             AnsiConsole.MarkupLine($"[red]Claude Code failed after {maxRetries} attempts[/]");
         return lastResult ?? new ClaudeResult { Success = false, ExitCode = 1 };

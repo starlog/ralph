@@ -17,7 +17,7 @@ public sealed class StatusCommand : ICommand
         DisplayHelpers.RequireFile(_ctx.TasksFile);
         var tm = await TaskManager.LoadAsync(_ctx.TasksFile);
         DisplayHelpers.ShowBanner();
-        DisplayHelpers.ShowProgress(tm, null);
+        DisplayHelpers.ShowProgress(tm, RalphLogger.Null);
 
         // 병렬 배치 정보
         var readyTasks = tm.GetAllReadyTasks();

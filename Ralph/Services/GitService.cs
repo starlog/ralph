@@ -24,18 +24,19 @@ public class GitService
 
     public async Task InitAsync(RalphLogger? logger = null, CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         AnsiConsole.MarkupLine("[yellow]Git 저장소가 없습니다. 초기화합니다...[/]");
-        logger?.Info("Running git init");
+        logger.Info("Running git init");
         var (exitCode, output) = await RunAsync(["init"], ct: ct);
         if (exitCode == 0)
         {
             AnsiConsole.MarkupLine("[green]Git 저장소 초기화 완료.[/]");
-            logger?.Info($"git init: {output.Trim()}");
+            logger.Info($"git init: {output.Trim()}");
         }
         else
         {
             AnsiConsole.MarkupLine($"[red]git init 실패: {Markup.Escape(output.Trim())}[/]");
-            logger?.Error($"git init failed: {output.Trim()}");
+            logger.Error($"git init failed: {output.Trim()}");
         }
     }
 
@@ -90,13 +91,14 @@ public class GitService
         IReadOnlyCollection<string>? declaredFiles = null,
         CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         var commitMsg = commitTemplate
             .Replace("{taskId}", taskId)
             .Replace("{taskTitle}", title);
 
         if (!silent)
             AnsiConsole.MarkupLine("[blue]Committing changes...[/]");
-        logger?.Info($"Committing: {commitMsg}");
+        logger.Info($"Committing: {commitMsg}");
 
         // Staging 전략:
         // - declaredFiles가 비어있지 않으면 그 경로만 명시적으로 staging.
@@ -142,7 +144,7 @@ public class GitService
                 if (!silent)
                     AnsiConsole.WriteLine(line);
             }
-            logger?.Warn($"Sensitive files excluded: {string.Join(", ", sensitiveLines)}");
+            logger.Warn($"Sensitive files excluded: {string.Join(", ", sensitiveLines)}");
         }
 
         // Commit. 모델명을 attribution에 박지 않음 — sonnet/opus 어떤 모델이든 ralph 사용 시
@@ -154,13 +156,13 @@ public class GitService
         {
             if (!silent)
                 AnsiConsole.MarkupLine($"[green]Committed: {Markup.Escape(commitMsg)}[/]");
-            logger?.Info($"Commit successful: {commitMsg}");
+            logger.Info($"Commit successful: {commitMsg}");
         }
         else
         {
             if (!silent)
                 AnsiConsole.MarkupLine("[yellow]No changes to commit or commit failed.[/]");
-            logger?.Warn("Commit failed or no changes");
+            logger.Warn("Commit failed or no changes");
         }
     }
 
@@ -172,7 +174,7 @@ public class GitService
     private async Task StageDeclaredFilesAsync(
         IReadOnlyCollection<string> declaredFiles,
         string? workingDirectory,
-        RalphLogger? logger,
+        RalphLogger logger,
         string taskId,
         CancellationToken ct)
     {
@@ -203,7 +205,7 @@ public class GitService
                 var fullDeclared = Path.GetFullPath(trimmed);
                 if (!fullDeclared.StartsWith(rootDir, StringComparison.Ordinal))
                 {
-                    logger?.Warn($"[stage] {taskId}: {raw} is outside worktree — skipped");
+                    logger.Warn($"[stage] {taskId}: {raw} is outside worktree — skipped");
                     continue;
                 }
                 relative = Path.GetRelativePath(rootDir, fullDeclared).Replace('\\', '/');
@@ -240,16 +242,16 @@ public class GitService
             }
             else
             {
-                logger?.Warn($"[stage] {taskId}: git add 실패 ({relative}): {output.Trim()}");
+                logger.Warn($"[stage] {taskId}: git add 실패 ({relative}): {output.Trim()}");
             }
         }
 
         if (staged.Count > 0)
-            logger?.Info($"[stage] {taskId}: {staged.Count}건 staged — {string.Join(", ", staged.Take(5))}{(staged.Count > 5 ? "..." : "")}");
+            logger.Info($"[stage] {taskId}: {staged.Count}건 staged — {string.Join(", ", staged.Take(5))}{(staged.Count > 5 ? "..." : "")}");
         if (skippedMissing.Count > 0)
-            logger?.Info($"[stage] {taskId}: {skippedMissing.Count}건 declared지만 disk/index에 없음 — skipped");
+            logger.Info($"[stage] {taskId}: {skippedMissing.Count}건 declared지만 disk/index에 없음 — skipped");
         if (skippedSensitive.Count > 0)
-            logger?.Warn($"[stage] {taskId}: {skippedSensitive.Count}건 민감 파일 패턴 — staging 거부: {string.Join(", ", skippedSensitive)}");
+            logger.Warn($"[stage] {taskId}: {skippedSensitive.Count}건 민감 파일 패턴 — staging 거부: {string.Join(", ", skippedSensitive)}");
     }
 
     private static bool IsSensitivePath(string path)
@@ -301,10 +303,11 @@ public class GitService
     /// </summary>
     public async Task EnsureInitialCommitAsync(RalphLogger? logger = null, CancellationToken ct = default)
     {
+        logger ??= RalphLogger.Null;
         if (await HasCommitsAsync(ct))
             return;
 
-        logger?.Info("No commits found, creating initial commit for worktree support");
+        logger.Info("No commits found, creating initial commit for worktree support");
         AnsiConsole.MarkupLine("[yellow]커밋이 없습니다. worktree 지원을 위해 초기 커밋을 생성합니다...[/]");
 
         var (exitCode, output) = await RunAsync(
@@ -313,11 +316,11 @@ public class GitService
         if (exitCode == 0)
         {
             AnsiConsole.MarkupLine("[green]초기 커밋 생성 완료.[/]");
-            logger?.Info("Initial empty commit created");
+            logger.Info("Initial empty commit created");
         }
         else
         {
-            logger?.Error($"Failed to create initial commit: {output}");
+            logger.Error($"Failed to create initial commit: {output}");
             throw new InvalidOperationException($"초기 커밋 생성 실패: {output}");
         }
     }

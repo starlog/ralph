@@ -82,7 +82,11 @@ public sealed class PlanCommand : ICommand
                 if (cats is { Count: > 0 })
                     configuredCategories = cats.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
             }
-            catch { /* best-effort: 깨진 기존 파일은 무시하고 default로 */ }
+            catch (Exception ex)
+            {
+                logger.Warn(
+                    $"기존 tasks.json 로드 실패 — default categories 사용: {ex.Message}");
+            }
         }
 
         var generator = new PlanGenerator();

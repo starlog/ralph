@@ -20,7 +20,7 @@ public static class DisplayHelpers
         AnsiConsole.Write(new Rule($"[green]RALPH - Task Orchestrator[/] [cyan]v{Version}[/]").RuleStyle("grey"));
     }
 
-    public static void ShowProgress(TaskManager tm, RalphLogger? logger)
+    public static void ShowProgress(TaskManager tm, RalphLogger logger)
     {
         var total = tm.Data.Tasks.Count;
         var done = tm.Data.Tasks.Count(t => tm.IsDone(t.Id));

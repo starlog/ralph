@@ -69,7 +69,8 @@ public static class PlanValidator
             if (string.IsNullOrWhiteSpace(task.Title))
                 report.Errors.Add($"'{task.Id}'의 title이 비어있습니다");
             if (string.IsNullOrWhiteSpace(task.Prompt))
-                report.Warnings.Add($"'{task.Id}'의 prompt가 비어있습니다");
+                report.Errors.Add(
+                    $"'{task.Id}'의 prompt가 비어있습니다 — task가 의미 있는 작업 지시를 가져야 합니다");
         }
 
         // 5. modifiedFiles overlap — 서로 의존이 없는 task 쌍이 같은 파일을 수정하면 병렬 시 충돌 가능

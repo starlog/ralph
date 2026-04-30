@@ -39,7 +39,11 @@ public sealed class PlanPromptCommand : ICommand
                 if (cats is { Count: > 0 })
                     configuredCategories = cats.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine(
+                    $"[yellow]경고: 기존 tasks.json 로드 실패 ({Markup.Escape(ex.Message)}) — default categories 사용[/]");
+            }
         }
 
         var prompt = PlanGenerator.BuildPlanPrompt(prdFullPath, schemaContent, tasksFullPath, configuredCategories);

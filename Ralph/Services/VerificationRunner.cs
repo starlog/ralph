@@ -31,11 +31,12 @@ public class VerificationRunner
         if (spec is null) throw new ArgumentNullException(nameof(spec));
         if (string.IsNullOrWhiteSpace(spec.Command))
             throw new ArgumentException("verification.command is empty", nameof(spec));
+        logger ??= RalphLogger.Null;
 
         var timeoutSec = spec.TimeoutSec is > 0 ? spec.TimeoutSec.Value : DefaultTimeoutSec;
         var psi = BuildShellPsi(spec.Command, workingDirectory);
 
-        logger?.Info($"[verification] running: {spec.Command} (cwd: {workingDirectory}, timeout: {timeoutSec}s)");
+        logger.Info($"[verification] running: {spec.Command} (cwd: {workingDirectory}, timeout: {timeoutSec}s)");
         output?.WriteLine($"\n=== Verification: {spec.Command} ===");
 
         var sw = Stopwatch.StartNew();
@@ -88,7 +89,7 @@ public class VerificationRunner
                 $"{(timedOut ? " [TIMEOUT]" : "")} ===");
         }
 
-        logger?.Info(
+        logger.Info(
             $"[verification] {(success ? "passed" : "failed")} exit={exit} " +
             $"duration={sw.Elapsed.TotalSeconds:F1}s timedOut={timedOut}");
 

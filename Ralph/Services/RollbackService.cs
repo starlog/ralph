@@ -74,18 +74,22 @@ public sealed class RollbackService
     /// <summary>두 스냅샷 모두 삭제.</summary>
     public void ClearAll()
     {
-        if (File.Exists(PrePlanPath)) try { File.Delete(PrePlanPath); } catch { }
-        if (File.Exists(PostPlanPath)) try { File.Delete(PostPlanPath); } catch { }
+        if (File.Exists(PrePlanPath))
+            try { File.Delete(PrePlanPath); } catch { /* best-effort: 스냅샷 삭제 실패는 다음 plan/run에서 덮어씌워짐 */ }
+        if (File.Exists(PostPlanPath))
+            try { File.Delete(PostPlanPath); } catch { /* best-effort: 스냅샷 삭제 실패는 다음 plan/run에서 덮어씌워짐 */ }
     }
 
     public void ClearPrePlan()
     {
-        if (File.Exists(PrePlanPath)) try { File.Delete(PrePlanPath); } catch { }
+        if (File.Exists(PrePlanPath))
+            try { File.Delete(PrePlanPath); } catch { /* best-effort: 스냅샷 삭제 실패는 다음 plan/run에서 덮어씌워짐 */ }
     }
 
     public void ClearPostPlan()
     {
-        if (File.Exists(PostPlanPath)) try { File.Delete(PostPlanPath); } catch { }
+        if (File.Exists(PostPlanPath))
+            try { File.Delete(PostPlanPath); } catch { /* best-effort: 스냅샷 삭제 실패는 다음 plan/run에서 덮어씌워짐 */ }
     }
 
     /// <summary>
@@ -203,7 +207,8 @@ public sealed class RollbackService
         }
         catch
         {
-            if (File.Exists(tmp)) try { File.Delete(tmp); } catch { }
+            if (File.Exists(tmp))
+                try { File.Delete(tmp); } catch { /* tmp 정리 실패는 의도적 무시: 원인 예외 보존이 우선 */ }
             throw;
         }
     }
