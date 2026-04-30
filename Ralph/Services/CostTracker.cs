@@ -39,15 +39,13 @@ public sealed class PricingFile
 /// <summary>
 /// Claude Code 호출별 token 사용량과 추정 비용을 .ralph-logs/cost.jsonl에 누적 기록합니다.
 /// stream-json의 result 메시지에 포함된 usage 데이터를 파싱해서 사용합니다.
-/// 누적 합계는 프로세스 단일 캐시(_cumulativeUsd)에 유지되어 dispatch 마다 jsonl 전체를
-/// 다시 read-parse하지 않습니다.
+/// 누적 합계는 인스턴스 단위 캐시에 유지되어 dispatch 마다 jsonl 전체를
+/// 다시 read-parse하지 않습니다. 동일 세션은 CommandContext.Cost가 단일 인스턴스를 공유합니다.
 /// </summary>
-public class CostTracker
+public sealed class CostTracker
 {
-    private static string? _logDirOverride;
-    private static string LogDir => _logDirOverride ?? RalphPaths.LogDir;
-
     // 단가는 EmbeddedResource pricing.json에서 1회 로드. ~/.ralph/pricing.json이 있으면 override.
+    // 인스턴스 무관 불변 데이터이므로 static readonly 유지 (동일 단가, 메모리 절약).
     private static readonly Dictionary<string, PricingEntry> Pricing = LoadPricing();
 
     // RalphJsonContext.Default를 chain해 trimming/AOT에서도 reflection fallback 없이 동작.
@@ -58,45 +56,57 @@ public class CostTracker
         TypeInfoResolver = RalphJsonContext.Default,
     };
 
-    // 프로세스 단일 누적 캐시. 첫 호출 시 cost.jsonl로부터 hydrate.
-    private static readonly SemaphoreSlim HydrateLock = new(1, 1);
-    private static readonly object IncrementLock = new();
-    // P-CONCURRENCY: 병렬 task가 동시에 RecordAsync를 호출할 때 jsonl 데이터 손실 방지.
+    // P1-2: hung 디스크에서 finally 블록이 무한정 막히지 않도록 timeout 가드.
+    private static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
+
+    // 레거시 테스트 호환용: SetLogDirForTesting이 설정한 ambient override.
+    // 신규 코드는 생성자 인자로 logDir을 명시 — fix1-test 태스크가 모든 호출지를 옮기면 제거 예정.
+    private static string? _logDirOverride;
+
+    private readonly string _logDir;
+
+    // 인스턴스 단위 누적 캐시. 첫 호출 시 cost.jsonl로부터 hydrate.
+    private readonly SemaphoreSlim _hydrateLock = new(1, 1);
+    private readonly object _incrementLock = new();
+    // P-CONCURRENCY: 동일 인스턴스에서 병렬 RecordAsync 호출 시 jsonl 라인 손실 방지.
     // File.AppendAllTextAsync는 plat별로 동시 open이 sharing violation을 일으킬 수 있고,
     // .NET의 FileStream(FileMode.Append, ..., FileShare.Read)은 다른 writer를 허용하지 않는다.
     // 단일 writer로 직렬화하지 않으면 일부 RecordAsync 호출이 silent fail로 손실됨(검증됨).
-    private static readonly SemaphoreSlim WriteLock = new(1, 1);
-    private static double _cumulativeUsd;
-    private static bool _hydrated;
-
-    public string LogFilePath => Path.Combine(LogDir, RalphPaths.CostLedgerFileName);
+    // 다른 인스턴스가 같은 logDir에 동시 append하는 시나리오는 §7.4 잔여 위험으로 추적.
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private double _cumulativeUsd;
+    private bool _hydrated;
 
     /// <summary>
-    /// 테스트 격리용 — 누적 캐시와 hydrate 플래그를 0으로 리셋합니다.
-    /// 프로덕션 코드에서는 호출하지 마세요. 다음 GetTotalUsdAsync/RecordAsync 시 다시 hydrate됩니다.
+    /// 단일 CostTracker 인스턴스 생성. logDir이 null이면 SetLogDirForTesting override를 거쳐
+    /// 최종적으로 RalphPaths.LogDir로 fallback. 한 세션은 CommandContext.Cost로 인스턴스를 공유한다.
     /// </summary>
-    internal static void ResetForTesting()
+    public CostTracker(string? logDir = null)
     {
-        lock (IncrementLock)
-        {
-            _cumulativeUsd = 0.0;
-            _hydrated = false;
-        }
+        _logDir = logDir ?? _logDirOverride ?? RalphPaths.LogDir;
     }
 
-    /// <summary>
-    /// 테스트 격리용 — cost.jsonl 위치를 임시 디렉터리로 override합니다. null 전달 시 기본값으로 복귀.
-    /// </summary>
-    internal static void SetLogDirForTesting(string? path) => _logDirOverride = path;
+    public string LogFilePath => Path.Combine(_logDir, RalphPaths.CostLedgerFileName);
 
-    // P1-2: hung 디스크에서 finally 블록이 무한정 막히지 않도록 timeout 가드.
-    private static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>
+    /// 레거시 테스트 호환용 — 인스턴스 누적 캐시는 인스턴스 단위이므로 이 호출은 no-op이다.
+    /// 신규 테스트는 <c>new CostTracker(tempDir)</c>로 직접 격리하라. fix1-test 태스크에서 제거된다.
+    /// </summary>
+    [Obsolete("인스턴스 재생성으로 대체. fix1-test 태스크에서 제거 예정.")]
+    internal static void ResetForTesting() { /* no-op: 누적 캐시는 인스턴스 필드. */ }
+
+    /// <summary>
+    /// 레거시 테스트 호환용 — 인자 없는 <c>new CostTracker()</c> 호출이 사용할 ambient logDir override.
+    /// 신규 코드는 생성자 인자로 logDir을 명시하라. fix1-test 태스크에서 제거된다.
+    /// </summary>
+    [Obsolete("CostTracker(logDir) 생성자 인자로 대체. fix1-test 태스크에서 제거 예정.")]
+    internal static void SetLogDirForTesting(string? path) => _logDirOverride = path;
 
     /// <summary>
     /// 호출 결과를 jsonl에 1줄 기록하고 누적 캐시를 갱신합니다. result가 null이거나
     /// usage 정보가 없으면 placeholder(estimatedUsd=0, usageMissing=true)로 기록 + 경고합니다.
     /// 디스크 IO가 5초 안에 끝나지 않으면 기록을 포기하고 경고만 남깁니다(graceful shutdown 보장).
-    /// 동시 호출은 WriteLock으로 직렬화되어 jsonl 라인 손실/손상이 발생하지 않습니다.
+    /// 동시 호출은 인스턴스 _writeLock으로 직렬화되어 jsonl 라인 손실/손상이 발생하지 않습니다.
     /// </summary>
     public async Task RecordAsync(
         string taskId, string model, ClaudeResult? result, CancellationToken ct = default)
@@ -124,7 +134,7 @@ public class CostTracker
         string taskId, string model, ClaudeResult? result, CancellationToken ct)
     {
         await EnsureHydratedAsync(ct);
-        Directory.CreateDirectory(LogDir);
+        Directory.CreateDirectory(_logDir);
 
         if (result?.Usage == null)
         {
@@ -140,9 +150,9 @@ public class CostTracker
                 PromptBytes = result?.PromptBytes ?? 0,
             };
             var ph = JsonSerializer.Serialize(placeholder, JsonOpts) + "\n";
-            await WriteLock.WaitAsync(ct);
+            await _writeLock.WaitAsync(ct);
             try { await File.AppendAllTextAsync(LogFilePath, ph, ct); }
-            finally { WriteLock.Release(); }
+            finally { _writeLock.Release(); }
             AnsiConsole.MarkupLine(
                 $"[yellow]⚠ usage 누락 (taskId={Markup.Escape(taskId)}, " +
                 $"exit={result?.ExitCode.ToString() ?? "?"}). 비용 추정 0 처리.[/]");
@@ -169,15 +179,15 @@ public class CostTracker
 
         // file write와 누적 캐시 갱신을 한 critical section으로 묶어 직렬화.
         // 동시 file open(FileMode.Append)에서 발생하는 sharing violation/데이터 손실 방지.
-        await WriteLock.WaitAsync(ct);
+        await _writeLock.WaitAsync(ct);
         try
         {
             await File.AppendAllTextAsync(LogFilePath, line, ct);
-            lock (IncrementLock) _cumulativeUsd += estimated;
+            lock (_incrementLock) _cumulativeUsd += estimated;
         }
         finally
         {
-            WriteLock.Release();
+            _writeLock.Release();
         }
     }
 
@@ -274,7 +284,7 @@ public class CostTracker
     private async Task EnsureHydratedAsync(CancellationToken ct)
     {
         if (_hydrated) return;
-        await HydrateLock.WaitAsync(ct);
+        await _hydrateLock.WaitAsync(ct);
         try
         {
             if (_hydrated) return;
@@ -283,7 +293,7 @@ public class CostTracker
         }
         finally
         {
-            HydrateLock.Release();
+            _hydrateLock.Release();
         }
     }
 
@@ -310,7 +320,7 @@ public class CostTracker
     public async Task<double> GetTotalUsdAsync(CancellationToken ct = default)
     {
         await EnsureHydratedAsync(ct);
-        lock (IncrementLock) return _cumulativeUsd;
+        lock (_incrementLock) return _cumulativeUsd;
     }
 
     /// <summary>
