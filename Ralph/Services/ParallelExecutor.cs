@@ -209,12 +209,11 @@ public class ParallelExecutor
 
         if (task.Subtasks is { Count: > 0 })
         {
-            foreach (var sub in task.Subtasks.Where(s => !s.Done))
-                _taskManager.MarkSubtaskDone(taskId, sub.Id);
+            foreach (var sub in task.Subtasks.Where(s => !_taskManager.IsSubtaskDone(taskId, s.Id)))
+                await _taskManager.MarkSubtaskDoneAsync(taskId, sub.Id, ct);
         }
 
-        _taskManager.MarkTaskDone(taskId);
-        await _taskManager.SaveAsync();
+        await _taskManager.MarkTaskDoneAsync(taskId, ct);
 
         AnsiConsole.MarkupLine($"[green]태스크 완료: {Markup.Escape(task.Title)}[/]");
         _logger.TaskEnd(taskId, "completed");

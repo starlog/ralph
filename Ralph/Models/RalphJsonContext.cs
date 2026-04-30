@@ -8,6 +8,7 @@ namespace Ralph.Models;
 // 명시적 attribute가 있는 TasksFile/ParallelSettings 등은 영향 없음(explicit > policy).
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(TasksFile))]
+[JsonSerializable(typeof(StateFile))]
 [JsonSerializable(typeof(ParallelSettings))]
 [JsonSerializable(typeof(VerificationSpec))]
 [JsonSerializable(typeof(JsonElement))]

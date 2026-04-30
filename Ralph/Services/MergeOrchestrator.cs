@@ -22,7 +22,6 @@ internal sealed class MergeOrchestrator
     private readonly bool _strictFiles;
     private readonly bool _noSmokeTest;
     private readonly string? _smokeTestCommandOverride;
-    private readonly SemaphoreSlim _taskFileLock = new(1, 1);
 
     /// <summary>RunSingle path를 머지가 abort 시 fallback으로 호출하기 위한 콜백.</summary>
     public Func<string, CancellationToken, Task<int>>? RerunSequential { get; set; }
@@ -161,8 +160,8 @@ internal sealed class MergeOrchestrator
             }
         }
 
-        // 5. tasks.json 변경사항 커밋
-        await CommitTasksFileAsync(taskIds, ct);
+        // 5. (이전: tasks.json done 커밋) — done 상태는 .ralph-logs/state.json으로 분리되어
+        // 더 이상 git에 트래킹되지 않으므로 커밋이 불필요.
 
         // 5.5 머지 후 smoke test
         if (await RunPostMergeSmokeTestAsync(preMergeSha, ct) is { } smokeFail)
@@ -473,48 +472,20 @@ internal sealed class MergeOrchestrator
     }
 
     /// <summary>
-    /// tasks.json 변경사항(done 상태 업데이트)을 커밋한다.
-    /// 다음 배치의 worktree 병합 시 충돌을 방지.
+    /// 태스크를 완료 상태로 마킹한다. State 저장은 StateStore 내부에서 thread-safe하게 처리되며
+    /// tasks.json은 변경되지 않는다 (done은 .ralph-logs/state.json에만 기록).
     /// </summary>
-    private async Task CommitTasksFileAsync(List<string> completedTaskIds, CancellationToken ct)
-    {
-        var (exitCode, _) = await _git.RunAsync(["add", _tasksFile], ct: ct);
-        if (exitCode != 0) return;
-
-        var taskList = string.Join(", ", completedTaskIds);
-        var commitMsg = $"chore: 태스크 상태 업데이트 ({taskList})";
-
-        (exitCode, _) = await _git.RunAsync(
-            ["commit", "-m", commitMsg], ct: ct);
-
-        if (exitCode == 0)
-            _logger.Info($"Tasks file committed: {taskList}");
-        else
-            _logger.Warn("No tasks file changes to commit");
-    }
-
-    /// <summary>thread-safe하게 태스크를 완료 상태로 변경한다.</summary>
     private async Task MarkTaskDoneThreadSafeAsync(string taskId, CancellationToken ct)
     {
-        await _taskFileLock.WaitAsync(ct);
-        try
-        {
-            await _taskManager.ReloadAsync();
-            var task = _taskManager.GetTask(taskId)!;
+        var task = _taskManager.GetTask(taskId)!;
 
-            if (task.Subtasks is { Count: > 0 })
-            {
-                foreach (var sub in task.Subtasks.Where(s => !s.Done))
-                    _taskManager.MarkSubtaskDone(taskId, sub.Id);
-            }
-
-            _taskManager.MarkTaskDone(taskId);
-            await _taskManager.SaveAsync();
-        }
-        finally
+        if (task.Subtasks is { Count: > 0 })
         {
-            _taskFileLock.Release();
+            foreach (var sub in task.Subtasks.Where(s => !_taskManager.IsSubtaskDone(taskId, s.Id)))
+                await _taskManager.MarkSubtaskDoneAsync(taskId, sub.Id, ct);
         }
+
+        await _taskManager.MarkTaskDoneAsync(taskId, ct);
     }
 
     /// <summary>

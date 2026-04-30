@@ -200,7 +200,7 @@
     },
     "tasks": {
       "type": "array",
-      "description": "Ordered list of tasks to execute. Tasks are processed in array order; the first task with done=false is picked next.",
+      "description": "Ordered list of tasks to execute. Per-task progress (done) is tracked separately in .ralph-logs/state.json (orchestrator-managed, not in this file).",
       "minItems": 1,
       "items": {
         "$ref": "#/$defs/task"
@@ -211,7 +211,7 @@
   "$defs": {
     "task": {
       "type": "object",
-      "required": ["id", "title", "done"],
+      "required": ["id", "title"],
       "properties": {
         "id": {
           "type": "string",
@@ -238,11 +238,6 @@
           "type": "string",
           "description": "Category or domain of the task",
           "examples": ["backend", "frontend", "database", "infrastructure", "testing"]
-        },
-        "done": {
-          "type": "boolean",
-          "default": false,
-          "description": "Whether this task has been completed. Set to true by Ralph upon completion."
         },
         "prompt": {
           "type": "string",
@@ -314,7 +309,7 @@
     },
     "subtask": {
       "type": "object",
-      "required": ["id", "title", "done"],
+      "required": ["id", "title"],
       "properties": {
         "id": {
           "type": "string",
@@ -325,11 +320,6 @@
           "type": "string",
           "description": "Short human-readable title for the subtask",
           "minLength": 1
-        },
-        "done": {
-          "type": "boolean",
-          "default": false,
-          "description": "Whether this subtask has been completed"
         },
         "prompt": {
           "type": "string",

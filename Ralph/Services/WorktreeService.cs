@@ -81,9 +81,23 @@ public class WorktreeService
 
         Directory.CreateDirectory(Path.GetDirectoryName(worktreePath)!);
 
-        // stale worktree 참조 정리 후 브랜치 삭제
+        // stale worktree 참조 정리
         await _git.RunAsync(["worktree", "prune"], ct: ct);
-        await _git.RunAsync(["branch", "-D", branchName], ct: ct);
+
+        // 동명 브랜치가 이미 존재하면, ralph가 만든 것일 때만 삭제. 사용자가 직접 만든
+        // ralph/* 브랜치를 silent하게 날리지 않도록 config 마커(또는 활성 worktree 연결)로 가드.
+        if (await BranchExistsAsync(branchName, ct))
+        {
+            if (!await IsRalphManagedBranchAsync(branchName, ct))
+            {
+                throw new InvalidOperationException(
+                    $"브랜치 '{branchName}'이 이미 존재하지만 ralph가 만든 것이 아닙니다. " +
+                    $"silent 삭제를 거부합니다 — 해당 브랜치를 다른 이름으로 옮기거나 직접 정리한 뒤 다시 실행하세요.");
+            }
+            var (delExit, delOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
+            if (delExit != 0)
+                logger?.Warn($"기존 ralph 브랜치 삭제 실패 ({taskId}): {delOut.Trim()}");
+        }
 
         // git worktree add [--shared] -b ralph/{taskId} .ralph-worktrees/{taskId} {baseBranch}
         int exitCode;
@@ -108,6 +122,9 @@ public class WorktreeService
 
         if (exitCode != 0)
             throw new InvalidOperationException($"Failed to create worktree for {taskId}: {output}");
+
+        // ralph가 만든 브랜치임을 표시 — 후속 cleanup이 사용자 브랜치를 건드리지 않도록.
+        await MarkRalphManagedAsync(branchName, ct);
 
         logger?.Info($"Worktree created: {worktreePath} (branch: {branchName}{(sharedObjects ? ", shared" : "")})");
         return worktreePath;
@@ -493,6 +510,86 @@ public class WorktreeService
     // ValidationLogEntry는 namespace 레벨로 분리됨 (RalphJsonContext source-gen 등록용).
 
     /// <summary>
+    /// refs/heads/{branchName}이 존재하는지 확인합니다.
+    /// </summary>
+    private async Task<bool> BranchExistsAsync(string branchName, CancellationToken ct)
+    {
+        var (exit, _) = await _git.RunAsync(
+            ["show-ref", "--verify", "--quiet", $"refs/heads/{branchName}"], ct: ct);
+        return exit == 0;
+    }
+
+    /// <summary>
+    /// 브랜치 생성 시점에 ralph 소유임을 표시. 이후 삭제 가드의 1차 신호.
+    /// </summary>
+    private async Task MarkRalphManagedAsync(string branchName, CancellationToken ct)
+    {
+        await _git.RunAsync(
+            ["config", $"branch.{branchName}.ralphManaged", "true"], ct: ct);
+    }
+
+    /// <summary>
+    /// ralph가 만든 브랜치인지 판정.
+    ///   1) `branch.{name}.ralphManaged=true` config 마커가 있으면 managed.
+    ///   2) 없더라도 `git worktree list`에서 해당 브랜치가 우리의 worktreeBase 산하 워크트리에
+    ///      묶여 있으면 managed (마커 도입 이전 버전이 만든 브랜치를 위한 fallback).
+    /// 두 신호 모두 없는 경우 사용자가 직접 만든 동명 브랜치로 간주하고 false 반환.
+    /// </summary>
+    private async Task<bool> IsRalphManagedBranchAsync(string branchName, CancellationToken ct)
+    {
+        var (cfgExit, cfgOut) = await _git.RunAsync(
+            ["config", "--get", $"branch.{branchName}.ralphManaged"], ct: ct);
+        if (cfgExit == 0 && cfgOut.Trim().Equals("true", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // legacy fallback: 활성 worktree와의 연결로 소유권 확인
+        var (wtExit, wtOut) = await _git.RunAsync(["worktree", "list", "--porcelain"], ct: ct);
+        if (wtExit != 0) return false;
+
+        var worktreeBaseAbs = Path.GetFullPath(_worktreeBase);
+        string? curWorktree = null;
+        foreach (var raw in wtOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var line = raw.TrimEnd('\r');
+            if (line.StartsWith("worktree ", StringComparison.Ordinal))
+            {
+                curWorktree = line["worktree ".Length..].Trim();
+            }
+            else if (line.StartsWith("branch ", StringComparison.Ordinal))
+            {
+                var b = line["branch ".Length..].Trim();
+                if (b.StartsWith("refs/heads/", StringComparison.Ordinal))
+                    b = b["refs/heads/".Length..];
+                if (b == branchName && curWorktree != null
+                    && IsUnderWorktreeBase(curWorktree, worktreeBaseAbs))
+                {
+                    // 발견 시 즉시 마커를 박아두면 다음 호출부터 빠른 경로로 통과.
+                    await MarkRalphManagedAsync(branchName, ct);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static bool IsUnderWorktreeBase(string worktreePath, string worktreeBaseAbs)
+    {
+        try
+        {
+            var full = Path.GetFullPath(worktreePath);
+            var cmp = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return full.Equals(worktreeBaseAbs, cmp)
+                || full.StartsWith(worktreeBaseAbs + Path.DirectorySeparatorChar, cmp)
+                || full.StartsWith(worktreeBaseAbs + Path.AltDirectorySeparatorChar, cmp);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 충돌 파일 목록을 반환합니다.
     /// </summary>
     private async Task<List<string>> GetConflictFilesAsync(CancellationToken ct)
@@ -516,6 +613,12 @@ public class WorktreeService
         var branchName = $"ralph/{taskId}";
         var ok = true;
 
+        // 워크트리 제거 전에 소유권을 판정한다 — 제거 후엔 worktree-list 기반 legacy fallback이
+        // 끊어져 마커 없는 ralph 브랜치(이전 버전 산출물)를 사용자 브랜치로 오판할 수 있다.
+        // BranchExists 체크는 추후 -D 단계에서 다시 수행한다 (사이에 다른 프로세스가 지웠을 수 있음).
+        var branchExists = await BranchExistsAsync(branchName, ct);
+        var branchManaged = branchExists && await IsRalphManagedBranchAsync(branchName, ct);
+
         // git worktree remove
         if (Directory.Exists(worktreePath))
         {
@@ -533,13 +636,25 @@ public class WorktreeService
             }
         }
 
-        // 브랜치 삭제 (이미 머지된 후에도 -D는 성공)
-        var (branchExit, branchOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
-        if (branchExit != 0 && Directory.Exists(worktreePath))
+        // 브랜치 삭제 (이미 머지된 후에도 -D는 성공). ralph가 만든 브랜치만 삭제.
+        if (branchExists && await BranchExistsAsync(branchName, ct))
         {
-            // 디렉터리가 여전히 남아 있고 브랜치도 못 지우면 명백한 실패
-            logger?.Warn($"git branch -D 실패 ({taskId}): {branchOut.Trim()}");
-            ok = false;
+            if (branchManaged)
+            {
+                var (branchExit, branchOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
+                if (branchExit != 0 && Directory.Exists(worktreePath))
+                {
+                    // 디렉터리가 여전히 남아 있고 브랜치도 못 지우면 명백한 실패
+                    logger?.Warn($"git branch -D 실패 ({taskId}): {branchOut.Trim()}");
+                    ok = false;
+                }
+            }
+            else
+            {
+                logger?.Warn(
+                    $"브랜치 '{branchName}'은 ralph가 만든 것이 아니어서 보존합니다. " +
+                    $"수동으로 정리하려면 git branch -D {branchName}을 직접 실행하세요.");
+            }
         }
 
         if (ok) logger?.Info($"Cleaned up worktree for {taskId}");
@@ -564,8 +679,15 @@ public class WorktreeService
 
         foreach (var branch in branches)
         {
-            await _git.RunAsync(["branch", "-D", branch], ct: ct);
-            logger?.Info($"Deleted branch: {branch}");
+            if (await IsRalphManagedBranchAsync(branch, ct))
+            {
+                await _git.RunAsync(["branch", "-D", branch], ct: ct);
+                logger?.Info($"Deleted branch: {branch}");
+            }
+            else
+            {
+                logger?.Info($"Skipped non-ralph branch: {branch} (ralph가 만든 것이 아님)");
+            }
         }
 
         // worktree 디렉토리 정리

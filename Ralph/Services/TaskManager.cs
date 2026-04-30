@@ -7,6 +7,7 @@ namespace Ralph.Services;
 public class TaskManager
 {
     private readonly string _filePath;
+    private readonly StateStore _state;
     private TasksFile _data;
 
     public static readonly JsonSerializerOptions JsonOptions = new()
@@ -19,6 +20,11 @@ public class TaskManager
     public TasksFile Data => _data;
     public string FilePath => _filePath;
 
+    /// <summary>
+    /// Mutable progress(done) 비트는 모두 여기에 보관된다. tasks.json은 spec only.
+    /// </summary>
+    public StateStore State => _state;
+
     public bool CommitOnComplete
         => _data.Workflow?.OnTaskComplete?.CommitChanges ?? true;
 
@@ -29,28 +35,121 @@ public class TaskManager
     public ParallelSettings ParallelConfig
         => _data.Workflow?.Parallel ?? new ParallelSettings();
 
-    private TaskManager(string filePath, TasksFile data)
+    private TaskManager(string filePath, TasksFile data, StateStore state)
     {
         _filePath = filePath;
         _data = data;
+        _state = state;
     }
 
-    public static async Task<TaskManager> LoadAsync(string filePath)
+    /// <summary>
+    /// tasks.json을 로드한다. 같은 디렉토리 산하의 `.ralph-logs/state.json`을 함께 연다.
+    /// 첫 로드 시 legacy tasks.json(`done` 키 포함)이 발견되면 자동으로 state.json으로 이관하고
+    /// tasks.json을 done 키 없이 재저장한다 (idempotent).
+    /// </summary>
+    public static async Task<TaskManager> LoadAsync(string filePath, StateStore? state = null, CancellationToken ct = default)
     {
-        var json = await File.ReadAllTextAsync(filePath);
+        var json = await File.ReadAllTextAsync(filePath, ct);
         var data = JsonSerializer.Deserialize<TasksFile>(json, JsonOptions)
                    ?? throw new InvalidOperationException($"Failed to deserialize {filePath}");
-        return new TaskManager(filePath, data);
+
+        state ??= await StateStore.OpenAsync(StateStore.DefaultPathFor(filePath), ct);
+
+        var tm = new TaskManager(filePath, data, state);
+
+        var migrated = await TryMigrateLegacyDoneAsync(json, state, ct);
+        if (migrated)
+        {
+            // ExtensionData에 흡수된 legacy `done` 키를 제거한 뒤 재저장.
+            StripLegacyDoneFromExtensionData(data);
+            await tm.SaveAsync(ct);
+        }
+
+        return tm;
     }
 
-    public async Task ReloadAsync()
+    /// <summary>
+    /// raw JSON에서 legacy `done` 키를 찾아 StateStore로 이관한다.
+    /// 발견되면 true 반환 (호출자가 tasks.json 재저장).
+    /// </summary>
+    private static async Task<bool> TryMigrateLegacyDoneAsync(string rawJson, StateStore state, CancellationToken ct)
     {
-        var json = await File.ReadAllTextAsync(_filePath);
+        using var doc = JsonDocument.Parse(rawJson);
+        if (!doc.RootElement.TryGetProperty("tasks", out var tasksEl)
+            || tasksEl.ValueKind != JsonValueKind.Array)
+            return false;
+
+        var anyLegacy = false;
+        foreach (var taskEl in tasksEl.EnumerateArray())
+        {
+            if (taskEl.ValueKind != JsonValueKind.Object) continue;
+
+            string? taskId = null;
+            if (taskEl.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                taskId = idEl.GetString();
+
+            if (string.IsNullOrEmpty(taskId)) continue;
+
+            if (taskEl.TryGetProperty("done", out var doneEl)
+                && (doneEl.ValueKind == JsonValueKind.True || doneEl.ValueKind == JsonValueKind.False))
+            {
+                anyLegacy = true;
+                if (doneEl.ValueKind == JsonValueKind.True)
+                    state.SetDoneInMemory(taskId, true);
+            }
+
+            if (taskEl.TryGetProperty("subtasks", out var subsEl)
+                && subsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var subEl in subsEl.EnumerateArray())
+                {
+                    if (subEl.ValueKind != JsonValueKind.Object) continue;
+                    string? subId = null;
+                    if (subEl.TryGetProperty("id", out var subIdEl) && subIdEl.ValueKind == JsonValueKind.String)
+                        subId = subIdEl.GetString();
+                    if (string.IsNullOrEmpty(subId)) continue;
+
+                    if (subEl.TryGetProperty("done", out var subDoneEl)
+                        && (subDoneEl.ValueKind == JsonValueKind.True || subDoneEl.ValueKind == JsonValueKind.False))
+                    {
+                        anyLegacy = true;
+                        if (subDoneEl.ValueKind == JsonValueKind.True)
+                            state.SetSubtaskDoneInMemory(taskId, subId, true);
+                    }
+                }
+            }
+        }
+
+        if (anyLegacy)
+            await state.SaveAsync(ct);
+
+        return anyLegacy;
+    }
+
+    /// <summary>
+    /// `done` 키는 POCO에 더 이상 없으므로 ExtensionData(Dictionary&lt;string,JsonElement&gt;)에 들어간다.
+    /// 재저장 전에 명시적으로 걷어내야 round-trip으로 살아남지 않는다.
+    /// </summary>
+    private static void StripLegacyDoneFromExtensionData(TasksFile data)
+    {
+        foreach (var task in data.Tasks)
+        {
+            task.ExtensionData?.Remove("done");
+            if (task.Subtasks is null) continue;
+            foreach (var sub in task.Subtasks)
+                sub.ExtensionData?.Remove("done");
+        }
+    }
+
+    public async Task ReloadAsync(CancellationToken ct = default)
+    {
+        var json = await File.ReadAllTextAsync(_filePath, ct);
         _data = JsonSerializer.Deserialize<TasksFile>(json, JsonOptions)
                 ?? throw new InvalidOperationException($"Failed to deserialize {_filePath}");
+        await _state.ReloadAsync(ct);
     }
 
-    public async Task SaveAsync()
+    public async Task SaveAsync(CancellationToken ct = default)
     {
         var tmpFile = _filePath + $".tmp.{Guid.NewGuid():N}";
         try
@@ -62,7 +161,7 @@ public class TaskManager
             if (verify?.Tasks == null)
                 throw new InvalidOperationException("Validation failed: tasks array missing");
 
-            await File.WriteAllTextAsync(tmpFile, json);
+            await File.WriteAllTextAsync(tmpFile, json, ct);
             File.Move(tmpFile, _filePath, overwrite: true);
         }
         catch
@@ -75,11 +174,16 @@ public class TaskManager
     public TaskItem? GetTask(string id)
         => _data.Tasks.FirstOrDefault(t => t.Id == id);
 
+    public bool IsDone(string taskId) => _state.IsDone(taskId);
+
+    public bool IsSubtaskDone(string taskId, string subtaskId)
+        => _state.IsSubtaskDone(taskId, subtaskId);
+
     public List<TaskItem> GetPendingTasks()
-        => _data.Tasks.Where(t => !t.Done).ToList();
+        => _data.Tasks.Where(t => !_state.IsDone(t.Id)).ToList();
 
     public TaskItem? GetNextTask()
-        => _data.Tasks.FirstOrDefault(t => !t.Done);
+        => _data.Tasks.FirstOrDefault(t => !_state.IsDone(t.Id));
 
     public bool CheckDependencies(string taskId, out List<string> blockedBy)
     {
@@ -91,7 +195,7 @@ public class TaskManager
         foreach (var depId in task.DependsOn)
         {
             var dep = GetTask(depId);
-            if (dep == null || !dep.Done)
+            if (dep == null || !_state.IsDone(dep.Id))
                 blockedBy.Add(depId);
         }
 
@@ -100,7 +204,7 @@ public class TaskManager
 
     public string? GetNextReadyTask()
     {
-        foreach (var task in _data.Tasks.Where(t => !t.Done))
+        foreach (var task in _data.Tasks.Where(t => !_state.IsDone(t.Id)))
         {
             if (CheckDependencies(task.Id, out _))
                 return task.Id;
@@ -114,7 +218,7 @@ public class TaskManager
     public List<string> GetAllReadyTasks()
     {
         return _data.Tasks
-            .Where(t => !t.Done && CheckDependencies(t.Id, out _))
+            .Where(t => !_state.IsDone(t.Id) && CheckDependencies(t.Id, out _))
             .Select(t => t.Id)
             .ToList();
     }
@@ -219,32 +323,30 @@ public class TaskManager
         return true;
     }
 
-    public void MarkTaskDone(string taskId)
+    /// <summary>
+    /// 태스크를 done 처리한다. tasks.json은 변경되지 않고 state.json에만 기록된다.
+    /// </summary>
+    public Task MarkTaskDoneAsync(string taskId, CancellationToken ct = default)
+    {
+        if (GetTask(taskId) == null)
+            throw new ArgumentException($"Task '{taskId}' not found");
+        return _state.MarkDoneAsync(taskId, ct);
+    }
+
+    public Task MarkSubtaskDoneAsync(string taskId, string subtaskId, CancellationToken ct = default)
     {
         var task = GetTask(taskId)
                    ?? throw new ArgumentException($"Task '{taskId}' not found");
-        task.Done = true;
+        if (task.Subtasks?.FirstOrDefault(s => s.Id == subtaskId) == null)
+            throw new ArgumentException($"Subtask '{subtaskId}' not found");
+        return _state.MarkSubtaskDoneAsync(taskId, subtaskId, ct);
     }
 
-    public void MarkSubtaskDone(string taskId, string subtaskId)
-    {
-        var task = GetTask(taskId)
-                   ?? throw new ArgumentException($"Task '{taskId}' not found");
-        var subtask = task.Subtasks?.FirstOrDefault(s => s.Id == subtaskId)
-                      ?? throw new ArgumentException($"Subtask '{subtaskId}' not found");
-        subtask.Done = true;
-    }
-
-    public void ResetAll()
-    {
-        foreach (var task in _data.Tasks)
-        {
-            task.Done = false;
-            if (task.Subtasks == null) continue;
-            foreach (var sub in task.Subtasks)
-                sub.Done = false;
-        }
-    }
+    /// <summary>
+    /// 모든 진행 상태(state.json)를 초기화한다. tasks.json(spec)은 손대지 않는다.
+    /// </summary>
+    public Task ResetAllAsync(CancellationToken ct = default)
+        => _state.ResetAllAsync(ct);
 
     /// <summary>
     /// Kahn's algorithm으로 전체 태스크를 위상 정렬 레이어별로 그룹화합니다.

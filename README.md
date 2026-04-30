@@ -68,9 +68,9 @@ Ralph는 호스트 머신에서 Claude Code를 `--dangerously-skip-permissions`�
 | Linux (x64) | `ralph-vX.X.X-linux-x64.tar.gz` |
 
 ```bash
-# 예: Linux
-curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.22-linux-x64.tar.gz
-tar -xzf ralph-v1.22-linux-x64.tar.gz
+# 예: Linux (URL의 vX.X.X는 실제 릴리스 버전으로 대체)
+curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.32-linux-x64.tar.gz
+tar -xzf ralph-v1.32-linux-x64.tar.gz
 sudo mv ralph /usr/local/bin/
 ```
 

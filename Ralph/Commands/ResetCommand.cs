@@ -13,12 +13,11 @@ public sealed class ResetCommand : ICommand
     public async Task<int> ExecuteAsync(CancellationToken ct)
     {
         DisplayHelpers.RequireFile(_ctx.TasksFile);
-        var tm = await TaskManager.LoadAsync(_ctx.TasksFile);
+        var tm = await TaskManager.LoadAsync(_ctx.TasksFile, ct: ct);
 
         AnsiConsole.MarkupLine("[yellow]Resetting all tasks to pending...[/]");
-        tm.ResetAll();
-        await tm.SaveAsync();
-        AnsiConsole.MarkupLine("[green]All tasks reset.[/]");
+        await tm.ResetAllAsync(ct);
+        AnsiConsole.MarkupLine("[green]All tasks reset.[/] [dim](spec(tasks.json)은 보존; .ralph-logs/state.json만 초기화)[/]");
         return 0;
     }
 }

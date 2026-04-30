@@ -92,9 +92,30 @@ internal sealed class GitFixture : IDisposable
         if (e2 != 0) throw new InvalidOperationException($"commit failed: {o2.Trim()}");
     }
 
+    /// <summary>
+    /// CleanupWorktree/CleanupAll/CreateWorktree처럼 CWD 의존 메서드를 테스트할 때
+    /// process CWD를 RepoDir로 잠깐 바꾸기 위한 헬퍼. xUnit collection으로 직렬화 필수.
+    /// </summary>
+    public IDisposable UseRepoCwd() => new CwdScope(RepoDir);
+
+    private sealed class CwdScope : IDisposable
+    {
+        private readonly string _prev;
+        public CwdScope(string newCwd)
+        {
+            _prev = Directory.GetCurrentDirectory();
+            Directory.SetCurrentDirectory(newCwd);
+        }
+        public void Dispose()
+        {
+            try { Directory.SetCurrentDirectory(_prev); } catch { }
+        }
+    }
+
     public void Dispose()
     {
         // worktree 디렉터리는 git locking 때문에 즉시 삭제가 실패할 수 있음 — best-effort.
         try { Directory.Delete(_root, recursive: true); } catch { }
     }
 }
+

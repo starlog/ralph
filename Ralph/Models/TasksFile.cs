@@ -38,9 +38,6 @@ public class TaskItem
     [JsonPropertyName("category")]
     public string? Category { get; set; }
 
-    [JsonPropertyName("done")]
-    public bool Done { get; set; }
-
     [JsonPropertyName("prompt")]
     public string? Prompt { get; set; }
 
@@ -96,9 +93,6 @@ public class SubTask
 
     [JsonPropertyName("title")]
     public string Title { get; set; } = "";
-
-    [JsonPropertyName("done")]
-    public bool Done { get; set; }
 
     [JsonPropertyName("prompt")]
     public string? Prompt { get; set; }

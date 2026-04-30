@@ -23,7 +23,7 @@ public static class DisplayHelpers
     public static void ShowProgress(TaskManager tm, RalphLogger? logger)
     {
         var total = tm.Data.Tasks.Count;
-        var done = tm.Data.Tasks.Count(t => t.Done);
+        var done = tm.Data.Tasks.Count(t => tm.IsDone(t.Id));
         var pending = tm.GetPendingTasks();
         var blocked = pending.Count(t => !tm.CheckDependencies(t.Id, out _));
         var ready = pending.Count - blocked;
@@ -70,7 +70,7 @@ public static class DisplayHelpers
             AnsiConsole.MarkupLine("[yellow]Subtasks:[/]");
             foreach (var sub in task.Subtasks)
             {
-                var check = sub.Done ? "v" : " ";
+                var check = tm.IsSubtaskDone(taskId, sub.Id) ? "v" : " ";
                 AnsiConsole.MarkupLine(
                     $"  [[{check}]] {Markup.Escape(sub.Id)}: {Markup.Escape(sub.Title)}");
             }

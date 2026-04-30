@@ -21,7 +21,7 @@ public class GraphRenderer
     public void RenderToConsole()
     {
         var total = _tm.Data.Tasks.Count;
-        var done = _tm.Data.Tasks.Count(t => t.Done);
+        var done = _tm.Data.Tasks.Count(t => _tm.IsDone(t.Id));
         var pending = total - done;
 
         AnsiConsole.MarkupLine(
@@ -281,7 +281,7 @@ public class GraphRenderer
     private string[] BuildBox(string taskId, int width = BoxWidth)
     {
         var task = _tm.GetTask(taskId);
-        var done = task?.Done ?? false;
+        var done = task != null && _tm.IsDone(task.Id);
         var status = done ? "[green][\u2713][/]" : "[ ]";
         var statusRaw = done ? "[v]" : "[ ]";
         var category = task?.Category ?? task?.Phase ?? "";

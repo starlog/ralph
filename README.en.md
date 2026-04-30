@@ -70,9 +70,9 @@ Grab the file matching your OS from [GitHub Releases](https://github.com/starlog
 | Linux (x64) | `ralph-vX.X.X-linux-x64.tar.gz` |
 
 ```bash
-# Example: Linux
-curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.22-linux-x64.tar.gz
-tar -xzf ralph-v1.22-linux-x64.tar.gz
+# Example: Linux (replace vX.X.X with the current release tag)
+curl -LO https://github.com/starlog/ralph/releases/latest/download/ralph-v1.32-linux-x64.tar.gz
+tar -xzf ralph-v1.32-linux-x64.tar.gz
 sudo mv ralph /usr/local/bin/
 ```
 

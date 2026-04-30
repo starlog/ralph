@@ -91,16 +91,15 @@ public sealed class SequentialRunner
 
         if (task.Subtasks is { Count: > 0 })
         {
-            foreach (var sub in task.Subtasks.Where(s => !s.Done))
+            foreach (var sub in task.Subtasks.Where(s => !_tm.IsSubtaskDone(taskId, s.Id)))
             {
                 AnsiConsole.MarkupLine($"  [yellow]Subtask:[/] {Markup.Escape(sub.Title)}");
-                _tm.MarkSubtaskDone(taskId, sub.Id);
+                await _tm.MarkSubtaskDoneAsync(taskId, sub.Id, ct);
                 AnsiConsole.MarkupLine($"  [green]Subtask completed[/]");
             }
         }
 
-        _tm.MarkTaskDone(taskId);
-        await _tm.SaveAsync();
+        await _tm.MarkTaskDoneAsync(taskId, ct);
 
         if (!dryRun)
         {
@@ -259,17 +258,16 @@ public sealed class SequentialRunner
 
                         if (task.Subtasks is { Count: > 0 })
                         {
-                            foreach (var sub in task.Subtasks.Where(s => !s.Done))
+                            foreach (var sub in task.Subtasks.Where(s => !_tm.IsSubtaskDone(nextId, s.Id)))
                             {
                                 AnsiConsole.MarkupLine(
                                     $"  [yellow]Subtask:[/] {Markup.Escape(sub.Title)}");
-                                _tm.MarkSubtaskDone(nextId, sub.Id);
+                                await _tm.MarkSubtaskDoneAsync(nextId, sub.Id, ct);
                                 AnsiConsole.MarkupLine("  [green]Subtask completed[/]");
                             }
                         }
 
-                        _tm.MarkTaskDone(nextId);
-                        await _tm.SaveAsync();
+                        await _tm.MarkTaskDoneAsync(nextId, ct);
                         AnsiConsole.MarkupLine(
                             $"[green]Task completed: {Markup.Escape(task.Title)}[/]");
                         _logger.TaskEnd(nextId, "completed");

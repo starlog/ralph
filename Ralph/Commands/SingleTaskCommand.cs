@@ -40,7 +40,7 @@ public sealed class SingleTaskCommand : ICommand
             {
                 var dep = tm.GetTask(depId);
                 var depTitle = dep?.Title ?? "(unknown)";
-                var status = dep == null ? "missing" : (dep.Done ? "done" : "pending");
+                var status = dep == null ? "missing" : (tm.IsDone(dep.Id) ? "done" : "pending");
                 AnsiConsole.MarkupLine($"  - {Markup.Escape(depId)}: {Markup.Escape(depTitle)} [dim]({status})[/]");
             }
 

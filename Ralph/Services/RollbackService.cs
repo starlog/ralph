@@ -12,9 +12,9 @@ namespace Ralph.Services;
 ///   - post-plan.json : --plan 직후 상태 (rollback 대상 = "after --plan / before --run")
 ///
 /// --plan은 두 스냅샷을 모두 갱신한다. --run은 스냅샷을 만지지 않는다.
-/// --rollback은 현재 tasks.json 상태로 어느 스냅샷을 적용할지 판단:
-///   tasks.json에 done=true 있음 → post-plan으로 복원 (run 결과 되돌리기)
-///   tasks.json에 done 없음        → pre-plan으로 복원 (plan 결과 되돌리기)
+/// --rollback은 현재 state.json(.ralph-logs/state.json) 상태로 어느 스냅샷을 적용할지 판단:
+///   state.json에 done=true 있음 → post-plan으로 복원 (run 결과 되돌리기)
+///   state.json에 done 없음        → pre-plan으로 복원 (plan 결과 되돌리기)
 /// </summary>
 public sealed class RollbackService
 {

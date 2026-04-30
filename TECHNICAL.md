@@ -22,7 +22,9 @@
 - [충돌 해결 전략](#충돌-해결-전략)
 - [검증 게이트(Verification Gate)](#검증-게이트verification-gate)
 - [Smoke Test (머지 후)](#smoke-test-머지-후)
+- [설계 노트 — Smoke test를 매 배치마다 돌리는 게 맞나?](#설계-노트--smoke-test를-매-배치마다-돌리는-게-맞나)
 - [비용 추적 및 예산 게이트](#비용-추적-및-예산-게이트)
+- [설계 노트 — `--plan` prompt에 prompt caching을 적용해야 하나?](#설계-노트----plan-prompt에-prompt-caching을-적용해야-하나)
 - [모델 선택](#모델-선택)
 - [Webhook 알림](#webhook-알림)
 - [실시간 모니터링](#실시간-모니터링)
@@ -50,7 +52,7 @@
 | **충돌 전략 chain** | `auto-theirs` 시도 → `claude` fallback → `abort` fallback. 프로젝트별 설정 가능. |
 | **비용 예산** | `--budget-usd` 하드 상한 + 80% 경고. 호출별 토큰 사용량은 append-only ledger로 기록. |
 | **머지 후 smoke test** | 각 배치 머지 후 base 브랜치에서 단일 명령 실행 — auto-merge로 살아남은 semantic 충돌을 잡는다. |
-| **재개 안전** | `done: true`는 task별 atomic write — 재실행 시 정확히 중단점부터 이어진다. |
+| **재개 안전** | `done: true`는 `.ralph-logs/state.json`에 task별 atomic write — 재실행 시 정확히 중단점부터 이어진다. |
 | **Plan 비평** | 정적 `--critique`가 병렬화/검증 누락을 진단. 선택적 `--llm-critique`는 PRD vs plan을 LLM이 한 번 더 검토. |
 | **Rollback** | `--rollback`으로 마지막 `--plan` / `--run` 직전 상태로 되돌리기 (스냅샷 기반). |
 | **단일 self-contained 바이너리** | 대상 머신에 .NET 런타임 설치 불필요. 스키마와 가격표가 바이너리에 임베드됨. |
@@ -89,14 +91,14 @@ payment-plan ─→ payment-impl ─→ payment-test ─→ payment-commit ─�
 
 Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들을 자동 수정한 사례. 위에서 설명한 파이프라인의 모든 단계를 실제로 사용한다.
 
-- **출발점:** `bugfix.md`에 Ralph 내부 서비스(`LogRotator`, `GitService`, `VerificationRunner`, `RalphLogger`, `WorktreeService`, `ParallelExecutor`, `Program`, `PlanGenerator`)에서 발견한 **독립 버그 9개**와 **선택적 cosmetic 리팩토링 1개**를 정리. 각 항목은 1~2개 파일로 한정되며 `modifiedFiles`가 명시되어 있다.
-- **분해:** `ralph --plan bugfix.md`가 PRD를 작은 `*-impl` / `*-commit` task 쌍으로 변환. 서로 다른 파일을 수정하는 7개 버그는 **하나의 완전 병렬 layer**를 이루고, `WorktreeService.cs`를 함께 건드리는 두 항목(Feature 5와 선택적 Feature 10)만 `dependsOn`으로 직렬화된다.
+- **출발점:** `doc/bugfix.md`에 Ralph 내부 서비스(`LogRotator`, `GitService`, `VerificationRunner`, `RalphLogger`, `WorktreeService`, `ParallelExecutor`, `Program`, `PlanGenerator`)에서 발견한 **독립 버그 9개**와 **선택적 cosmetic 리팩토링 1개**를 정리. 각 항목은 1~2개 파일로 한정되며 `modifiedFiles`가 명시되어 있다.
+- **분해:** `ralph --plan doc/bugfix.md`가 PRD를 작은 `*-impl` / `*-commit` task 쌍으로 변환. 서로 다른 파일을 수정하는 7개 버그는 **하나의 완전 병렬 layer**를 이루고, `WorktreeService.cs`를 함께 건드리는 두 항목(Feature 5와 선택적 Feature 10)만 `dependsOn`으로 직렬화된다.
 - **실행:** `ralph --run`이 최대 **5개 worktree를 동시에** dispatch (`workflow.parallel.maxConcurrent: 5`). 각 task는 `.ralph-worktrees/` 아래 `ralph/{taskId}` 브랜치에서 격리 실행되고 Claude Code 스트림이 task별 로그로 기록된다.
 - **머지:** 머지 직전 각 worktree 브랜치를 최신 base로 rebase한 뒤, `conflictStrategies: ["auto-theirs", "claude"]` 체인으로 사소한 충돌은 `-X theirs`로 자동 해결하고 나머지만 Claude에게 escalate.
 - **검증:** task마다 `verification.command`(`dotnet build` 또는 `dotnet test --filter ...`)의 exit code를 ground truth로 사용 — Claude의 self-report는 무시. 실패하면 1회 self-fix 재시도 후에도 안 되면 머지에서 제외된다.
 - **결과:** PRD가 겨냥하는 바로 그 오케스트레이터가 자기 자신을 수정한다 — plan 생성부터 병렬 배치 스케줄링, 머지, 검증까지 사용자가 개입하는 지점은 처음의 `ralph --run` 한 번뿐.
 
-전체 PRD: [bugfix.md](bugfix.md)
+전체 PRD: [doc/bugfix.md](doc/bugfix.md)
 
 ## 버전
 
@@ -110,6 +112,7 @@ Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들�
 | v1.2 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | `IAgentRunner` 추상화 + 실시간 비용 표시, longest-prefix 가격표 매칭, `MockAgentRunner` 테스트 헬퍼, smoke test 자동 추론 + opt-out, `--llm-critique`, `--shared-worktrees`, 충돌 비용 별도 요약, 패키지 매니저 매니페스트(Homebrew tap, Scoop), ParallelExecutor 리팩토링 + 통합 테스트 |
 | v1.21 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Plan 검증 자동 정정 루프(invalid plan + errors를 Claude에게 재전송, 최대 2회), `SmokeTestPlanner` 분리 및 다중 marker 인식, Python marker 지원, Windows 인터프리터 해석을 위한 `HostPlatform`, 릴리스 자동화 강화 |
 | v1.22 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | 릴리스 스크립트가 claude CLI로 버전 표기 자동 동기화, Windows에서 한국어 커밋 요약이 stdout 쓰기 실패로 릴리스를 죽이지 않도록 UTF-8 콘솔 인코딩 고정, `--rollback` 명령(--plan/--run 직전 상태 복원), 태스크별 모델 지정(`task.model`) 지원 |
+| v1.32 | `Ralph/` (.NET 8 C#) | Windows, macOS, Linux | Spec/State 분리 — `tasks.json`은 immutable spec, `done` 비트는 `.ralph-logs/state.json`(orchestrator 단독 writer, atomic tmp+rename)으로 이동(legacy v1 자동 마이그레이션). worktree 브랜치 가드(`branch.{name}.ralphManaged` 마커로 사용자 소유 `ralph/*` 브랜치를 silent 삭제하지 않음). `--rollback`이 PRD 파일도 같이 복원. rate-limit backoff에 jitter 및 서버 retry-after 우선 적용. PR/푸시용 ubuntu+windows GitHub Actions matrix 워크플로우 추가. README/TECHNICAL을 사용자/엔지니어 두 트랙으로 분리. |
 
 ## 명령어
 
@@ -150,6 +153,7 @@ Ralph로 자기 자신의 소스 코드 정적 분석에서 발견된 버그들�
 | `--strict-files` | 머지 후 declared vs actual `modifiedFiles` 검증; undeclared 발견 시 중단 |
 | `--shared-worktrees` | `git worktree add --shared`로 `.git` objects 공유 (디스크/IO 절약, 미지원 시 자동 fallback) |
 | `--no-smoke-test` | 머지 후 smoke test 건너뜀 (그렇지 않으면 자동 추론 또는 `workflow.smokeTest` 사용) |
+| `--smoke-test <cmd>` | 1회용 smoke test 명령 override — `workflow.smokeTest`와 자동 추론을 모두 우회. `--no-smoke-test`만이 더 우선 |
 | `--budget-usd <amt>` | 누적 비용이 `<amt>` USD에 도달하면 새 task dispatch 중단 |
 | `--task-timeout <dur>` | per-Claude 호출 timeout (예: `30m`, `1h`, `90s`, `1800`) — 멈춘 호출 강제 종료 |
 | `--llm-critique` | `--plan` 직후 PRD + plan에 대한 LLM 기반 비평 1회 추가 (기본 off, 추가 비용) |
@@ -185,6 +189,7 @@ ralph -f my-project-tasks.json --run  # 글로벌 -f / --file 플래그
 | `RALPH_STRICT_FILES` | false | `true`면 `--strict-files` 기본 활성화 |
 | `RALPH_SHARED_WORKTREES` | false | `true`면 `--shared-worktrees` 기본 활성화 |
 | `RALPH_NO_SMOKE_TEST` | false | `true`/`1`이면 머지 후 smoke test 비활성 |
+| `RALPH_SMOKE_TEST_COMMAND` | unset | 1회용 smoke test 명령 override — CLI `--smoke-test`가 우선, 다음으로 이 값, 그 다음 `workflow.smokeTest`, 마지막으로 자동 추론 |
 | `RALPH_BUDGET_USD` | unset | 누적 비용 상한 — CLI `--budget-usd` 우선 |
 | `RALPH_TASK_TIMEOUT_SEC` | unset | per-Claude 호출 timeout(초) — CLI `--task-timeout` 우선 |
 | `RALPH_WEBHOOK_URL` | unset | 세션 완료 webhook 기본값 |
@@ -222,7 +227,7 @@ ralph --run
 8. (선택) declared `modifiedFiles`만 머지에 포함됐는지 검증 (`--strict-files`는 undeclared 발견 시 중단).
 9. 완료된 브랜치를 base 브랜치로 순차 머지.
 10. 머지 충돌은 `conflictStrategies` 체인으로 해결.
-11. `done: true` thread-safe 마킹, `tasks.json` atomic save, 변경 commit.
+11. `done: true` thread-safe 마킹 (`.ralph-logs/state.json` atomic save). `tasks.json`은 변경 안 됨 — 따라서 변경 commit도 없음.
 12. base 브랜치에서 머지 후 smoke test 실행 (자동 추론 또는 `workflow.smokeTest`).
 13. 다음 배치(unblock된 task)로 진행.
 14. 마지막에 task가 1개 남으면 in-place 실행으로 fallback.
@@ -238,7 +243,7 @@ ralph --run
 
 | 현재 상태 | 복원 대상 |
 |---|---|
-| `tasks.json`에 `done: true`인 task 있음 (after `--run`) | post-plan 스냅샷 — `--run` 결과를 되돌리고 plan만 남긴 상태 |
+| `.ralph-logs/state.json`에 `done: true`인 task 있음 (after `--run`) | post-plan 스냅샷 — `--run` 결과를 되돌리고 plan만 남긴 상태 |
 | `tasks.json`은 있지만 done 없음 (after `--plan`) | pre-plan 스냅샷 — ralph 실행 전 상태 |
 | post-plan이 없으면 pre-plan으로 직접 복원 | (한 번에 ralph 실행 전으로) |
 
@@ -271,7 +276,7 @@ ralph --rollback --force   # 비대화형 / 자동화에서 즉시 진행
 | 머지 후 `workflow.smokeTest` 실패 | non-zero exit로 ralph 종료. 머지는 revert되지 않으며 실패 내용은 로그 + 표시. |
 
 **중단 후 재개:**
-- `done: true`는 task 단위로 atomic write — `ralph --run`을 다시 실행하면 정확히 중단점부터 (오직 `done: false` task만 dispatch).
+- `done: true`는 task 단위로 `.ralph-logs/state.json`에 atomic write — `ralph --run`을 다시 실행하면 정확히 중단점부터 (오직 미완료 task만 dispatch).
 - `--run` 시작 시 worktree에 uncommitted 변경 또는 base 대비 commit이 남아있으면 **조용히 삭제하지 않는다.** worktree 경로를 출력하고 사용자가 직접 머지/정리하거나 `ralph --worktree-cleanup`으로 강제 제거하도록 안내.
 - 작업이 사라지지 않은 깔끔한 stale worktree는 자동 제거.
 
@@ -334,6 +339,29 @@ Claude 해결 후에는 `git diff --check --cached`로 staged 영역에 충돌 �
 }
 ```
 
+## 설계 노트 — Smoke test를 매 배치마다 돌리는 게 맞나?
+
+자주 제기되는 제안: "N개 배치면 smoke test가 N번 돈다. `dotnet build`가 30초 걸리면 5배치 = 2분 30초가 그냥 smoke test로 날아간다. `--smoke-test-strategy final` 같이 마지막에 한 번만 도는 옵션이 있으면 빠른 iteration에 유용할 듯." 합당한 지적이지만 trade-off가 보이는 것보다 좀 더 무겁다.
+
+**왜 배치 단위가 default인가**
+
+Smoke test는 머지가 영구화되기 전 마지막 게이트다 — 이 문서 다른 곳에도 명시되어 있듯 *"이미 머지된 task는 자동 롤백되지 않는다"*. `final` 전략을 쓰면:
+
+- 배치 1에서 base가 깨져도 배치 2~5가 그 위에 쌓인다.
+- 마지막에 실패하면 어느 배치가 원인인지 bisect가 필요하다.
+- 5개 배치치 작업이 이미 base에 들어가 있어 되돌리기가 비싸진다.
+
+병렬 실행의 합류 지점이 곧 위험 지점이라, 거기에 가드를 두는 게 자연스러운 위치다. 즉, 배치마다 도는 cost는 "낭비"라기보다 "보험료"에 가깝다.
+
+**비용을 줄이고 싶다면 (이미 있는 / 더 정합적인 방향)**
+
+1. **이미 있는 최적화 활용** — `SmokeTestPlanner`는 docs-only 변경 배치에서는 inferred 명령을 스킵한다. 코드 변경 배치만 실제로 cost를 지불한다.
+2. **점진적 빌드 신뢰** — `dotnet build`는 두 번째부터 incremental이다. "30초 × 5번"이 아니라 "첫 회 30초 + 이후 2~5초"가 보통의 양상이다. 실측값을 먼저 봐야 한다.
+3. **변경량 기반 스킵** — `--smoke-test-strategy changed-source` 처럼 실제 컴파일 입력이 바뀐 배치에서만 도는 옵션이 더 안전한 절충이다 (제안된 `final`보다 정합성이 좋다).
+4. **Escape hatch로만 노출** — `final`을 두더라도 prototype/throwaway 용도임을 명시하고 default로는 노출하지 말 것. `--no-smoke-test`가 이미 그 역할에 가깝기도 하다 (전체 끄기 vs 끝에만 한 번 — 후자가 오히려 거짓 안전감을 줄 수 있다).
+
+요약: "5배치 = 2분 30초"는 worst case 가정이고, 실제로는 incremental + docs-skip으로 훨씬 적게 든다. 그 cost를 더 줄이고 싶다면 `final`보다는 *"smoke가 진짜 의미 있는 배치만 선별"* 방향이 Ralph의 안전 모델과 정합한다.
+
 ## 비용 추적 및 예산 게이트
 
 Claude `stream-json`의 `result` 이벤트에서 호출별 사용량을 `.ralph-logs/cost.jsonl`에 기록 (로그 로테이션에서 보존). `--budget-usd <amt>` (또는 `RALPH_BUDGET_USD`)는 누적 비용이 상한에 도달하면 새 dispatch를 차단하고, 80%에 1회 경고를 띄운다.
@@ -346,6 +374,32 @@ ralph --run --budget-usd 5.00           # $5 도달 시 새 dispatch 중단
 가격은 임베드된 `pricing.json`에서 로드되며 `~/.ralph/pricing.json`으로 오버라이드 가능.
 
 예산 게이트는 **이미 실행 중인 task를 중단시키지 않는다** — 새 dispatch만 막으므로 이미 시작된 task의 비용만큼 초과 가능.
+
+## 설계 노트 — `--plan` prompt에 prompt caching을 적용해야 하나?
+
+자주 제기되는 제안: "`PlanGenerator.BuildPlanPrompt`는 schema + categories + 13개 rule + 안티패턴 예시까지 합쳐 `--plan` 호출마다 수천 토큰을 fresh로 보낸다. Anthropic prompt caching을 활용해 template 부분은 캐시하고 PRD만 변경되도록 하면 비용을 줄일 수 있어 보인다." 관찰 자체는 맞지만, 현재 아키텍처에서는 적용이 사실상 막혀 있고 ROI도 작다.
+
+**핵심 제약: Ralph는 `claude` CLI를 subprocess로 호출함**
+
+`Ralph/Services/ClaudeService.cs`에서 `claude -p --output-format stream-json`을 spawn하고 prompt를 stdin으로 파이프한다. Anthropic SDK를 직접 쓰는 게 아니다.
+
+Prompt caching은 Messages API의 `cache_control: {"type": "ephemeral"}` 마커로 활성화되며, 이건 **API 직접 호출**에서만 노출되는 기능이다. `claude` CLI의 stdin prompt 영역에는 cache breakpoint를 끼워넣을 방법이 없다 (CLI는 system prompt를 자동 캐시하지만, 사용자 prompt 부분은 사용자가 제어 못 함).
+
+즉 "template 캐시 + PRD만 변경" 패턴을 적용하려면 **ClaudeService를 CLI subprocess → Anthropic SDK 직접 호출로 갈아엎어야** 한다. 그건 worktree 안에서 Read/Glob/Write 도구로 코드베이스를 자유롭게 탐색하는 현재 동작 (`PlanGenerator`의 "full tool access")을 포기하는 거라 트레이드오프가 크다.
+
+**실제 비용 영향도 작음**
+
+설령 가능하다 해도:
+
+- `--plan`은 **프로젝트당 1회** 정도 도는 명령이다. 자주 반복 호출되는 `--run` 경로(`PromptBuilder` 출력)와는 prompt가 다르다.
+- 캐시가 의미 있는 시나리오는 `PlanCommand`의 **validator 보정 루프**(`PlanGenerator.BuildCorrectionPrompt`, 최대 2회 재시도) 정도다. 5분 TTL 안에 들어와서 hit 가능성은 있지만, 보정 루프 자체의 발동 빈도가 낮다.
+- Schema + rules 합쳐 대략 5~7KB / 1.5~2k token 수준. opus 입력 단가 기준 호출당 $0.02 내외. 한 plan 세션 1~3회 호출이면 절감액은 센트 단위.
+
+**정말 줄이려면**
+
+caching보다 **prompt 자체를 줄이는** 게 ROI가 높다. 지금 13개 rule + forbidden 예시(특히 `\\n` 이스케이프 안내, smoke test 안티패턴 4섹션)가 prompt의 절반 이상인데, 일부는 외부 reference 문서로 빼고 prompt에는 1줄 요약 + "see X.md" 식으로 줄이면 토큰량 30~50% 감축 가능. 다만 모델 행동이 nudge에 민감해서 줄였을 때 품질 회귀 테스트(`Ralph.Tests/`)가 필요하다.
+
+**요약:** prompt caching은 흥미로운 아이디어지만 **현재 아키텍처(CLI subprocess)와 호출 빈도(plan은 희소)** 때문에 우선순위 낮음. 굳이 손댄다면 prompt 다이어트가 먼저, SDK 마이그레이션은 별도로 큰 비용/효용 분석이 필요한 사안이다.
 
 ## 모델 선택
 
@@ -401,7 +455,6 @@ ralph --logs --live subtract-impl
     {
       "id": "setup-plan",
       "title": "Project setup plan",
-      "done": false,
       "phase": "phase1-setup",
       "category": "plan",
       "prompt": "Analyze the project structure and draft a setup plan...",
@@ -417,7 +470,6 @@ ralph --logs --live subtract-impl
 |---|---|---|---|
 | `id` | **yes** | string | kebab-case 고유 ID (`^[a-zA-Z0-9_-]+$`) |
 | `title` | **yes** | string | task 제목 (≤ 200자) |
-| `done` | **yes** | boolean | 완료 플래그 — 실행 후 자동으로 `true` |
 | `description` | | string | 상세 설명 |
 | `phase` | | string | 프로젝트 단계 (`"phase1"`, `"phase2"` 등) |
 | `category` | | string | 카테고리 (`"plan"`, `"implementation"`, `"testing"`, `"commit"` 또는 `workflow.categories`에 명시된 값) |
@@ -428,6 +480,8 @@ ralph --logs --live subtract-impl
 | `subtasks` | | array | 선택적 subtask |
 | `model` | | string | 이 task에 사용할 Claude 모델 (`opus` 또는 `sonnet`). plan이 채움. CLI `--model`이 우선. |
 | `verification` | | object | `{ command, timeoutSec? }` — exit code 기반 검증 (위 [검증 게이트](#검증-게이트verification-gate) 참고) |
+
+> **`done` 필드는 더 이상 `tasks.json`에 없습니다.** Per-task 진행 상태는 `.ralph-logs/state.json`이 별도로 보관합니다 (orchestrator 단독 writer, git에 커밋되지 않음). v1 산출 `tasks.json`은 첫 로드 시 자동으로 마이그레이션됩니다.
 
 ## Workflow 설정
 
@@ -478,42 +532,33 @@ ralph --logs --live subtract-impl
 | `smokeTest` | (unset → 자동 추론) | 머지 배치 후 base 브랜치에서 실행할 단일 명령 |
 | `categories` | `["plan","implementation","testing","commit"]` | `--plan`에서 사용할 기능별 stage 목록 오버라이드 |
 
-## 설계 노트 — 왜 `tasks.json`은 mutable + declarative 인가?
+## 설계 노트 — Spec(`tasks.json`) / State(`.ralph-logs/state.json`) 분리
 
-`tasks.json`은 두 역할을 동시에 한다:
+Ralph는 두 가지 관심사를 두 파일로 분리한다:
 
-- **Declarative** — 의도의 manifest다: 어떤 task가 있는지, 각 task가 무엇을 해야 하는지, 어떤 파일을 건드리는지, 무엇이 검증하는지, 서로 어떻게 의존하는지. `--plan`이 작성하고 사람이 손댈 수 있다.
-- **Mutable** — 실행 도중 Ralph 자신이 다시 쓴다: task별 `done: true` 플립, 배치마다 자동 commit, `--reset`이 다시 덮어쓴다.
+- **`tasks.json` (immutable spec)** — 의도의 manifest다: 어떤 task가 있는지, 무엇을 해야 하는지, 어떤 파일을 건드리는지, 무엇이 검증하는지, 서로 어떻게 의존하는지. `--plan`이 작성하고 사람이 손대고 git에 commit한다. **Ralph는 `--run` 도중 이 파일을 절대 다시 쓰지 않는다.**
+- **`.ralph-logs/state.json` (mutable state)** — 실행 중 변하는 비트만 보관: per-task `done`, per-subtask `done`. **Orchestrator process 단독 writer.** worktree 내부에서는 절대 쓰지 않는다. git에 commit되지 않는다 (`.ralph-logs/`는 gitignore 관례).
 
-이 두 역할을 **하나의 파일**에 합친 것은 의도된 trade-off다.
+### 이 분리가 풀어주는 통증
 
-### 한 파일로 합친 장점
+- **머지 충돌 source 제거.** 이전엔 매 배치마다 "chore: 태스크 상태 업데이트" commit이 base의 `tasks.json`을 갱신해, 동시 진행 중인 다른 worktree 브랜치들이 합쳐질 때 reconciliation이 필요했다. 이제 base의 `tasks.json`은 `--run` 동안 변하지 않으므로 worktree → base 머지에서 `tasks.json`이 충돌할 일 자체가 없다.
+- **Resume이 자연스럽다.** `state.json`을 읽어 미완료 task만 dispatch한다. spec 파일을 건드리지 않으므로 사람이 mid-run에 의도 편집(prompt 수정 등)을 해도 race가 없다.
+- **`--reset`이 비파괴적이다.** spec(`tasks.json`)은 보존하고 `state.json`만 비운다. 사람의 의도 편집을 덮어쓰지 않는다.
+- **Provenance가 분리된다.** `tasks.json`의 git diff는 사람의 의도 변경만, `state.json`은 Ralph의 자동 진행만 — 누가 무엇을 썼는지 한눈에 보인다.
 
-- **재개 안전이 자연스럽게 보장된다.** 상태가 spec과 같은 곳에 살기 때문에 `ralph --run`을 다시 실행하면 정확히 멈춘 자리에서 이어진다 (오직 `done: false` task만 dispatch). 동기화가 필요한 sidecar DB나 별도 state 디렉토리가 없다.
-- **단일 audit 가능 산출물.** `git log tasks.json`이 곧 실행 이력 — 무엇을 계획했고 무엇을 완료했고 언제 했는지가 한 줄로 보인다. PR에서 plan과 progress를 함께 리뷰할 수 있다.
-- **오프라인/이식성.** 조정 서비스가 필요 없다. 파일(과 repo)을 어디로든 복사하면 전체 파이프라인이 그대로 기술된다.
-- **모델이 단순하다.** "spec.json (immutable) + state.json (mutable)" 분리, 둘을 일치시키는 동기화 로직, drift 가능성이 모두 사라진다.
+### 그 대가로 받아들인 비용
 
-### 그 대가로 잃는 것
+- **Resume context는 git 바깥에 있다.** `state.json`이 사라지면 (`.ralph-logs/` 청소, 다른 머신으로 옮김) 모든 task가 다시 pending으로 보인다. 이미 git에 커밋된 코드 변경은 그대로 남지만 Ralph는 해당 task를 다시 실행하려 한다. 완화: `state.json`도 atomic tmp+rename, 향후 events.jsonl 누적 백업.
+- **`git log tasks.json`이 더는 실행 이력이 아니다.** 이전엔 commit 한 번이 plan + progress를 동시에 보여줬다면, 이제 `tasks.json`은 의도만 보여준다. progress audit이 필요하면 `.ralph-logs/state.json`을 확인하거나 (정확) `git log` 메시지의 task ID를 보면 된다 (간접).
 
-- **실행 중 편집은 위험하다.** writer가 두 명(사용자 + Ralph)이라 race가 가능하다. Ralph는 atomic tmp+rename, `MarkTaskDone`을 둘러싼 in-process file lock, 머지 사이의 reload로 완화하지만 — `--run` 도중의 손편집은 피해야 한다.
-- **하나의 파일 안에 관심사가 섞인다.** "무엇을 해야 하는가"와 "이미 무엇이 완료됐는가"가 같은 스키마에 공존한다. 리뷰어는 의도와 진행을 분리해서 보아야 한다.
-- **`tasks.json` 자체의 머지 충돌.** 각 worktree가 자기 task의 `done` 플립으로 `tasks.json`을 건드릴 수 있다. Ralph는 머지 직전에 worktree의 `tasks.json`을 base 브랜치 기준으로 정규화해 완화하지만 충돌 표면이 0은 아니다.
-- **provenance가 흐려진다.** `--plan` (LLM)이 쓰고, 사람이 손대고, Ralph가 변형한다. 중간 commit이 없으면 "어떤 줄을 누가 썼는가"를 추적하기 어렵다.
-- **`--reset`은 파괴적이다.** 사람이 직접 손댄 같은 파일을 다시 덮어쓴다. version control이 안전망 역할을 한다.
+### Ralph가 적용한 운영 완화책
 
-### Ralph가 적용한 완화책
-
-- **Atomic write** (`tmp + rename`) — crash가 와도 partial 파일이 절대 안 남는다.
-- **In-process lock** — 병렬 배치에서 task done 마킹 시 단일 직렬화.
-- **Pre-merge 정규화** — 각 worktree의 `tasks.json`을 머지 전에 base 기준으로 reset, 결과적으로 Ralph의 `done` 플립만 머지 commit에 포함된다.
+- **Atomic write** (`tmp + rename`) — `tasks.json`과 `state.json` 모두 crash 시 partial 파일이 안 남는다.
+- **In-process lock** — `StateStore` 내부 `SemaphoreSlim`으로 동시 done-마킹 직렬화.
+- **Pre-merge 가드 (defense-in-depth)** — `WorktreeService.NormalizeTasksJsonAsync`와 `WorktreeTaskRunner.GuardTasksFileAsync`는 Claude가 worktree에서 `tasks.json`을 부주의로 건드린 경우를 잡는다. spec/state 분리 후 발화 빈도는 사실상 0에 수렴하지만 안전망으로 유지된다.
 - **`--dry-run` try/finally** — preview 실행은 항상 원본 `tasks.json`을 복원한다.
-- **배치 단위 자동 commit** — `done: true` 플립이 즉시 commit되므로 crash가 와도 진행 기록이 사라지지 않는다.
-- **Rollback 스냅샷** — `--plan`이 pre-/post-plan 상태를 자동 저장. `--rollback`으로 직전 plan/run 사이클을 통째로 되돌릴 수 있다.
-
-### 이 설계가 맞지 않는 경우
-
-엄격한 spec/state 분리가 필요하다면(예: plan에 서명해서 freeze하고 state는 다른 곳에 보관) `tasks.json`을 spec으로 version control에 두고 `--dry-run`을 read-only 점검으로만 사용하는 방식이 가능하다. Ralph의 mutation은 `done` 플래그 + 일부 subtask 플립에 한정되며, plan 생성 후에 prompt나 의존성을 다시 쓰지는 않는다.
+- **Legacy 마이그레이션** — v1 시절 `done` 키가 박힌 `tasks.json`을 첫 로드 시 자동으로 `state.json`으로 옮기고 spec 파일에서 키를 제거한다. Idempotent.
+- **Rollback 스냅샷** — `--plan`이 pre-/post-plan 상태를 자동 저장. `--rollback`은 현재 `state.json`의 done 여부로 어느 스냅샷을 적용할지 판단한다.
 
 ## 병렬 실행을 위한 PRD 작성법
 
@@ -663,7 +708,7 @@ ralph --run               # Phase 1은 4-wide 병렬, Phase 2-3은 순차
 |---|---|
 | `Error: claude not found` | Claude Code CLI(`https://claude.ai/code`) 설치 후 PATH에 등록. |
 | `Error: git not found` | git 2.10+ 설치. worktree 기반 병렬 실행에 필수. |
-| 실행이 시작되자마자 "no pending tasks"로 종료 | 모든 task가 `done: true`. `ralph --reset` 또는 `tasks.json` 직접 수정. |
+| 실행이 시작되자마자 "no pending tasks"로 종료 | 모든 task가 `done: true` (`.ralph-logs/state.json`). `ralph --reset`으로 진행 상태만 초기화 (spec은 보존). |
 | worktree 생성이 "already exists"로 실패 | 이전 실행에서 남은 worktree. `ralph --worktree-cleanup` (또는 `.ralph-worktrees/{taskId}` 제거 후 `git worktree prune`). |
 | 브랜치에 uncommitted 변경이 있어 worktree 차단 | 내용 확인 후 직접 commit/머지하거나 `ralph --worktree-cleanup`으로 강제 제거. |
 | Claude 호출이 무한히 멈춤 | `--task-timeout 30m` 등 적절한 값 설정. timeout 시 process tree 강제 종료. |
@@ -706,7 +751,7 @@ repo 레이아웃:
 - `Ralph.Tests/` — xUnit 테스트 프로젝트.
 - `ralph-schema.json`, `pricing.json` — 임베드 리소스.
 - `samples/PRD.md` — 계산기 데모용 예시 PRD.
-- `bugfix.md`, `enhance1.md` — Ralph로 Ralph를 빌드한 과정에서 사용한 historical PRD.
+- `doc/bugfix.md`, `doc/enhance1.md` — Ralph로 Ralph를 빌드한 과정에서 사용한 historical PRD.
 
 LLM 기여자를 위한 서비스 단위 아키텍처 맵은 `CLAUDE.md` 참고.
 

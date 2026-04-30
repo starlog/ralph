@@ -98,10 +98,10 @@ public class ParallelExecutorTests : IDisposable
 
         Assert.Equal(0, exit);
 
-        // tasks.json 상에서 둘 다 done
+        // state.json 상에서 둘 다 done (tasks.json은 spec only)
         await manager.ReloadAsync();
-        Assert.True(manager.GetTask("A")!.Done);
-        Assert.True(manager.GetTask("B")!.Done);
+        Assert.True(manager.IsDone("A"));
+        Assert.True(manager.IsDone("B"));
 
         // base 브랜치(main)에 두 파일이 모두 머지되었는지 확인
         Assert.Equal("content from A", File.ReadAllText(Path.Combine(_repoDir, "a.txt")));
@@ -159,11 +159,11 @@ public class ParallelExecutorTests : IDisposable
 
         await manager.ReloadAsync();
         // A는 머지 + done
-        Assert.True(manager.GetTask("A")!.Done);
+        Assert.True(manager.IsDone("A"));
         Assert.True(File.Exists(Path.Combine(_repoDir, "a.txt")));
 
         // B는 실패 → done=false, base에 b.txt도 없음
-        Assert.False(manager.GetTask("B")!.Done);
+        Assert.False(manager.IsDone("B"));
         Assert.False(File.Exists(Path.Combine(_repoDir, "b.txt")));
 
         // 실패한 worktree는 정리되어야 한다
@@ -255,7 +255,6 @@ public class ParallelExecutorTests : IDisposable
         {
             Id = id,
             Title = title,
-            Done = false,
             Prompt = $"do task {id}",
             ModifiedFiles = modifiedFiles.ToList(),
         };

@@ -316,7 +316,7 @@ public partial class PlanGenerator
                  * Doc/config/version-bump tasks
                When in doubt, pick `"sonnet"`. The user can override all tasks at run time via `--model opus|sonnet`, so an aggressive `"sonnet"` default is safe.
 
-            10. **All tasks start with `"done": false`.**
+            10. **Do NOT include a `"done"` field.** Per-task progress is tracked separately by Ralph in `.ralph-logs/state.json` (orchestrator-managed); `tasks.json` is spec-only and immutable from Ralph's perspective.
 
             11. **Include a `projectName` and `version` field** derived from the PRD.
 

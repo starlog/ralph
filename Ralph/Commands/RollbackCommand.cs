@@ -47,8 +47,8 @@ public sealed class RollbackCommand : ICommand
         {
             try
             {
-                var tm = await TaskManager.LoadAsync(tasksFile);
-                hasAnyDone = tm.Data.Tasks.Any(t => t.Done);
+                var tm = await TaskManager.LoadAsync(tasksFile, ct: ct);
+                hasAnyDone = tm.Data.Tasks.Any(t => tm.IsDone(t.Id));
             }
             catch
             {
