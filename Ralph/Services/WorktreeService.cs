@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json;
+using Ralph.Commands;
 using Ralph.Models;
 using Spectre.Console;
 
@@ -49,8 +51,32 @@ public class WorktreeService
         TypeInfoResolver = RalphJsonContext.Default,
     };
 
+    // fix2 #4: 워크트리 루트에 떨어지는 ralph 마커 파일 (D 신호) 및 commit trailer 키 (C 신호).
+    // 마커 파일은 git에 추적되지 않는다 (ralph가 add하지 않음).
+    private const string MarkerFileName = ".ralph-marker";
+    private const string MarkerSchemaVersion = "v1";
+    private const string TrailerKey = "Ralph-Task-Id";
+
     private readonly GitService _git;
     private readonly string _worktreeBase;
+
+    /// <summary>
+    /// fix2 #4: 브랜치 삭제 안전성 판정 결과. (A∨B) AND (C∨D∨Unknown) 모델.
+    ///   SafeToDelete    — A∨B 통과 + ralph 시그니처(C 또는 D) 확인.
+    ///   NotRalphManaged — A∨B 모두 실패 (사용자 브랜치 — 기존 보존 흐름).
+    ///   HoldUserOwned   — A∨B 통과했지만 reflog/커밋이 사용자 소유로 식별 → 차단.
+    ///   HoldUnverified  — A∨B 통과했지만 ralph 시그니처를 확인할 수 없음 → 보수적 보류.
+    /// </summary>
+    private enum BranchSafeDeleteVerdict
+    {
+        SafeToDelete,
+        NotRalphManaged,
+        HoldUserOwned,
+        HoldUnverified,
+    }
+
+    private enum SignatureKind { Ralph, UserOwned, Unknown }
+    private enum MarkerState { RalphValid, Mismatch, Missing }
 
     public WorktreeService(GitService git, string worktreeBase = RalphPaths.WorktreeDir)
     {
@@ -87,17 +113,27 @@ public class WorktreeService
 
         // 동명 브랜치가 이미 존재하면, ralph가 만든 것일 때만 삭제. 사용자가 직접 만든
         // ralph/* 브랜치를 silent하게 날리지 않도록 config 마커(또는 활성 worktree 연결)로 가드.
+        // fix2 #4: 1차 신호(A∨B)에 더해 reflog/커밋 시그니처(C) 또는 .ralph-marker(D)도 확인한다.
         if (await BranchExistsAsync(branchName, ct))
         {
-            if (!await IsRalphManagedBranchAsync(branchName, ct))
+            var verdict = await VerifySafeToDeleteAsync(branchName, taskId, worktreePath, ct);
+            switch (verdict)
             {
-                throw new InvalidOperationException(
-                    $"브랜치 '{branchName}'이 이미 존재하지만 ralph가 만든 것이 아닙니다. " +
-                    $"silent 삭제를 거부합니다 — 해당 브랜치를 다른 이름으로 옮기거나 직접 정리한 뒤 다시 실행하세요.");
+                case BranchSafeDeleteVerdict.SafeToDelete:
+                    var (delExit, delOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
+                    if (delExit != 0)
+                        logger.Warn($"기존 ralph 브랜치 삭제 실패 ({taskId}): {delOut.Trim()}");
+                    break;
+                case BranchSafeDeleteVerdict.NotRalphManaged:
+                    throw new InvalidOperationException(
+                        $"브랜치 '{branchName}'이 이미 존재하지만 ralph가 만든 것이 아닙니다. " +
+                        $"silent 삭제를 거부합니다 — 해당 브랜치를 다른 이름으로 옮기거나 직접 정리한 뒤 다시 실행하세요.");
+                case BranchSafeDeleteVerdict.HoldUserOwned:
+                case BranchSafeDeleteVerdict.HoldUnverified:
+                    throw new InvalidOperationException(
+                        $"브랜치 '{branchName}'은 ralph 표시는 있으나 안전 검증 실패({verdict})로 silent 삭제를 거부합니다. " +
+                        $"'git log {branchName} -1'로 내용을 확인 후 'git branch -D {branchName}'으로 직접 정리한 뒤 다시 실행하세요.");
             }
-            var (delExit, delOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
-            if (delExit != 0)
-                logger.Warn($"기존 ralph 브랜치 삭제 실패 ({taskId}): {delOut.Trim()}");
         }
 
         // git worktree add [--shared] -b ralph/{taskId} .ralph-worktrees/{taskId} {baseBranch}
@@ -126,6 +162,11 @@ public class WorktreeService
 
         // ralph가 만든 브랜치임을 표시 — 후속 cleanup이 사용자 브랜치를 건드리지 않도록.
         await MarkRalphManagedAsync(branchName, ct);
+
+        // fix2 #4: 워크트리 루트에 .ralph-marker 파일을 떨어뜨려 D 신호를 확보. 마커는 git에
+        // 추적되지 않으며, 워크트리가 살아 있는 동안만 의미가 있다 (cleanup의 디렉터리 제거 단계
+        // 이후엔 자연 소멸). 쓰기 실패는 worktree 생성 흐름을 깨지 않는다 — C 신호로 폴백 가능.
+        await TryWriteMarkerFileAsync(taskId, branchName, worktreePath, logger, ct);
 
         logger.Info($"Worktree created: {worktreePath} (branch: {branchName}{(sharedObjects ? ", shared" : "")})");
         return worktreePath;
@@ -585,6 +626,184 @@ public class WorktreeService
         return false;
     }
 
+    /// <summary>
+    /// fix2 #4: 브랜치 삭제 안전성 종합 판정. (A∨B) AND (C∨D∨Unknown) 모델.
+    /// 워크트리 디렉터리가 아직 살아 있는 시점에 호출해야 D 신호(.ralph-marker)가 의미가 있다.
+    /// </summary>
+    private async Task<BranchSafeDeleteVerdict> VerifySafeToDeleteAsync(
+        string branchName, string taskId, string worktreePath, CancellationToken ct)
+    {
+        // (A∨B) — config 마커 또는 활성 worktree 바인딩
+        if (!await IsRalphManagedBranchAsync(branchName, ct))
+            return BranchSafeDeleteVerdict.NotRalphManaged;
+
+        // (D) 마커 파일이 살아 있고 유효 → 즉시 통과
+        var marker = await ProbeMarkerFileAsync(taskId, branchName, worktreePath, ct);
+        if (marker == MarkerState.RalphValid)
+            return BranchSafeDeleteVerdict.SafeToDelete;
+
+        // (C) reflog/커밋 시그니처
+        var sig = await ProbeRalphSignatureAsync(branchName, ct);
+
+        // 마커가 명백히 다른 task로 어긋나면 보수적 보류 (외부 도구 개입 가능성)
+        if (marker == MarkerState.Mismatch)
+            return BranchSafeDeleteVerdict.HoldUnverified;
+
+        return sig switch
+        {
+            SignatureKind.Ralph => BranchSafeDeleteVerdict.SafeToDelete,
+            SignatureKind.UserOwned => BranchSafeDeleteVerdict.HoldUserOwned,
+            _ => BranchSafeDeleteVerdict.HoldUnverified,
+        };
+    }
+
+    /// <summary>
+    /// fix2 #4 — D 신호: 워크트리 루트의 <c>.ralph-marker</c>를 읽고 task-id/branch/schema가
+    /// 일치하는지 확인. 파일 부재 또는 읽기 실패는 Missing(=확인 불가, 흐름 차단 안 함).
+    /// </summary>
+    private static Task<MarkerState> ProbeMarkerFileAsync(
+        string taskId, string branchName, string worktreePath, CancellationToken ct)
+    {
+        try
+        {
+            var path = Path.Combine(Path.GetFullPath(worktreePath), MarkerFileName);
+            if (!File.Exists(path)) return Task.FromResult(MarkerState.Missing);
+
+            var content = File.ReadAllText(path, Encoding.UTF8);
+            var kv = ParseMarkerKv(content);
+
+            if (!kv.TryGetValue("schema", out var schema) || schema != MarkerSchemaVersion)
+                return Task.FromResult(MarkerState.Mismatch);
+
+            kv.TryGetValue("task-id", out var fileTaskId);
+            kv.TryGetValue("branch", out var fileBranch);
+
+            if (string.Equals(fileTaskId, taskId, StringComparison.Ordinal)
+                && string.Equals(fileBranch, branchName, StringComparison.Ordinal))
+                return Task.FromResult(MarkerState.RalphValid);
+
+            return Task.FromResult(MarkerState.Mismatch);
+        }
+        catch
+        {
+            // best-effort: 파일 IO 실패는 흐름을 막지 않음 (Missing으로 폴백 → C 신호 차례)
+            return Task.FromResult(MarkerState.Missing);
+        }
+    }
+
+    private static Dictionary<string, string> ParseMarkerKv(string content)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var raw in content.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r').Trim();
+            if (line.Length == 0 || line.StartsWith('#')) continue;
+            var idx = line.IndexOf(':');
+            if (idx <= 0 || idx == line.Length - 1) continue;
+            var key = line[..idx].Trim();
+            var val = line[(idx + 1)..].Trim();
+            if (key.Length > 0) dict[key] = val;
+        }
+        return dict;
+    }
+
+    /// <summary>
+    /// fix2 #4 — C 신호: 분기점 이후(base..tip) 커밋들에서 ralph 시그니처를 추정.
+    ///   Ralph     — base..tip의 커밋이 0개(워크트리 생성 직후 사용자 손대지 않음) 또는,
+    ///               trailer(<c>Ralph-Task-Id:</c>) 또는 ralph가 자동 생성하는 제목 패턴
+    ///               (<c>[Task #...]</c>, <c>guard:</c>, <c>merge:</c>)이 하나라도 보임.
+    ///   UserOwned — base..tip에 커밋이 있지만 ralph 시그니처를 가진 것이 하나도 없음.
+    ///   Unknown   — reflog가 만료/없거나 git 명령이 실패해 분기점을 알 수 없음 → 식별 불가.
+    ///
+    /// 분기점 sha는 브랜치 reflog의 가장 오래된 entry로 추정한다 — `git worktree add -b` 또는
+    /// `git branch` 직후의 reflog 첫 entry는 분기점 sha를 가리키므로 base ref를 모르더라도
+    /// base..tip 구간을 식별할 수 있다. base 자체의 사용자 커밋(`initial` 등)이 시그니처
+    /// 판정에 끼어드는 false-positive를 방지한다.
+    /// </summary>
+    private async Task<SignatureKind> ProbeRalphSignatureAsync(string branchName, CancellationToken ct)
+    {
+        // 1) 분기점 sha를 reflog의 가장 오래된 entry로부터 추정.
+        var (refExit, refOut) = await _git.RunAsync(
+            ["reflog", "--format=%H", $"refs/heads/{branchName}"], ct: ct);
+
+        string? baseSha = null;
+        if (refExit == 0)
+        {
+            var refLines = refOut.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            // reflog 첫 줄이 최신, 마지막 줄이 가장 오래된 entry → 분기점 후보.
+            if (refLines.Length > 0)
+                baseSha = refLines[^1].TrimEnd('\r').Trim();
+        }
+
+        // 2) base..tip 범위의 커밋만 본다.
+        var trailerExpr = $"%(trailers:key={TrailerKey},valueonly=true,separator=%x20)";
+        var range = !string.IsNullOrEmpty(baseSha)
+            ? $"{baseSha}..refs/heads/{branchName}"
+            : $"refs/heads/{branchName}";
+
+        var (exit, output) = await _git.RunAsync(
+            ["log", $"--format=%H%x09%s%x09{trailerExpr}", "-n", "20", range],
+            ct: ct);
+
+        if (exit != 0) return SignatureKind.Unknown;
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+        // base..tip이 비어 있음 → 워크트리 생성 직후, 사용자 손댄 흔적 없음. baseSha를 식별
+        // 했을 때만 Ralph로 단정 (식별 못 한 경우엔 reflog 만료 가능성 → 보수적 Unknown).
+        if (lines.Length == 0)
+            return baseSha != null ? SignatureKind.Ralph : SignatureKind.Unknown;
+
+        var hasRalph = false;
+        var hasNonRalph = false;
+        foreach (var raw in lines)
+        {
+            var parts = raw.TrimEnd('\r').Split('\t');
+            if (parts.Length < 2) continue;
+            var subject = parts[1];
+            var trailer = parts.Length >= 3 ? parts[2].Trim() : "";
+
+            var isRalph =
+                trailer.Length > 0
+                || subject.StartsWith("[Task #", StringComparison.Ordinal)
+                || subject.StartsWith("guard:", StringComparison.Ordinal)
+                || subject.StartsWith("merge:", StringComparison.Ordinal);
+
+            if (isRalph) hasRalph = true;
+            else hasNonRalph = true;
+        }
+
+        if (hasRalph) return SignatureKind.Ralph;
+        if (hasNonRalph) return SignatureKind.UserOwned;
+        return SignatureKind.Unknown;
+    }
+
+    /// <summary>
+    /// fix2 #4 — D 신호 작성: 워크트리 루트의 <c>.ralph-marker</c>에 KV 포맷으로 기록.
+    /// 쓰기 실패는 흐름을 깨지 않음 (C 신호로 폴백 가능).
+    /// </summary>
+    private static async Task TryWriteMarkerFileAsync(
+        string taskId, string branchName, string worktreePath, RalphLogger logger, CancellationToken ct)
+    {
+        try
+        {
+            var fullWorktree = Path.GetFullPath(worktreePath);
+            var path = Path.Combine(fullWorktree, MarkerFileName);
+            var sb = new StringBuilder();
+            sb.Append("schema: ").Append(MarkerSchemaVersion).Append('\n');
+            sb.Append("ralph-version: ").Append(DisplayHelpers.Version).Append('\n');
+            sb.Append("task-id: ").Append(taskId).Append('\n');
+            sb.Append("branch: ").Append(branchName).Append('\n');
+            sb.Append("created-at: ").Append(DateTimeOffset.UtcNow.ToString("o")).Append('\n');
+            sb.Append("worktree-path: ").Append(fullWorktree).Append('\n');
+            await File.WriteAllTextAsync(path, sb.ToString(), new UTF8Encoding(false), ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            logger.Warn($"[guard] {taskId}: .ralph-marker 작성 실패 — {ex.Message}. C 신호(reflog/trailer)로 폴백합니다.");
+        }
+    }
+
     private static bool IsUnderWorktreeBase(string worktreePath, string worktreeBaseAbs)
     {
         try
@@ -627,11 +846,15 @@ public class WorktreeService
         var branchName = RalphPaths.GetBranchName(taskId);
         var ok = true;
 
-        // 워크트리 제거 전에 소유권을 판정한다 — 제거 후엔 worktree-list 기반 legacy fallback이
-        // 끊어져 마커 없는 ralph 브랜치(이전 버전 산출물)를 사용자 브랜치로 오판할 수 있다.
+        // 워크트리 제거 전에 소유권/안전성을 판정한다 — 제거 후엔
+        //   (1) worktree-list 기반 legacy fallback(B 신호)이 끊어져 마커 없는 ralph 브랜치를
+        //       사용자 브랜치로 오판할 수 있고,
+        //   (2) 워크트리 루트의 .ralph-marker(D 신호)도 디렉터리와 함께 사라진다.
         // BranchExists 체크는 추후 -D 단계에서 다시 수행한다 (사이에 다른 프로세스가 지웠을 수 있음).
         var branchExists = await BranchExistsAsync(branchName, ct);
-        var branchManaged = branchExists && await IsRalphManagedBranchAsync(branchName, ct);
+        var verdict = branchExists
+            ? await VerifySafeToDeleteAsync(branchName, taskId, worktreePath, ct)
+            : BranchSafeDeleteVerdict.NotRalphManaged;
 
         // git worktree remove
         if (Directory.Exists(worktreePath))
@@ -650,24 +873,45 @@ public class WorktreeService
             }
         }
 
-        // 브랜치 삭제 (이미 머지된 후에도 -D는 성공). ralph가 만든 브랜치만 삭제.
+        // 브랜치 삭제 (이미 머지된 후에도 -D는 성공). fix2 #4: 가드 강화 모델 적용 —
+        //   SafeToDelete   → -D 진행 (정상 ralph 워크트리 라이프사이클)
+        //   NotRalphManaged → 기존 보존 메시지 (사용자 브랜치)
+        //   HoldUserOwned  → ralph 표시는 있지만 커밋/reflog가 사용자 소유로 식별 → 차단 + 안내
+        //   HoldUnverified → 표시는 있지만 시그니처 확인 불가(reflog 만료, 마커 부재) → 보수적 보류
         if (branchExists && await BranchExistsAsync(branchName, ct))
         {
-            if (branchManaged)
+            switch (verdict)
             {
-                var (branchExit, branchOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
-                if (branchExit != 0 && Directory.Exists(worktreePath))
-                {
-                    // 디렉터리가 여전히 남아 있고 브랜치도 못 지우면 명백한 실패
-                    logger.Warn($"git branch -D 실패 ({taskId}): {branchOut.Trim()}");
-                    ok = false;
-                }
-            }
-            else
-            {
-                logger.Warn(
-                    $"브랜치 '{branchName}'은 ralph가 만든 것이 아니어서 보존합니다. " +
-                    $"수동으로 정리하려면 git branch -D {branchName}을 직접 실행하세요.");
+                case BranchSafeDeleteVerdict.SafeToDelete:
+                    var (branchExit, branchOut) = await _git.RunAsync(["branch", "-D", branchName], ct: ct);
+                    if (branchExit != 0 && Directory.Exists(worktreePath))
+                    {
+                        // 디렉터리가 여전히 남아 있고 브랜치도 못 지우면 명백한 실패
+                        logger.Warn($"git branch -D 실패 ({taskId}): {branchOut.Trim()}");
+                        ok = false;
+                    }
+                    break;
+
+                case BranchSafeDeleteVerdict.NotRalphManaged:
+                    logger.Warn(
+                        $"브랜치 '{branchName}'은 ralph가 만든 것이 아니어서 보존합니다. " +
+                        $"수동으로 정리하려면 git branch -D {branchName}을 직접 실행하세요.");
+                    break;
+
+                case BranchSafeDeleteVerdict.HoldUserOwned:
+                    logger.Warn(
+                        $"[ralph] 브랜치 {branchName}은(는) ralph 표시는 있으나 안전 검증 실패. 수동 삭제 필요. " +
+                        $"reflog/커밋이 사용자 소유로 식별되어 삭제를 보류합니다. " +
+                        $"직접 만든 브랜치라면 'git config --unset {RalphPaths.GetManagedConfigKey(branchName)}' 후 그대로 두세요. " +
+                        $"ralph 잔여물이라면 'git branch -D {branchName}'으로 수동 정리하세요.");
+                    break;
+
+                case BranchSafeDeleteVerdict.HoldUnverified:
+                    logger.Warn(
+                        $"[ralph] 브랜치 {branchName}은(는) ralph 표시는 있으나 안전 검증 실패. 수동 삭제 필요. " +
+                        $"(reflog 만료 또는 .ralph-marker 부재 — ralph 시그니처 확인 불가). " +
+                        $"'git log {branchName} -1'로 확인 후 ralph가 만든 것이 맞다면 'git branch -D {branchName}'으로 정리하세요.");
+                    break;
             }
         }
 
