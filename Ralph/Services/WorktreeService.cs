@@ -445,7 +445,11 @@ public class WorktreeService
     ///
     /// rebase가 충돌하면 abort로 worktree를 깨끗하게 복원하고
     /// FailureKind=RebaseConflict + ConflictFiles로 분류해 반환합니다.
-    /// abort 자체가 실패하면 worktree가 더러운 상태로 남았다는 뜻이므로 FailureKind=Other.
+    /// rebase가 시작도 못 하고 실패한 경우(dirty tree, invalid baseRef 등)는 abort할
+    /// 상태가 없으므로 abort를 호출하지 않고 곧장 RebaseConflict로 분류합니다 —
+    /// 이전에는 무조건 abort를 호출해 "fatal: No rebase in progress?"로 2차 실패하고
+    /// FailureKind=Other가 되어 batch 전체를 중단시켰습니다.
+    /// abort를 시도했는데 실제로 실패한 경우만 FailureKind=Other (worktree dirty).
     /// 호출자는 분류에 따라 task만 실패 처리하거나 batch를 중단합니다 (silent 3-way fallback 없음).
     /// </summary>
     public async Task<MergeResult> AdvanceWorktreeOntoBaseAsync(
@@ -466,24 +470,36 @@ public class WorktreeService
         // 충돌 파일을 abort 전에 캡처 — abort 후 unmerged index가 비워진다.
         var conflictFiles = await GetRebaseConflictFilesAsync(worktreePath, ct);
 
-        logger.Warn(
-            $"[merge:advance] {taskId} rebase 실패 — RebaseConflict로 분류, abort 후 task만 실패 처리. " +
-            $"detail: {output.Trim()}");
+        // rebase가 실제로 진행 중인지 확인. dirty tree/invalid baseRef 등으로 시작도
+        // 못 한 경우 abort할 상태가 없어 호출 자체가 "No rebase in progress?"로 실패.
+        var rebaseInProgress = await IsRebaseInProgressAsync(worktreePath, ct);
 
-        var (abortExit, abortOut) = await _git.RunAsync(
-            ["rebase", "--abort"], worktreePath, ct);
-        if (abortExit != 0)
+        logger.Warn(
+            $"[merge:advance] {taskId} rebase 실패 — RebaseConflict로 분류, " +
+            $"task만 실패 처리 (in-progress={rebaseInProgress}). detail: {output.Trim()}");
+
+        if (rebaseInProgress)
         {
-            logger.Error(
-                $"[merge:advance] {taskId} rebase --abort 실패: {abortOut.Trim()}. " +
-                $"worktree가 더러운 상태일 수 있습니다.");
-            return new MergeResult
+            var (abortExit, abortOut) = await _git.RunAsync(
+                ["rebase", "--abort"], worktreePath, ct);
+            if (abortExit != 0)
             {
-                Success = false,
-                FailureKind = MergeFailureKind.Other,
-                ConflictFiles = conflictFiles,
-                ErrorMessage = $"rebase abort failed: {abortOut.Trim()}",
-            };
+                logger.Error(
+                    $"[merge:advance] {taskId} rebase --abort 실패: {abortOut.Trim()}. " +
+                    $"worktree가 더러운 상태일 수 있습니다.");
+                return new MergeResult
+                {
+                    Success = false,
+                    FailureKind = MergeFailureKind.Other,
+                    ConflictFiles = conflictFiles,
+                    ErrorMessage = $"rebase abort failed: {abortOut.Trim()}",
+                };
+            }
+        }
+        else
+        {
+            logger.Info(
+                $"[merge:advance] {taskId} rebase가 시작 전 단계에서 실패 — abort 스킵.");
         }
 
         return new MergeResult
@@ -493,6 +509,88 @@ public class WorktreeService
             ConflictFiles = conflictFiles,
             ErrorMessage = output.Trim(),
         };
+    }
+
+    /// <summary>
+    /// post-merge smoke test 전용 격리 worktree(`<repoRoot>/.ralph-smoke`)를 보장합니다.
+    /// 존재하지 않으면 detached로 새로 만들고, 존재하면 baseBranch HEAD로 reset해 재사용합니다.
+    /// 빌드 산출물(bin/, obj/, node_modules/, *.tsbuildinfo)이 master worktree에 떨어지지 않도록
+    /// 격리하는 것이 목적이며, 캐시 유지를 위해 batch 간 재사용합니다.
+    /// 반환값은 smoke worktree의 절대 경로. 실패 시 null을 반환합니다 (호출자가 fallback 결정).
+    /// </summary>
+    public async Task<string?> EnsureSmokeWorktreeAsync(
+        string repoRoot, string baseBranch, RalphLogger? logger = null,
+        CancellationToken ct = default)
+    {
+        logger ??= RalphLogger.Null;
+        var smokePath = Path.GetFullPath(Path.Combine(repoRoot, RalphPaths.SmokeWorktreeDir));
+
+        // 모든 git 호출은 repoRoot에서 실행해 호출자 CWD에 의존하지 않게 한다.
+        // (smoke worktree 자체에 대한 작업만 smokePath에서 실행)
+
+        // 동일 경로의 stale worktree 참조 정리 — 디렉터리는 사라졌는데 git이 기억하는 경우.
+        await _git.RunAsync(["worktree", "prune"], repoRoot, ct);
+
+        if (!Directory.Exists(smokePath))
+        {
+            var (addExit, addOut) = await _git.RunAsync(
+                ["worktree", "add", "--detach", smokePath, baseBranch], repoRoot, ct);
+            if (addExit != 0)
+            {
+                logger.Warn(
+                    $"[smoke-worktree] 생성 실패 — fallback to repoRoot. detail: {addOut.Trim()}");
+                return null;
+            }
+            logger.Info($"[smoke-worktree] created: {smokePath} @ {baseBranch}");
+            return smokePath;
+        }
+
+        // 재사용 — baseBranch HEAD로 detached reset. 이전 batch의 빌드 산출물(.gitignore되지
+        // 않은 것 포함)이 인덱스에 남아있을 수 있으므로 reset --hard로 깔끔히 정리.
+        var (resetExit, resetOut) = await _git.RunAsync(
+            ["reset", "--hard", baseBranch], smokePath, ct);
+        if (resetExit != 0)
+        {
+            logger.Warn(
+                $"[smoke-worktree] reset 실패 — 재생성 시도. detail: {resetOut.Trim()}");
+            // 손상되었을 가능성 — 제거 후 새로 만든다.
+            await _git.RunAsync(
+                ["worktree", "remove", "--force", smokePath], repoRoot, ct);
+            try { if (Directory.Exists(smokePath)) Directory.Delete(smokePath, recursive: true); }
+            catch { /* best-effort */ }
+            var (addExit2, addOut2) = await _git.RunAsync(
+                ["worktree", "add", "--detach", smokePath, baseBranch], repoRoot, ct);
+            if (addExit2 != 0)
+            {
+                logger.Warn(
+                    $"[smoke-worktree] 재생성도 실패 — fallback to repoRoot. detail: {addOut2.Trim()}");
+                return null;
+            }
+        }
+
+        logger.Info($"[smoke-worktree] reused: {smokePath} @ {baseBranch}");
+        return smokePath;
+    }
+
+    /// <summary>
+    /// 워크트리에 rebase가 진행 중인지 확인합니다. <c>git rev-parse --git-path</c>로
+    /// 워크트리별 git dir의 rebase-merge / rebase-apply 디렉터리 경로를 얻고
+    /// 실제 존재 여부로 판정합니다.
+    /// </summary>
+    private async Task<bool> IsRebaseInProgressAsync(string worktreePath, CancellationToken ct)
+    {
+        foreach (var name in new[] { "rebase-merge", "rebase-apply" })
+        {
+            var (exit, output) = await _git.RunAsync(
+                ["rev-parse", "--git-path", name], worktreePath, ct);
+            if (exit != 0) continue;
+            var path = output.Trim();
+            if (path.Length == 0) continue;
+            if (!Path.IsPathRooted(path))
+                path = Path.Combine(worktreePath, path);
+            if (Directory.Exists(path)) return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -1020,7 +1118,34 @@ public class WorktreeService
             }
         }
 
+        // smoke test 격리 worktree도 함께 정리 — 사용자가 --worktree-cleanup을 호출했을 때
+        // 빌드 캐시까지 깔끔하게 비우는 것이 일관된 기대치.
+        await TryRemoveSmokeWorktreeAsync(logger, ct);
+
         logger.Info("All ralph worktrees cleaned up");
+    }
+
+    /// <summary>
+    /// <c>.ralph-smoke</c> 격리 worktree를 best-effort로 제거합니다.
+    /// repoRoot 자동 추론 — `git rev-parse --show-toplevel` 실패 시 작업 자체를 스킵.
+    /// </summary>
+    private async Task TryRemoveSmokeWorktreeAsync(RalphLogger logger, CancellationToken ct)
+    {
+        try
+        {
+            var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+            var smokePath = Path.GetFullPath(Path.Combine(repoRoot, RalphPaths.SmokeWorktreeDir));
+            if (!Directory.Exists(smokePath)) return;
+
+            await _git.RunAsync(["worktree", "remove", "--force", smokePath], ct: ct);
+            if (Directory.Exists(smokePath))
+                Directory.Delete(smokePath, recursive: true);
+            logger.Info($"[smoke-worktree] removed: {smokePath}");
+        }
+        catch (Exception ex)
+        {
+            logger.Warn($"[smoke-worktree] 제거 실패: {ex.Message}");
+        }
     }
 
     /// <summary>

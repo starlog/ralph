@@ -558,4 +558,76 @@ public class WorktreeServiceTests
             ["show-ref", "--verify", "--quiet", "refs/heads/ralph/t1"], fix.RepoDir);
         Assert.NotEqual(0, showExit);
     }
+
+    // ─── EnsureSmokeWorktreeAsync ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task EnsureSmokeWorktree_creates_when_missing_at_base_head()
+    {
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "S");
+        await fix.CommitAllAsync("initial");
+
+        var path = await fix.Worktree.EnsureSmokeWorktreeAsync(fix.RepoDir, "main");
+
+        Assert.NotNull(path);
+        Assert.True(Directory.Exists(path));
+        Assert.True(File.Exists(Path.Combine(path!, "seed.txt")));
+
+        // worktree list에 등록되어 있어야 함 (detached → branch 줄 없음)
+        var (_, listOut) = await fix.Git.RunAsync(
+            ["worktree", "list", "--porcelain"], fix.RepoDir);
+        Assert.Contains(path!.Replace('\\', '/'), listOut.Replace('\\', '/'));
+    }
+
+    [Fact]
+    public async Task EnsureSmokeWorktree_reuses_and_resets_to_advancing_base()
+    {
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "v1");
+        await fix.CommitAllAsync("initial");
+
+        var path1 = await fix.Worktree.EnsureSmokeWorktreeAsync(fix.RepoDir, "main");
+        Assert.NotNull(path1);
+
+        // base가 advance — main에 새 커밋
+        await fix.WriteFileAsync("seed.txt", "v2");
+        await fix.CommitAllAsync("advance");
+
+        // 이전 batch 잔여물 시뮬레이션 — smoke worktree 안에 untracked 파일과 추적 파일 변경
+        await File.WriteAllTextAsync(Path.Combine(path1!, "leftover.tmp"), "junk");
+        await File.WriteAllTextAsync(Path.Combine(path1, "seed.txt"), "dirty");
+
+        var path2 = await fix.Worktree.EnsureSmokeWorktreeAsync(fix.RepoDir, "main");
+        Assert.Equal(path1, path2);
+
+        // base 머지된 새 내용으로 reset 됐어야 함
+        Assert.Equal("v2", await File.ReadAllTextAsync(Path.Combine(path2!, "seed.txt")));
+    }
+
+    [Fact]
+    public async Task EnsureSmokeWorktree_does_not_dirty_master_worktree()
+    {
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "S");
+        await fix.CommitAllAsync("initial");
+
+        var path = await fix.Worktree.EnsureSmokeWorktreeAsync(fix.RepoDir, "main");
+        Assert.NotNull(path);
+
+        // smoke worktree에 빌드 산출물처럼 파일을 떨어뜨려도 master는 영향 없음
+        await File.WriteAllTextAsync(Path.Combine(path!, "build.tsbuildinfo"), "x");
+
+        var (statusExit, statusOut) = await fix.Git.RunAsync(
+            ["status", "--porcelain"], fix.RepoDir);
+        Assert.Equal(0, statusExit);
+        // .ralph-smoke 자체가 master worktree 안에 있을 수 있어 untracked 항목으로 보일 수 있음 →
+        // 정확한 검사: build.tsbuildinfo가 master 안에 직접 떨어졌는지만 본다.
+        Assert.False(File.Exists(Path.Combine(fix.RepoDir, "build.tsbuildinfo")));
+        // status 자체에 build.tsbuildinfo는 등장하지 않아야 한다 (master 인덱스 기준).
+        Assert.DoesNotContain("build.tsbuildinfo", statusOut);
+    }
 }

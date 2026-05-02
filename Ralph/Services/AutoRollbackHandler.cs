@@ -163,11 +163,15 @@ internal sealed class AutoRollbackHandler
     private async Task<RollbackSafety> CheckSafetyAsync(
         BatchRollbackSnapshot snapshot, CancellationToken ct)
     {
-        // (a) working tree dirty
+        // (a) working tree dirty — ralph가 관리하는 artifact 디렉터리(.ralph-logs/, .ralph-smoke/,
+        // .ralph-worktrees/)는 사용자가 .gitignore에 추가하지 않아도 untracked 잡음으로 보이지
+        // 않도록 필터링한다. porcelain=v1 형식의 두 자리 status 코드 뒤 경로를 본다.
         var (stExit, stOut) = await _git.RunAsync(["status", "--porcelain=v1"], ct: ct);
         var dirtyLines = stExit == 0
             ? stOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Where(l => l.Length > 0).ToList()
+                .Where(l => l.Length > 0)
+                .Where(l => !IsRalphManagedPathEntry(l))
+                .ToList()
             : new List<string>();
 
         // (b) 현재 브랜치
@@ -200,6 +204,36 @@ internal sealed class AutoRollbackHandler
             DirtyEntries: dirtyLines,
             CurrentBranch: currentBranch,
             ExternalCommits: externalCommits);
+    }
+
+    /// <summary>
+    /// porcelain=v1 한 줄(`XY <path>` 또는 `XY <orig> -> <new>`)에서 경로를 뽑아
+    /// ralph가 만든 artifact 디렉터리(<see cref="RalphPaths.LogDir"/>, <see cref="RalphPaths.SmokeWorktreeDir"/>,
+    /// <see cref="RalphPaths.WorktreeDir"/>) 산하 entry인지 판정합니다. 이 디렉터리들은
+    /// runtime에 ralph가 직접 만들어내는 산출물이라 사용자 .gitignore 누락 시에도 dirty로 보지 않는다.
+    /// </summary>
+    private static bool IsRalphManagedPathEntry(string porcelainLine)
+    {
+        // porcelain=v1: 첫 2자 status + space + path. rename이면 "orig -> new" 형식.
+        if (porcelainLine.Length < 4) return false;
+        var rest = porcelainLine[3..].Trim();
+        var arrow = rest.IndexOf(" -> ", StringComparison.Ordinal);
+        var path = arrow >= 0 ? rest[(arrow + 4)..].Trim() : rest;
+        // 따옴표로 감싸진 경로(공백/특수문자 포함) 처리
+        if (path.Length >= 2 && path[0] == '"' && path[^1] == '"')
+            path = path[1..^1];
+        // 슬래시 정규화 후 prefix 매칭
+        path = path.Replace('\\', '/');
+        return PathStartsWithSegment(path, RalphPaths.LogDir)
+            || PathStartsWithSegment(path, RalphPaths.SmokeWorktreeDir)
+            || PathStartsWithSegment(path, RalphPaths.WorktreeDir);
+    }
+
+    private static bool PathStartsWithSegment(string path, string segment)
+    {
+        if (!path.StartsWith(segment, StringComparison.Ordinal)) return false;
+        if (path.Length == segment.Length) return true;
+        return path[segment.Length] == '/';
     }
 
     private async Task<List<string>> GetFirstParentMergeShasAsync(

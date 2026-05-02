@@ -11,6 +11,7 @@ Ralph.Tests/obj/
 .ralph-logs/
 .ralph-plans/
 .ralph-worktrees/
+.ralph-smoke/
 
 # Published binaries
 Ralph/publish/

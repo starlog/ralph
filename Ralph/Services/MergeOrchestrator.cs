@@ -271,7 +271,7 @@ internal sealed class MergeOrchestrator
         // 더 이상 git에 트래킹되지 않으므로 커밋이 불필요.
 
         // 5.5 머지 후 smoke test
-        var smoke = await RunPostMergeSmokeTestAsync(preMergeSha, ct);
+        var smoke = await RunPostMergeSmokeTestAsync(preMergeSha, baseBranch, ct);
         var smokeStr = smoke.Skipped ? "skipped" : smoke.Passed ? "passed" : "failed";
 
         // fix2 #8: 모든 머지된 task에 대해 merge-log entry append (batch 단위 일괄)
@@ -396,8 +396,13 @@ internal sealed class MergeOrchestrator
     /// 머지 후 base 브랜치에서 smoke test를 실행해 머지 결과의 semantic 정합성을 검증.
     /// 우선순위 결정은 <see cref="SmokeTestPlanner.Plan"/>에 위임. preMergeSha가 있으면
     /// 그 시점부터 HEAD까지의 변경 파일을 인자로 넘겨 docs-only 변경일 때 추론을 스킵한다.
+    /// 실행은 <c>.ralph-smoke</c> 격리 worktree에서 수행해 빌드 산출물(bin/, obj/, tsbuildinfo,
+    /// node_modules 등)이 master worktree를 더티화하지 않도록 한다 — 더티 트리는 다음 batch의
+    /// rebase preflight를 깨뜨리는 직접 원인이었다. 격리 worktree 생성이 실패하면 안전하게
+    /// repoRoot fallback으로 진행한다 (이전 동작).
     /// </summary>
-    private async Task<SmokePhaseResult> RunPostMergeSmokeTestAsync(string? preMergeSha, CancellationToken ct)
+    private async Task<SmokePhaseResult> RunPostMergeSmokeTestAsync(
+        string? preMergeSha, string baseBranch, CancellationToken ct)
     {
         var repoRoot = await _git.GetRepoRootAsync(ct: ct);
         var configured = _taskManager.Data.Workflow?.SmokeTest;
@@ -418,6 +423,11 @@ internal sealed class MergeOrchestrator
             return new SmokePhaseResult(Skipped: true, Passed: false, Command: null, Detail: null);
         }
 
+        // 격리 worktree 확보 — 실패 시 repoRoot fallback (경고 로그만 남기고 진행).
+        var smokeCwd = await _worktree.EnsureSmokeWorktreeAsync(repoRoot, baseBranch, _logger, ct)
+                       ?? repoRoot;
+        var isolated = !ReferenceEquals(smokeCwd, repoRoot) && smokeCwd != repoRoot;
+
         // 라벨링: 어디서 왔는지 사용자에게 보여주는 게 진단에 도움이 됨.
         var origin = ResolveSpecOrigin(spec, configured);
         var label = origin switch
@@ -427,11 +437,14 @@ internal sealed class MergeOrchestrator
             _          => "Smoke test 실행 (자동 추론)",
         };
 
+        var cwdHint = isolated ? "isolated worktree" : "repoRoot — fallback";
         AnsiConsole.MarkupLine(
-            $"\n[cyan]{label}:[/] [dim]{Markup.Escape(spec.Command)}[/] [dim](cwd: {Markup.Escape(repoRoot)})[/]");
-        _logger.Info($"[smoke-test] running: {spec.Command} (cwd: {repoRoot}, origin: {origin})");
+            $"\n[cyan]{label}:[/] [dim]{Markup.Escape(spec.Command)}[/] " +
+            $"[dim](cwd: {Markup.Escape(smokeCwd)}, {cwdHint})[/]");
+        _logger.Info(
+            $"[smoke-test] running: {spec.Command} (cwd: {smokeCwd}, isolated={isolated}, origin: {origin})");
 
-        var result = await _verifier.RunAsync(spec, repoRoot, _logger, output: null, ct);
+        var result = await _verifier.RunAsync(spec, smokeCwd, _logger, output: null, ct);
         if (result.Success)
         {
             AnsiConsole.MarkupLine($"[green]✓ Smoke test 통과[/] ({result.Duration.TotalSeconds:F1}s)");

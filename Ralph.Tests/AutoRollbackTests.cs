@@ -233,7 +233,9 @@ public class AutoRollbackTests : IDisposable
         await Run("config", "user.name", "Ralph Test");
         await Run("config", "commit.gpgsign", "false");
 
-        // .ralph-logs/ 무시 → state.json/cost.jsonl 등이 untracked로 표시되지 않음
+        // .ralph-logs/ 무시 → state.json/cost.jsonl 등이 untracked로 표시되지 않음.
+        // (.ralph-smoke/는 AutoRollbackHandler가 ralph-managed로 인식해 자동 필터링하므로
+        //  .gitignore에 넣지 않아도 dirty로 보이지 않는다 — 사용자 .gitignore 누락 시에도 안전.)
         await File.WriteAllTextAsync(Path.Combine(_repoDir, ".gitignore"), ".ralph-logs/\n");
         await Run("add", ".gitignore");
         await Run("commit", "-m", "initial");

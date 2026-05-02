@@ -15,6 +15,14 @@ public static class RalphPaths
     /// <summary>worktree 베이스 디렉토리 (`<repoRoot>/.ralph-worktrees/<taskId>`).</summary>
     public const string WorktreeDir = ".ralph-worktrees";
 
+    /// <summary>
+    /// post-merge smoke test 전용 격리 worktree 디렉토리 (`<repoRoot>/.ralph-smoke`).
+    /// 빌드 산출물(bin/, obj/, *.tsbuildinfo, node_modules/ 등)이 master worktree에
+    /// 떨어져 후속 rebase/merge를 더티화하는 것을 막기 위해 별도 detached 워크트리에서 실행한다.
+    /// 배치 사이에 재사용해 incremental 빌드 캐시를 유지한다.
+    /// </summary>
+    public const string SmokeWorktreeDir = ".ralph-smoke";
+
     /// <summary>ralph 소유 브랜치 namespace prefix (마지막 `/` 포함).</summary>
     public const string BranchPrefix = "ralph/";
 

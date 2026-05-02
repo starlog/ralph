@@ -139,6 +139,41 @@ public class RebaseConflictTests
         Assert.DoesNotContain("no-conflict.txt", result.ConflictFiles);
     }
 
+    // 회귀: rebase가 시작도 못 한 경우(워크트리에 untracked 충돌 파일) blind --abort 호출이
+    // "fatal: No rebase in progress?"로 2차 실패해 FailureKind=Other가 되고 batch 전체가 중단됐다.
+    // 이제는 rebase 진행 여부를 먼저 확인해 abort 스킵 → RebaseConflict로 분류 → task만 실패.
+    [Fact]
+    public async Task RebaseFailedBeforeStarting_DoesNotCallAbort_ReturnsRebaseConflict()
+    {
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("seed.txt", "seed");
+        await fix.CommitAllAsync("initial");
+
+        await fix.SetupWorktreeAsync("t1");
+        await fix.WriteInWorktreeAsync("t1", "wt-only.txt", "wt");
+        await fix.CommitInWorktreeAsync("t1", "[Task #t1] add file");
+
+        // main에서 동일 경로의 파일을 추가/커밋해 rebase 적용 시 untracked-overwrite로 실패하도록 만든다.
+        await fix.WriteFileAsync("collide.txt", "main version");
+        await fix.CommitAllAsync("main: add collide");
+
+        // worktree에는 같은 경로를 untracked로 만든다 — git rebase는 이를 덮어쓰지 않으려고
+        // applying 단계에 들어가기 전에 거부 ("untracked working tree files would be overwritten").
+        var collidePath = Path.Combine(fix.WorktreeBase, "t1", "collide.txt");
+        await File.WriteAllTextAsync(collidePath, "untracked local");
+
+        var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
+
+        Assert.False(result.Success);
+        // 핵심: blind --abort로 Other가 되지 않고 RebaseConflict로 분류돼 batch가 계속될 수 있어야 함.
+        Assert.Equal(MergeFailureKind.RebaseConflict, result.FailureKind);
+
+        // 워크트리는 abort 호출 없이도 깨끗 — rebase가 시작 안 했으니 손상도 없다.
+        // (untracked 파일은 그대로 남아 있는 것이 정상)
+        Assert.True(File.Exists(collidePath));
+    }
+
     /// <summary>
     /// 헬퍼: ralph/{taskId} 브랜치를 main에 no-ff 머지. main 브랜치에서 직접 git 명령 실행.
     /// </summary>
