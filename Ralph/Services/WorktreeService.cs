@@ -463,6 +463,14 @@ public class WorktreeService
         logger ??= RalphLogger.Null;
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
 
+        // 옵션 B: rebase 직전 worktree를 깨끗하게 만든다. declared 파일은 이미 HEAD에
+        // commit되어 있고, 잔존 변경(undeclared tracked 수정 또는 untracked 부산물)은
+        // declared-only 정책상 어차피 머지 표면 밖이므로 폐기해도 새 손실이 없다.
+        // testing task가 흔히 흘리는 coverage / vitest cache / package-lock 같은
+        // 부산물이 "cannot rebase: You have unstaged changes" preflight 실패로 batch를
+        // 깨뜨리던 케이스를 일관되게 차단.
+        await PreRebaseCleanupAsync(taskId, worktreePath, logger, ct);
+
         var (exitCode, output) = await _git.RunAsync(
             ["rebase", baseRef], worktreePath, ct);
 
@@ -479,9 +487,20 @@ public class WorktreeService
         // 못 한 경우 abort할 상태가 없어 호출 자체가 "No rebase in progress?"로 실패.
         var rebaseInProgress = await IsRebaseInProgressAsync(worktreePath, ct);
 
+        // 옵션 A: rebase가 시작도 못 한 경우 어떤 파일이 막고 있는지 보이도록 status를
+        // 캡처해 detail에 포함. PreRebaseCleanup으로 dirty-tree 케이스는 거의 사라졌지만,
+        // invalid baseRef / lock file 등 비-dirty 사유에 여전히 유용.
+        var detail = output.Trim();
+        if (!rebaseInProgress)
+        {
+            var snapshot = await TryCaptureStatusSnapshotAsync(worktreePath, ct);
+            if (snapshot.Length > 0)
+                detail = detail + "\nworktree status:\n" + snapshot;
+        }
+
         logger.Warn(
             $"[merge:advance] {taskId} rebase 실패 — RebaseConflict로 분류, " +
-            $"task만 실패 처리 (in-progress={rebaseInProgress}). detail: {output.Trim()}");
+            $"task만 실패 처리 (in-progress={rebaseInProgress}). detail: {detail}");
 
         if (rebaseInProgress)
         {
@@ -512,8 +531,82 @@ public class WorktreeService
             Success = false,
             FailureKind = MergeFailureKind.RebaseConflict,
             ConflictFiles = conflictFiles,
-            ErrorMessage = output.Trim(),
+            ErrorMessage = detail,
         };
+    }
+
+    /// <summary>
+    /// rebase 직전 worktree의 미선언 잔존 변경을 폐기한다.
+    /// declared 파일은 <see cref="WorktreeTaskRunner"/>가 이미 HEAD로 commit했으므로
+    /// <c>git reset --hard HEAD</c>는 그것들을 건드리지 않고, undeclared tracked 수정만
+    /// 되돌린다. 이어지는 <c>git clean -fd</c>는 untracked 부산물을 제거하되
+    /// .git/info/exclude(<see cref="RalphIgnoreGuard"/>)에 등재된 ralph artifact 디렉터리는
+    /// 자동으로 보존하며, 워크트리 루트의 .ralph-marker(stale 감지용 D 신호)는
+    /// 명시적 -e 패턴으로 보존한다.
+    /// 마지막으로 <c>git submodule update --init --recursive</c>를 호출해 부모 인덱스에
+    /// 기록된 submodule SHA로 working tree를 정렬한다 — test 도중 submodule HEAD가 어긋나
+    /// 부모가 <c>M submodule</c>로 보고하던 케이스를 차단. submodule이 없는 repo에서는
+    /// near-no-op이며 실패해도 흐름을 깨지 않는다.
+    /// </summary>
+    private async Task PreRebaseCleanupAsync(
+        string taskId, string worktreePath, RalphLogger logger, CancellationToken ct)
+    {
+        var snapshot = await TryCaptureStatusSnapshotAsync(worktreePath, ct);
+        if (snapshot.Length > 0)
+        {
+            var lineCount = snapshot.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+            logger.Info(
+                $"[merge:advance] {taskId} pre-rebase 정리 — 미선언 변경 {lineCount}건 폐기:\n  " +
+                snapshot.Replace("\n", "\n  "));
+        }
+
+        var (resetExit, resetOut) = await _git.RunAsync(
+            ["reset", "--hard", "HEAD"], worktreePath, ct);
+        if (resetExit != 0)
+        {
+            logger.Warn(
+                $"[merge:advance] {taskId} pre-rebase reset 실패 — 계속 진행: {resetOut.Trim()}");
+        }
+
+        var (cleanExit, cleanOut) = await _git.RunAsync(
+            ["clean", "-fd", "-e", ".ralph-marker"], worktreePath, ct);
+        if (cleanExit != 0)
+        {
+            logger.Warn(
+                $"[merge:advance] {taskId} pre-rebase clean 실패 — 계속 진행: {cleanOut.Trim()}");
+        }
+
+        // submodule이 있는 repo에서만 의미 있는 단계. .gitmodules가 없으면 git이 빠르게
+        // 0-exit으로 빠진다. 있는 경우에만 부모 index에 기록된 SHA로 submodule working
+        // tree를 강제 정렬해 "M submodule" 상태가 rebase preflight를 막지 않게 한다.
+        var gitmodulesPath = Path.Combine(worktreePath, ".gitmodules");
+        if (File.Exists(gitmodulesPath))
+        {
+            var (subExit, subOut) = await _git.RunAsync(
+                ["submodule", "update", "--init", "--recursive"], worktreePath, ct);
+            if (subExit != 0)
+            {
+                logger.Warn(
+                    $"[merge:advance] {taskId} pre-rebase submodule update 실패 — 계속 진행: {subOut.Trim()}");
+            }
+            else
+            {
+                logger.Info($"[merge:advance] {taskId} pre-rebase submodule 정렬 완료");
+            }
+        }
+    }
+
+    /// <summary>
+    /// <c>git status --porcelain</c>을 안전하게 캡처. 실패하거나 비어 있으면 빈 문자열.
+    /// </summary>
+    private async Task<string> TryCaptureStatusSnapshotAsync(
+        string worktreePath, CancellationToken ct)
+    {
+        var (statusExit, statusOut) = await _git.RunAsync(
+            ["status", "--porcelain"], worktreePath, ct);
+        if (statusExit != 0) return "";
+        var trimmed = statusOut.Trim();
+        return trimmed;
     }
 
     /// <summary>

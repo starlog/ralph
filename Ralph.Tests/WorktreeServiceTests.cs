@@ -262,6 +262,90 @@ public class WorktreeServiceTests
         Assert.Equal("WT-VERSION", fix.ReadInWorktree("t1", "a.txt"));
     }
 
+    [Fact]
+    public async Task AdvanceWorktreeOntoBase_discards_undeclared_tracked_modification_and_succeeds()
+    {
+        // testing task가 자주 만드는 패턴: declared로 commit된 파일은 깨끗하지만
+        // 다른 tracked 파일에 미선언 unstaged 수정이 남은 채 rebase 진입.
+        // 옵션 B로 reset --hard에 의해 폐기되고 rebase는 정상 진행해야 한다.
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("a.txt", "A-INITIAL");
+        await fix.WriteFileAsync("scratch.txt", "SCRATCH-INITIAL");
+        await fix.CommitAllAsync("initial");
+        await fix.SetupWorktreeAsync("t1");
+
+        // declared 변경: a.txt만 commit
+        await fix.WriteInWorktreeAsync("t1", "a.txt", "A-WT");
+        await fix.CommitInWorktreeAsync("t1", "wt declared change");
+
+        // undeclared unstaged 수정: scratch.txt — commit 안 함
+        await fix.WriteInWorktreeAsync("t1", "scratch.txt", "SCRATCH-DIRTY");
+
+        // main이 disjoint하게 advance
+        await fix.WriteFileAsync("main-only.txt", "MAIN");
+        await fix.CommitAllAsync("main advance");
+
+        var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
+
+        Assert.True(result.Success);
+        // declared commit은 보존
+        Assert.Equal("A-WT", fix.ReadInWorktree("t1", "a.txt"));
+        // undeclared 수정은 HEAD 버전으로 복원
+        Assert.Equal("SCRATCH-INITIAL", fix.ReadInWorktree("t1", "scratch.txt"));
+    }
+
+    [Fact]
+    public async Task AdvanceWorktreeOntoBase_removes_undeclared_untracked_files_before_rebase()
+    {
+        // 옵션 B의 clean 단계 — untracked 부산물(coverage, vitest cache 등)이 있어도
+        // rebase가 깨지지 않고, 해당 파일은 폐기되어야 한다.
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("a.txt", "A");
+        await fix.CommitAllAsync("initial");
+        await fix.SetupWorktreeAsync("t1");
+
+        await fix.WriteInWorktreeAsync("t1", "a.txt", "A-WT");
+        await fix.CommitInWorktreeAsync("t1", "wt change");
+
+        // untracked 부산물
+        await fix.WriteInWorktreeAsync("t1", "coverage.tmp", "garbage");
+
+        // main을 disjoint하게 advance — rebase 자체는 충돌 없음
+        await fix.WriteFileAsync("main-only.txt", "MAIN");
+        await fix.CommitAllAsync("main advance");
+
+        var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
+
+        Assert.True(result.Success);
+        Assert.False(fix.FileExistsInWorktree("t1", "coverage.tmp"));
+    }
+
+    [Fact]
+    public async Task AdvanceWorktreeOntoBase_preserves_ralph_marker_during_cleanup()
+    {
+        // .ralph-marker는 stale 감지에 쓰이는 D 신호 — clean에서 -e로 보존되어야 함.
+        using var fix = new GitFixture();
+        await fix.InitAsync();
+        await fix.WriteFileAsync("a.txt", "A");
+        await fix.CommitAllAsync("initial");
+        await fix.SetupWorktreeAsync("t1");
+
+        await fix.WriteInWorktreeAsync("t1", "a.txt", "A-WT");
+        await fix.CommitInWorktreeAsync("t1", "wt change");
+
+        await fix.WriteInWorktreeAsync("t1", ".ralph-marker", "task-id: t1\n");
+
+        await fix.WriteFileAsync("main-only.txt", "MAIN");
+        await fix.CommitAllAsync("main advance");
+
+        var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
+
+        Assert.True(result.Success);
+        Assert.True(fix.FileExistsInWorktree("t1", ".ralph-marker"));
+    }
+
     // ─── ParseUntrackedOverwrites (머지 abort 메시지 파서) ─────────────────────
 
     [Fact]
