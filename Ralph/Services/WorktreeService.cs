@@ -118,6 +118,11 @@ public class WorktreeService
 
         Directory.CreateDirectory(Path.GetDirectoryName(worktreePath)!);
 
+        // ralph artifact 경로가 .git/info/exclude에 등록되어 있는지 보장하고,
+        // 이미 인덱스에 tracked되어 있으면 fail-fast (rebase preflight 일괄 실패 예방).
+        var repoRootForGuard = await _git.GetRepoRootAsync(ct: ct);
+        await RalphIgnoreGuard.EnsureAsync(_git, repoRootForGuard, logger, ct);
+
         // stale worktree 참조 정리
         await _git.RunAsync(["worktree", "prune"], ct: ct);
 
@@ -527,6 +532,10 @@ public class WorktreeService
 
         // 모든 git 호출은 repoRoot에서 실행해 호출자 CWD에 의존하지 않게 한다.
         // (smoke worktree 자체에 대한 작업만 smokePath에서 실행)
+
+        // .git/info/exclude 보장 + tracked 감지 (idempotent — task worktree 진입점과
+        // 둘 다에서 호출되어도 안전).
+        await RalphIgnoreGuard.EnsureAsync(_git, repoRoot, logger, ct);
 
         // 동일 경로의 stale worktree 참조 정리 — 디렉터리는 사라졌는데 git이 기억하는 경우.
         await _git.RunAsync(["worktree", "prune"], repoRoot, ct);
