@@ -171,11 +171,75 @@ public sealed class PlanCommand : ICommand
             }
         }
 
+        // Warning 정정 루프: errors가 없고 warnings가 있으면 Claude로 자동 개선 시도.
+        // 실패해도 warnings는 non-blocking이므로 계속 진행한다.
+        const int maxWarningCorrectionAttempts = 2;
+        var warningCorrectionAttempt = 0;
+        while (report.HasWarnings && warningCorrectionAttempt < maxWarningCorrectionAttempts)
+        {
+            warningCorrectionAttempt++;
+            AnsiConsole.MarkupLine(
+                $"\n[yellow]⚠ Plan 검증 경고 {report.Warnings.Count}개. " +
+                $"AI 정정으로 개선합니다 (시도 {warningCorrectionAttempt}/{maxWarningCorrectionAttempts}):[/]");
+            foreach (var w in report.Warnings)
+                AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(w)}");
+            AnsiConsole.WriteLine();
+
+            string currentJson;
+            try
+            {
+                currentJson = await File.ReadAllTextAsync(_ctx.TasksFile, ct);
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine($"[yellow]⚠ tasks.json 읽기 실패, warning 정정 생략: {Markup.Escape(ex.Message)}[/]");
+                break;
+            }
+
+            var warningCorrectionContext = PlanGenerator.BuildWarningCorrectionPrompt(
+                currentJson, report.Warnings, warningCorrectionAttempt, maxWarningCorrectionAttempts);
+
+            var warnFixResult = await generator.GenerateAsync(
+                prdFile, schemaContent, _ctx.TasksFile, claude, planModel, logger,
+                categories: configuredCategories,
+                correctionContext: warningCorrectionContext, ct: ct);
+
+            if (warnFixResult != 0)
+            {
+                AnsiConsole.MarkupLine("[yellow]⚠ Warning 정정 시도 중 Claude 실행이 실패했습니다. 경고를 유지합니다.[/]");
+                break;
+            }
+
+            TaskManager revalidateTm;
+            try
+            {
+                revalidateTm = await TaskManager.LoadAsync(_ctx.TasksFile);
+            }
+            catch (Exception ex)
+            {
+                AnsiConsole.MarkupLine($"[yellow]⚠ 재검증 중 tasks.json 읽기 실패: {Markup.Escape(ex.Message)}[/]");
+                break;
+            }
+
+            report = PlanValidator.Validate(revalidateTm);
+
+            // warning 정정 중 새 error가 생기면 즉시 실패 처리
+            if (report.HasErrors)
+            {
+                sw.Stop();
+                AnsiConsole.MarkupLine("[red]✗ Warning 정정 중 새로운 검증 errors가 발생했습니다:[/]");
+                PlanValidator.PrintReport(report);
+                return 1;
+            }
+        }
+
         sw.Stop();
 
         AnsiConsole.MarkupLine($"\n[green]플랜 생성 완료[/] [dim]({sw.Elapsed.Minutes}분 {sw.Elapsed.Seconds}초)[/]");
         if (correctionAttempt > 0)
             AnsiConsole.MarkupLine($"[dim](AI 정정 {correctionAttempt}회 후 검증 통과)[/]");
+        if (warningCorrectionAttempt > 0 && !report.HasWarnings)
+            AnsiConsole.MarkupLine($"[dim](Warning AI 정정 {warningCorrectionAttempt}회 후 경고 해소)[/]");
 
         // --rollback 지원: plan 성공 직후 상태(post-plan) 스냅샷 저장.
         try
@@ -189,7 +253,7 @@ public sealed class PlanCommand : ICommand
 
         if (report.HasWarnings)
         {
-            AnsiConsole.MarkupLine($"[yellow]⚠ Plan 검증 경고 {report.Warnings.Count}개:[/]");
+            AnsiConsole.MarkupLine($"[yellow]⚠ Plan 검증 경고 {report.Warnings.Count}개 (정정 후에도 남은 경고):[/]");
             foreach (var w in report.Warnings)
                 AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(w)}");
             AnsiConsole.WriteLine();

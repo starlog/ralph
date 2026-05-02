@@ -464,6 +464,45 @@ public partial class PlanGenerator
         return sb.ToString();
     }
 
+    /// <summary>
+    /// PlanValidator가 보고한 warnings를 Claude에게 다시 보내 tasks.json을 개선시키기 위한
+    /// 보정 컨텍스트를 만든다. 경고는 실행을 막지 않지만 플랜 품질 향상을 위해 자동 정정을 시도한다.
+    /// </summary>
+    public static string BuildWarningCorrectionPrompt(
+        string currentJson, IReadOnlyList<string> warnings, int attempt, int maxAttempts)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# IMPORTANT: tasks.json 검증 경고 — 개선이 필요합니다");
+        sb.AppendLine();
+        sb.AppendLine($"이전에 생성한 tasks.json에 Ralph의 PlanValidator 검증 경고가 있습니다.");
+        sb.AppendLine($"이번이 경고 정정 시도 {attempt}/{maxAttempts}회 입니다.");
+        sb.AppendLine("경고는 실행을 막지는 않지만, 플랜 품질을 위해 가능하면 해결해야 합니다.");
+        sb.AppendLine();
+        sb.AppendLine("## 해결해야 할 검증 경고");
+        sb.AppendLine();
+        foreach (var warning in warnings)
+            sb.AppendLine($"- {warning}");
+        sb.AppendLine();
+        sb.AppendLine("## 현재 tasks.json");
+        sb.AppendLine();
+        sb.AppendLine("```json");
+        sb.AppendLine(currentJson);
+        sb.AppendLine("```");
+        sb.AppendLine();
+        sb.AppendLine("## 정정 지침");
+        sb.AppendLine();
+        sb.AppendLine("위 경고를 **모두** 해결한 improved tasks.json을 작성하세요.");
+        sb.AppendLine("이미 올바른 부분은 그대로 유지하고, 경고 해결에 필요한 최소 변경만 가하세요. 특히:");
+        sb.AppendLine("- **파일 중복 수정**: 동일 파일을 수정하는 독립 태스크들에 dependsOn을 추가하거나 outputFiles/modifiedFiles를 명확히 분리");
+        sb.AppendLine("- **카테고리 불일치**: 카테고리와 실제 작업이 맞지 않으면 prompt 내용이나 카테고리를 일치시킬 것");
+        sb.AppendLine("- **verification.command 복잡성**: 5개 이상의 명령은 프로젝트 표준 test runner(`dotnet test`, `pytest -q`, `npm test` 등)로 단순화");
+        sb.AppendLine("- **알 수 없는 명령어**: 검증 명령에 표준 도구를 사용했는지 확인");
+        sb.AppendLine("- **새로운 errors를 절대 도입하지 마세요** — 현재 통과된 검증 규칙은 그대로 유지해야 합니다.");
+        sb.AppendLine();
+        sb.AppendLine("아래는 원래의 plan 생성 지침과 schema입니다. 동일한 규칙을 따르되 위 경고를 해결하세요.");
+        return sb.ToString();
+    }
+
     private static string? ExtractJson(string output)
     {
         // Strategy 1: Extract last complete fenced code block
