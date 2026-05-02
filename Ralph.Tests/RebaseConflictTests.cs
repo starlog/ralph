@@ -139,11 +139,14 @@ public class RebaseConflictTests
         Assert.DoesNotContain("no-conflict.txt", result.ConflictFiles);
     }
 
-    // 회귀: rebase가 시작도 못 한 경우(워크트리에 untracked 충돌 파일) blind --abort 호출이
-    // "fatal: No rebase in progress?"로 2차 실패해 FailureKind=Other가 되고 batch 전체가 중단됐다.
-    // 이제는 rebase 진행 여부를 먼저 확인해 abort 스킵 → RebaseConflict로 분류 → task만 실패.
+    // 회귀: 과거에는 worktree의 untracked 충돌 파일 때문에 rebase가 시작도 못 하고
+    // blind --abort가 "fatal: No rebase in progress?"로 2차 실패해 FailureKind=Other가
+    // 되어 batch 전체가 중단됐다. 이제는 PreRebaseCleanup이 rebase 직전에 untracked
+    // 부산물을 청소해 이 케이스 자체가 발생하지 않는다 — main이 추가한 동일 경로가
+    // 그대로 적용되어 rebase는 성공한다. (rebase 미시작 실패 시 abort 스킵 로직은
+    // invalid baseRef / lock file 같은 비-dirty 사유에 대한 안전망으로 남아 있음.)
     [Fact]
-    public async Task RebaseFailedBeforeStarting_DoesNotCallAbort_ReturnsRebaseConflict()
+    public async Task UntrackedCollidingFile_IsDiscardedByPreRebaseCleanup_AndRebaseSucceeds()
     {
         using var fix = new GitFixture();
         await fix.InitAsync();
@@ -154,24 +157,25 @@ public class RebaseConflictTests
         await fix.WriteInWorktreeAsync("t1", "wt-only.txt", "wt");
         await fix.CommitInWorktreeAsync("t1", "[Task #t1] add file");
 
-        // main에서 동일 경로의 파일을 추가/커밋해 rebase 적용 시 untracked-overwrite로 실패하도록 만든다.
+        // main에서 동일 경로의 파일을 추가/커밋. 과거에는 이게 worktree의 untracked
+        // 동명 파일과 충돌해 rebase 자체가 시작을 못 했다.
         await fix.WriteFileAsync("collide.txt", "main version");
         await fix.CommitAllAsync("main: add collide");
 
-        // worktree에는 같은 경로를 untracked로 만든다 — git rebase는 이를 덮어쓰지 않으려고
-        // applying 단계에 들어가기 전에 거부 ("untracked working tree files would be overwritten").
         var collidePath = Path.Combine(fix.WorktreeBase, "t1", "collide.txt");
         await File.WriteAllTextAsync(collidePath, "untracked local");
 
         var result = await fix.Worktree.AdvanceWorktreeOntoBaseAsync("t1", "main");
 
-        Assert.False(result.Success);
-        // 핵심: blind --abort로 Other가 되지 않고 RebaseConflict로 분류돼 batch가 계속될 수 있어야 함.
-        Assert.Equal(MergeFailureKind.RebaseConflict, result.FailureKind);
+        // PreRebaseCleanup이 untracked collide.txt를 폐기 → rebase는 main의 commit을
+        // 깨끗하게 적용해 성공.
+        Assert.True(result.Success);
+        Assert.Equal(MergeFailureKind.None, result.FailureKind);
 
-        // 워크트리는 abort 호출 없이도 깨끗 — rebase가 시작 안 했으니 손상도 없다.
-        // (untracked 파일은 그대로 남아 있는 것이 정상)
-        Assert.True(File.Exists(collidePath));
+        // 최종적으로 main이 가져온 버전이 worktree에 자리잡는다.
+        Assert.Equal("main version", fix.ReadInWorktree("t1", "collide.txt"));
+        // worktree의 declared commit도 보존
+        Assert.Equal("wt", fix.ReadInWorktree("t1", "wt-only.txt"));
     }
 
     /// <summary>
