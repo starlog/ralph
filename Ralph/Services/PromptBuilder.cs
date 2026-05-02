@@ -76,6 +76,19 @@ public static class PromptBuilder
             sb.AppendLine();
         }
 
+        // 테스트 태스크 전용: 워크트리 환경 주의사항
+        if (task.Category is "testing")
+        {
+            sb.AppendLine("## 워크트리 실행 환경 주의사항 (테스트 태스크)");
+            sb.AppendLine("이 태스크는 `.ralph-worktrees/{taskId}/` git worktree 안에서 실행됩니다. 메인 레포 루트에 있는 `node_modules/`는 worktree 루트의 **상위**가 아닌 **형제** 디렉토리이므로, Vite 기본값인 `server.fs.strict: true`가 setupFile(예: `@testing-library/jest-dom/vitest`) 로드를 차단할 수 있습니다.");
+            sb.AppendLine();
+            sb.AppendLine("**vitest / vite 기반 프론트엔드 테스트라면 다음을 확인하세요:**");
+            sb.AppendLine("1. 테스트 실행 전 `npx vitest run --reporter=verbose 2>&1 | head -20` 으로 fs.strict 오류 여부를 먼저 확인하세요.");
+            sb.AppendLine("2. `Failed to load url` / `ENOENT` / `Access denied to` 오류가 나오면 `vitest.config.ts` (또는 `vite.config.ts`)의 `test:` 블록에 `server: { fs: { strict: false } }` 를 추가하세요.");
+            sb.AppendLine("3. `vitest.config.ts`가 이 태스크의 Scope(modifiedFiles)에 포함되어 있다면 수정해도 됩니다. **Scope에 없으면 수정하지 말고 완료 보고에 명시하세요** (pre-rebase cleanup이 미선언 변경을 폐기하므로 fix가 반영되지 않습니다).");
+            sb.AppendLine();
+        }
+
         // 절대 금지
         sb.AppendLine("## 절대 금지 사항");
         sb.AppendLine($"- `{tasksFile}` 수정 금지 (worktree 격리 환경, 변경 시 머지 충돌이 발생합니다)");

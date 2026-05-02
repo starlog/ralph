@@ -286,6 +286,9 @@ public partial class PlanGenerator
                     - Rust: `{ "command": "cargo test --quiet", "timeoutSec": 300 }`
                     Detect the actual stack from the codebase (e.g., `Ralph.csproj` → .NET) and pick a command that runs the **specific test suite added by this feature** if possible (e.g. `dotnet test --filter "FullyQualifiedName~FeatureXTests"`).
                   - Skip this task if the feature is mechanical (doc, config, single-line edit) where tests provide no value.
+                  - **Frontend test tasks — worktree fs restriction (vitest / vite monorepos):** Tasks run inside a git worktree at `.ralph-worktrees/{taskId}/`. The worktree root is a sibling of the main repo root, so Vite's default `server.fs.strict: true` blocks the test runner from loading setup files (e.g., `@testing-library/jest-dom/vitest`) that live in the workspace `node_modules` at the repo root — outside the worktree root. This causes the first verification attempt to fail immediately (< 1 s, exit 1) even though the test code is correct. To avoid this:
+                    1. If only **one** test task needs this fix: include `vitest.config.ts` (or `vite.config.ts`, `vitest.workspace.ts`) in that task's `modifiedFiles`.
+                    2. If **multiple** test tasks would each need the same fix: create a shared **test-env-prep task** instead (see rule 3.5 below).
 
                **Commit task** (category: "commit", id: `{feature}-commit`)
                   - dependsOn: previous task in this feature's chain (test → impl → plan, whichever is the last that exists)
@@ -298,6 +301,17 @@ public partial class PlanGenerator
                     f. Run `git diff --cached --name-only` to verify the staged set equals the intended in-scope set; if extra files leaked in, unstage them with `git restore --staged <path>` before committing.
                     g. Create a single `git commit` with a descriptive message in Korean summarizing this feature's changes.
                   - The commit task can be skipped entirely if `workflow.onTaskComplete.commitChanges` is `true` (Ralph auto-commits after each task) AND the feature is small enough that one commit suffices.
+
+            3.5. **Shared-config prep task (REQUIRED when multiple test tasks need the same config change):**
+               When you detect a vitest / jest / vite-based frontend package **and** there are two or more test tasks that would each need to touch the same shared config file (most commonly `vitest.config.ts`, `vite.config.ts`, `vitest.workspace.ts`, `jest.config.ts`, or `webpack.config.js`), do NOT have each test task modify that file independently. Instead:
+               - Create exactly **one** config-prep task (category: `"implementation"`, suggested id: `test-env-prep` or `<package>-test-config`) before any of those test tasks.
+               - List the shared config file(s) in the prep task's `modifiedFiles`.
+               - Every affected test task `dependsOn` this prep task (in addition to its impl dep).
+               - The prep task prompt must: open the config file, add `server: { fs: { strict: false } }` inside the `test:` block (vitest) or the equivalent for other runners, and verify the change compiles (`tsc --noEmit` or `npm run build --silent`).
+
+               **Why this is critical:** Ralph's pre-rebase cleanup discards changes to files not listed in a task's `modifiedFiles` before rebase to prevent accidental merge conflicts. A test task that fixes `vitest.config.ts` without declaring it in `modifiedFiles` will have that fix silently discarded at merge time — the next worktree re-encounters the same fs.strict failure. The prep-task pattern guarantees the fix lands in the base branch before any test task runs.
+
+               **When to emit the prep task:** whenever you identify a vitest/jest/vite frontend package **and** two or more test tasks exist for it. A single test task does not need the prep task — just include the config file in its own `modifiedFiles`.
 
             3. **Cross-feature dependencies (IMPORTANT for parallel execution):**
                - Features that are **independent** (don't share files or code dependencies) should have NO cross-feature dependencies. This allows Ralph to execute them in parallel using git worktrees.
