@@ -165,6 +165,6 @@ public static class RalphIgnoreGuard
         logger.Error("[ralph-ignore] tracked artifact entries: " + string.Join(", ", tracked));
         AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
 
-        throw new InvalidOperationException(msg);
+        throw new RalphUserException(msg);
     }
 }

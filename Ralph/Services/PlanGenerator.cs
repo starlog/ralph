@@ -418,6 +418,30 @@ public partial class PlanGenerator
 
                This is broader than tooling-specific lint: per-task `verification.command` cannot catch config self-contradictions when the contradicting input doesn't yet exist (e.g., empty `tests/`), and `workflow.smokeTest` will only fire once a later batch creates the triggering file. Plan the config correctly the first time.
 
+            16. **`verification.command` MUST be scoped to this task's files (CRITICAL — fixes a major class of false-failure).** Each task runs in its own git worktree at `.ralph-worktrees/{taskId}/` BEFORE its sibling tasks have been merged. So at verification time, the worktree contains: this task's own changes + the base branch state at task start. It does NOT contain anything produced by sibling/parallel tasks.
+
+               If your verification command runs the WHOLE project (`npm test`, `npm run typecheck`, `dotnet test`, `cargo test`, `pytest`, `go test ./...`, bare `tsc --noEmit`), it will fail whenever any part of the project depends on a sibling task's output that doesn't exist yet — even though THIS task's code is perfectly correct. The task is then marked failed and merging is blocked, despite no actual problem with what was implemented. This has caused ~40% of recent verification failures.
+
+               The fix: make `verification.command` check ONLY the files in this task's `outputFiles` ∪ `modifiedFiles` (plus any `outputFiles` of tasks listed in this task's `dependsOn`, since those are guaranteed merged before this task starts).
+
+               PREFERRED forms (file-scoped):
+               - **TypeScript**: `tsc --noEmit src/bid.ts src/bid-helpers.ts` — list this task's .ts files explicitly. NOT bare `tsc --noEmit` (whole project).
+               - **Vitest/Jest**: `vitest run tests/bid.test.ts` or `jest tests/bid.test.ts` — name the test file. NOT bare `npm test`.
+               - **Python (pytest)**: `pytest -q tests/test_bid.py` — name the test file. NOT bare `pytest` or `pytest tests/`.
+               - **Python (compile)**: `python3 -m py_compile src/bid.py` — name the source file. NOT `python3 -m compileall .`.
+               - **Go**: `go build ./internal/bid/` or `go test ./internal/bid/...` — name the package. NOT `go build ./...` or `go test ./...`.
+               - **Rust**: `cargo check -p bid` (per-crate) when in a workspace; in a single-crate project `cargo check` is acceptable since there's no cross-task contamination risk.
+               - **.NET**: `dotnet build src/Bid/Bid.csproj` (per-project). NOT `dotnet build` from a solution root with sibling projects mid-flight.
+
+               EXCEPTION — when whole-project verification IS appropriate:
+               - Trivial single-feature repos with no parallel sibling tasks (planner can confirm this from the DAG).
+               - Tasks marked `category: "commit"` or `"plan"` (no executable artifact, usually no `verification` field at all).
+               - The very first scaffold/setup task (no siblings exist yet by definition).
+
+               How to choose the scope: take the union of this task's `outputFiles` and `modifiedFiles`. If those files import from sibling-task outputs not in this task's `dependsOn`, restructure the task graph (add the dependency, or split the work) — do NOT widen the verification command to compensate, because that re-introduces the sibling-not-merged-yet problem.
+
+               This rule overrides any earlier rule that suggested whole-project commands. The earlier examples like `dotnet test` / `npm test --silent` were correct for project-level smoke tests but wrong for per-task verification. Use this rule's file-scoped forms for `verification.command`. Use rule 14's whole-project forms for `workflow.smokeTest`.
+
             ## JSON Schema
             """);
 

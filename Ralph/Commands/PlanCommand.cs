@@ -171,17 +171,21 @@ public sealed class PlanCommand : ICommand
             }
         }
 
-        // Warning 정정 루프: errors가 없고 warnings가 있으면 Claude로 자동 개선 시도.
+        // Warning 정정 루프: errors가 없고 actionable warnings가 있으면 Claude로 자동 개선 시도.
+        // [info] 접두사 경고는 informational이므로 LLM 호출을 트리거하지 않는다 (비용/회귀 위험).
         // 실패해도 warnings는 non-blocking이므로 계속 진행한다.
         const int maxWarningCorrectionAttempts = 2;
         var warningCorrectionAttempt = 0;
-        while (report.HasWarnings && warningCorrectionAttempt < maxWarningCorrectionAttempts)
+        var actionableWarnings = report.Warnings.Where(w => !w.Contains("[info]")).ToList();
+        while (actionableWarnings.Count > 0 && warningCorrectionAttempt < maxWarningCorrectionAttempts)
         {
             warningCorrectionAttempt++;
+            var infoCount = report.Warnings.Count - actionableWarnings.Count;
             AnsiConsole.MarkupLine(
-                $"\n[yellow]⚠ Plan 검증 경고 {report.Warnings.Count}개. " +
-                $"AI 정정으로 개선합니다 (시도 {warningCorrectionAttempt}/{maxWarningCorrectionAttempts}):[/]");
-            foreach (var w in report.Warnings)
+                $"\n[yellow]⚠ Plan 검증 actionable 경고 {actionableWarnings.Count}개" +
+                (infoCount > 0 ? $" ([dim]+{infoCount}개 [info] 생략[/])" : "") +
+                $". AI 정정으로 개선합니다 (시도 {warningCorrectionAttempt}/{maxWarningCorrectionAttempts}):[/]");
+            foreach (var w in actionableWarnings)
                 AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(w)}");
             AnsiConsole.WriteLine();
 
@@ -197,7 +201,7 @@ public sealed class PlanCommand : ICommand
             }
 
             var warningCorrectionContext = PlanGenerator.BuildWarningCorrectionPrompt(
-                currentJson, report.Warnings, warningCorrectionAttempt, maxWarningCorrectionAttempts);
+                currentJson, actionableWarnings, warningCorrectionAttempt, maxWarningCorrectionAttempts);
 
             var warnFixResult = await generator.GenerateAsync(
                 prdFile, schemaContent, _ctx.TasksFile, claude, planModel, logger,
@@ -231,6 +235,8 @@ public sealed class PlanCommand : ICommand
                 PlanValidator.PrintReport(report);
                 return 1;
             }
+
+            actionableWarnings = report.Warnings.Where(w => !w.Contains("[info]")).ToList();
         }
 
         sw.Stop();
@@ -238,7 +244,7 @@ public sealed class PlanCommand : ICommand
         AnsiConsole.MarkupLine($"\n[green]플랜 생성 완료[/] [dim]({sw.Elapsed.Minutes}분 {sw.Elapsed.Seconds}초)[/]");
         if (correctionAttempt > 0)
             AnsiConsole.MarkupLine($"[dim](AI 정정 {correctionAttempt}회 후 검증 통과)[/]");
-        if (warningCorrectionAttempt > 0 && !report.HasWarnings)
+        if (warningCorrectionAttempt > 0 && actionableWarnings.Count == 0)
             AnsiConsole.MarkupLine($"[dim](Warning AI 정정 {warningCorrectionAttempt}회 후 경고 해소)[/]");
 
         // --rollback 지원: plan 성공 직후 상태(post-plan) 스냅샷 저장.

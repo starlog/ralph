@@ -1,4 +1,5 @@
 using Ralph.Commands;
+using Ralph.Services;
 using Spectre.Console;
 
 // ─── UTF-8 console encoding ─────────────────────────────────────────────────
@@ -38,4 +39,9 @@ catch (OperationCanceledException)
 {
     AnsiConsole.MarkupLine("\n[red]Interrupted. Aborted.[/]");
     return 130;
+}
+catch (RalphUserException)
+{
+    // 안내 메시지는 호출자가 이미 출력했다. stack trace 없이 깔끔히 종료.
+    return 1;
 }

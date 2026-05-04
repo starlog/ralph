@@ -88,7 +88,7 @@ public static class PlanValidator
     /// <summary>알려진 빌드/테스트 러너. 첫 토큰이 여기에 없으면 [info] 권장 메시지를 추가한다.</summary>
     private static readonly string[] WhitelistedTools =
     [
-        "dotnet", "npm", "pnpm", "yarn", "bun", "node", "nodejs",
+        "dotnet", "npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx", "node", "nodejs",
         "cargo", "rustc", "go",
         "pytest", "python", "python3", "ruff", "mypy",
         "bash", "sh", "zsh",
