@@ -12,10 +12,12 @@ namespace Ralph.Services;
 internal sealed class MergeOrchestrator
 {
     private readonly TaskManager _taskManager;
+    private readonly IAgentRunner _claude;
     private readonly GitService _git;
     private readonly WorktreeService _worktree;
     private readonly RalphLogger _logger;
     private readonly VerificationRunner _verifier;
+    private readonly CostTracker _cost;
     private readonly RunOptions _options;
 
     private readonly ConflictStrategyRunner _conflict;
@@ -34,10 +36,12 @@ internal sealed class MergeOrchestrator
         RunOptions options)
     {
         _taskManager = taskManager;
+        _claude = claude;
         _git = git;
         _worktree = worktree;
         _logger = logger;
         _verifier = verifier;
+        _cost = cost;
         _options = options;
 
         _conflict = new ConflictStrategyRunner(claude, git, worktree, logger, cost, options.ModelOverride);
@@ -272,6 +276,14 @@ internal sealed class MergeOrchestrator
 
         // 5.5 머지 후 smoke test
         var smoke = await RunPostMergeSmokeTestAsync(preMergeSha, baseBranch, ct);
+
+        // 5.6 smoke 실패 + --auto-fix-smoke 활성화: Claude로 1회 자동 수정 시도.
+        // 성공 시 smoke 결과를 통과로 갱신; 실패 시 fix 커밋을 되돌리고 기존 실패 경로로 폴스루.
+        if (!smoke.Skipped && !smoke.Passed && _options.AutoFixSmoke && mergedTasks.Count > 0)
+        {
+            smoke = await TryFixSmokeWithClaudeAsync(
+                smoke, baseBranch, mergedTasks, preMergeSha, ct);
+        }
         var smokeStr = smoke.Skipped ? "skipped" : smoke.Passed ? "passed" : "failed";
 
         // fix2 #8: 모든 머지된 task에 대해 merge-log entry append (batch 단위 일괄)
@@ -458,6 +470,204 @@ internal sealed class MergeOrchestrator
         _logger.Error(
             $"[smoke-test] failed exit={result.ExitCode} timedOut={result.TimedOut}");
         return new SmokePhaseResult(Skipped: false, Passed: false, Command: spec.Command, Detail: result);
+    }
+
+    /// <summary>
+    /// `--auto-fix-smoke` opt-in: smoke test 실패 시 Claude를 1회 호출해 base 브랜치에서 자동 수정 시도.
+    ///
+    /// 동작:
+    ///   1. baseBranch HEAD를 preFixSha로 캡처 (실패 시 fix 커밋을 되돌릴 기준점).
+    ///   2. 실패한 smoke 명령 + stdout/stderr + 이번 batch에서 머지된 task/파일 컨텍스트로 프롬프트 구성.
+    ///   3. Claude를 repoRoot에서 실행 (full tools). repoRoot는 baseBranch에 체크아웃되어 있다고 가정.
+    ///   4. Claude가 변경한 파일이 있으면 `[smoke-fix]` 단일 커밋으로 base에 추가.
+    ///   5. smoke worktree를 새 base HEAD로 갱신 후 같은 명령을 재실행.
+    ///   6. 통과 → 갱신된 SmokePhaseResult(Passed=true) 반환.
+    ///      실패 → preFixSha로 hard reset (fix 커밋 폐기) 후 원래 실패 결과를 반환해 기존
+    ///             auto-rollback / batch fail 경로가 변하지 않도록 한다.
+    ///
+    /// 안전 장치:
+    ///   - repoRoot HEAD가 baseBranch가 아니면(분기) 스킵 — 사용자 작업을 건드리지 않는다.
+    ///   - working tree가 dirty하면 스킵 — 사용자 미커밋 변경 보호.
+    ///   - 호출 1회로 제한 (반복 호출은 cost runaway 위험).
+    /// </summary>
+    private async Task<SmokePhaseResult> TryFixSmokeWithClaudeAsync(
+        SmokePhaseResult failed, string baseBranch, List<string> mergedTasks,
+        string? preMergeSha, CancellationToken ct)
+    {
+        if (failed.Detail is null || string.IsNullOrWhiteSpace(failed.Command))
+            return failed;
+
+        var repoRoot = await _git.GetRepoRootAsync(ct: ct);
+
+        // 안전 (a): 현재 브랜치 == baseBranch?
+        var (brExit, brOut) = await _git.RunAsync(
+            new[] { "rev-parse", "--abbrev-ref", "HEAD" }, repoRoot, ct);
+        var currentBranch = brExit == 0 ? brOut.Trim() : "";
+        if (!string.Equals(currentBranch, baseBranch, StringComparison.Ordinal))
+        {
+            AnsiConsole.MarkupLine(
+                $"[yellow]⚠ auto-fix-smoke 스킵: HEAD가 base 밖 ({Markup.Escape(currentBranch)} ≠ {Markup.Escape(baseBranch)}).[/]");
+            _logger.Warn(
+                $"[smoke-fix] skipped — HEAD={currentBranch} != base={baseBranch}");
+            return failed;
+        }
+
+        // 안전 (b): working tree dirty?
+        var (stExit, stOut) = await _git.RunAsync(
+            new[] { "status", "--porcelain=v1" }, repoRoot, ct);
+        if (stExit == 0 && !string.IsNullOrWhiteSpace(stOut))
+        {
+            AnsiConsole.MarkupLine(
+                "[yellow]⚠ auto-fix-smoke 스킵: working tree가 dirty 상태입니다.[/]");
+            _logger.Warn("[smoke-fix] skipped — working tree dirty");
+            return failed;
+        }
+
+        var preFixSha = await CaptureCurrentShaAsync(ct);
+        if (string.IsNullOrEmpty(preFixSha))
+        {
+            _logger.Warn("[smoke-fix] skipped — preFixSha 캡처 실패");
+            return failed;
+        }
+
+        // 이번 batch에서 변경된 파일 (smoke 실패 컨텍스트로 Claude에 전달)
+        var changedFiles = await GetChangedFilesAsync(preMergeSha, repoRoot, ct);
+        var changedListText = changedFiles is { Count: > 0 }
+            ? string.Join("\n", changedFiles.Take(40).Select(f => $"  - {f}"))
+              + (changedFiles.Count > 40 ? $"\n  - ... (외 {changedFiles.Count - 40}건)" : "")
+            : "  (변경 파일 캡처 실패 — git status로 직접 확인하세요)";
+
+        var taskListText = string.Join(", ", mergedTasks);
+
+        // stdout/stderr는 길 수 있으므로 마지막 80줄로 트림.
+        var stdoutTail = TailLines(failed.Detail.Stdout, 80);
+        var stderrTail = TailLines(failed.Detail.Stderr, 80);
+
+        var prompt = $$"""
+            방금 ralph가 batch를 base 브랜치에 머지한 직후 실행한 post-merge smoke test가 실패했습니다.
+            당신의 임무는 base 브랜치에서 직접 수정해 smoke test를 통과시키는 것입니다.
+
+            ## 환경
+            - 작업 디렉토리: {{repoRoot}}
+            - 현재 브랜치: {{baseBranch}} (이 브랜치에서 직접 수정 + 커밋)
+            - 이번 batch에서 머지된 태스크: {{taskListText}}
+
+            ## 실패한 smoke 명령
+            ```
+            {{failed.Command}}
+            ```
+            exit code: {{failed.Detail.ExitCode}}{{(failed.Detail.TimedOut ? " (TIMED OUT)" : "")}}
+
+            ## stdout (최근 80줄)
+            ```
+            {{stdoutTail}}
+            ```
+
+            ## stderr (최근 80줄)
+            ```
+            {{stderrTail}}
+            ```
+
+            ## 이번 batch에서 변경된 파일
+            {{changedListText}}
+
+            ## 지시
+            1. 먼저 위 출력을 읽고 실패 원인을 파악하세요. 흔한 패턴:
+               - 설정 파일(예: tsconfig.json, package.json)의 자기모순으로 인한 latent 버그가 새 파일이 추가되면서 표면화.
+               - 새로 추가된 파일의 import/syntax 오류.
+               - 누락된 의존성.
+            2. **근본 원인**을 수정하세요. 빌드/테스트 명령을 우회하거나 끄지 마세요.
+            3. 수정 후 같은 명령을 직접 실행해 통과를 확인하세요:
+               ```
+               {{failed.Command}}
+               ```
+               (작업 디렉토리는 위와 다를 수 있습니다 — `.ralph-smoke` 격리 worktree에서 실행됩니다. 동일 명령을 repo root에서 돌려도 무방합니다.)
+            4. 통과를 확인한 뒤 종료하세요. **git add / git commit / git push는 실행하지 마세요** — staging과 커밋은 ralph가 처리합니다.
+
+            만약 root cause를 찾지 못하거나 수정이 위험하다고 판단되면, 변경 없이 종료하세요. ralph가 fix를 폐기하고 기존 실패 경로(설정에 따라 auto-rollback)로 넘어갑니다.
+            """;
+
+        AnsiConsole.MarkupLine(
+            $"\n[cyan]auto-fix-smoke:[/] Claude로 자동 수정 시도 [dim](base: {Markup.Escape(baseBranch)})[/]");
+        _logger.Info(
+            $"[smoke-fix] invoking Claude (preFixSha={preFixSha}, mergedTasks=[{string.Join(",", mergedTasks)}])");
+
+        var fixModel = ModelResolver.ResolveForNonTask(_options.ModelOverride);
+        ClaudeResult? fixResult = null;
+        try
+        {
+            fixResult = await _claude.RunWithRetryAsync(
+                prompt, model: fixModel, workingDirectory: repoRoot, logger: _logger, ct: ct);
+        }
+        finally
+        {
+            await _cost.RecordAsync("smoke-fix", fixModel, fixResult, CancellationToken.None);
+        }
+
+        if (fixResult is null || !fixResult.Success)
+        {
+            AnsiConsole.MarkupLine("[yellow]auto-fix-smoke: Claude 호출 실패 — fix 폐기, 기존 경로로 진행.[/]");
+            _logger.Warn(
+                $"[smoke-fix] Claude failed: success={fixResult?.Success}, exit={fixResult?.ExitCode}");
+            // Claude가 부분 변경을 남겼을 수 있으므로 working tree를 강제 정리.
+            await _git.RunAsync(new[] { "reset", "--hard", preFixSha }, repoRoot, ct);
+            return failed;
+        }
+
+        // Claude가 변경한 게 있는지 확인.
+        var (postExit, postOut) = await _git.RunAsync(
+            new[] { "status", "--porcelain=v1" }, repoRoot, ct);
+        var hasChanges = postExit == 0 && !string.IsNullOrWhiteSpace(postOut);
+        if (!hasChanges)
+        {
+            AnsiConsole.MarkupLine("[yellow]auto-fix-smoke: Claude가 수정 없이 종료 — 기존 경로로 진행.[/]");
+            _logger.Info("[smoke-fix] Claude finished without changes");
+            return failed;
+        }
+
+        // fix 커밋 생성. 사용자 지정 commitMessageTemplate를 따르지 않고 고정 prefix를 사용한다 —
+        // 이 커밋은 ralph 자동 복구이지 task 결과물이 아니다.
+        var commitMsg = $"[smoke-fix] {string.Join(", ", mergedTasks)} 머지 후 smoke 자동 수정";
+        var (addExit, _) = await _git.RunAsync(new[] { "add", "-A" }, repoRoot, ct);
+        if (addExit != 0)
+        {
+            await _git.RunAsync(new[] { "reset", "--hard", preFixSha }, repoRoot, ct);
+            _logger.Warn("[smoke-fix] git add 실패 — fix 폐기");
+            return failed;
+        }
+        var (cmExit, cmOut) = await _git.RunAsync(
+            new[] { "commit", "-m", commitMsg, "--no-verify" }, repoRoot, ct);
+        if (cmExit != 0)
+        {
+            await _git.RunAsync(new[] { "reset", "--hard", preFixSha }, repoRoot, ct);
+            _logger.Warn($"[smoke-fix] git commit 실패: {cmOut.Trim()}");
+            return failed;
+        }
+
+        // smoke를 다시 실행. EnsureSmokeWorktreeAsync 안에서 base HEAD로 reset되므로 fix가 반영된다.
+        AnsiConsole.MarkupLine("[cyan]auto-fix-smoke: smoke test 재실행 중...[/]");
+        var retried = await RunPostMergeSmokeTestAsync(preMergeSha, baseBranch, ct);
+
+        if (retried.Passed)
+        {
+            AnsiConsole.MarkupLine($"[green]auto-fix-smoke: 통과 ✓[/] [dim]({Markup.Escape(commitMsg)})[/]");
+            _logger.Info("[smoke-fix] passed after fix commit");
+            return retried;
+        }
+
+        AnsiConsole.MarkupLine(
+            "[yellow]auto-fix-smoke: 재실행도 실패 — fix 커밋 폐기 후 기존 경로로 진행.[/]");
+        _logger.Warn("[smoke-fix] retry still failing — reverting fix commit");
+        await _git.RunAsync(new[] { "reset", "--hard", preFixSha }, repoRoot, ct);
+        return failed;
+    }
+
+    private static string TailLines(string? text, int n)
+    {
+        if (string.IsNullOrEmpty(text)) return "(empty)";
+        var lines = text.Split('\n');
+        if (lines.Length <= n) return text!;
+        return string.Join('\n', lines[(lines.Length - n)..]);
     }
 
     private string DetermineSkipReason(

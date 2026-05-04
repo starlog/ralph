@@ -138,6 +138,21 @@ public sealed class RunCommand : ICommand
                 logger.Info($"auto-rollback-on-smoke-fail enabled (source: {origin})");
             }
 
+            // smoke 실패 시 Claude로 1회 자동 수정 시도 — opt-in. CLI > env > workflow > false.
+            var cliAutoFixSmoke = _ctx.Args.Contains("--auto-fix-smoke");
+            var envAutoFixSmokeRaw = Environment.GetEnvironmentVariable(
+                "RALPH_AUTO_FIX_SMOKE")?.ToLowerInvariant();
+            var envAutoFixSmoke = envAutoFixSmokeRaw is "true" or "1";
+            var workflowAutoFixSmoke = ReadWorkflowAutoFixSmoke(tm);
+            var autoFixSmoke = cliAutoFixSmoke || envAutoFixSmoke || workflowAutoFixSmoke;
+            if (autoFixSmoke)
+            {
+                var origin = cliAutoFixSmoke ? "CLI" : envAutoFixSmoke ? "env" : "workflow";
+                AnsiConsole.MarkupLine(
+                    $"[cyan]자동 수정:[/] smoke 실패 시 Claude 1회 호출로 fix 시도 [dim]({origin})[/]");
+                logger.Info($"auto-fix-smoke enabled (source: {origin})");
+            }
+
             var runOptions = new RunOptions(
                 TasksFile: _ctx.TasksFile,
                 ModelOverride: modelOverride,
@@ -146,7 +161,8 @@ public sealed class RunCommand : ICommand
                 SharedWorktrees: sharedWorktrees,
                 NoSmokeTest: _ctx.NoSmokeTest,
                 SmokeTestCommandOverride: _ctx.SmokeTestCommandOverride,
-                AutoRollbackOnSmokeFail: autoRollbackOnSmokeFail);
+                AutoRollbackOnSmokeFail: autoRollbackOnSmokeFail,
+                AutoFixSmoke: autoFixSmoke);
 
             var executor = new ParallelExecutor(
                 tm, claude, git, worktree, logger, runOptions, cost: costTracker);
@@ -207,6 +223,18 @@ public sealed class RunCommand : ICommand
         var ext = tm.Data.Workflow?.ExtensionData;
         if (ext is null) return false;
         if (!ext.TryGetValue("autoRollbackOnSmokeFail", out var v)) return false;
+        return v.ValueKind == JsonValueKind.True;
+    }
+
+    /// <summary>
+    /// workflow.autoFixSmoke (boolean)을 ExtensionData를 통해 읽는다.
+    /// auto-rollback과 동일한 패턴 — schema에 정식 필드를 추가하지 않고 인식만 한다.
+    /// </summary>
+    private static bool ReadWorkflowAutoFixSmoke(TaskManager tm)
+    {
+        var ext = tm.Data.Workflow?.ExtensionData;
+        if (ext is null) return false;
+        if (!ext.TryGetValue("autoFixSmoke", out var v)) return false;
         return v.ValueKind == JsonValueKind.True;
     }
 }

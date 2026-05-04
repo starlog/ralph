@@ -37,7 +37,7 @@ Ralph is a CLI task orchestrator that generates execution plans from PRD (Produc
 | `HostPlatform.cs` | Single source of truth for host-OS-dependent interpreter names (e.g. `python` on Windows vs `python3` on POSIX) and human-readable OS labels surfaced in plan prompts. Centralises Windows-vs-POSIX divergence so plan generation and smoke-test inference agree. |
 | `WorktreeTaskRunner.cs` | Runs a single task inside its worktree: prompt build → Claude → verification loop. |
 | `SequentialRunner.cs` | In-place sequential execution path (no worktrees). Used for single-task runs and merge `abort` fallback. |
-| `MergeOrchestrator.cs` | Worktree merge pipeline: pre-merge tasks.json normalization, declared-vs-actual file validation, rebase-advance, merge with strategy chain, conflict resolution (auto-* or Claude), done-marking via `StateStore` (writes to `.ralph-logs/state.json`), post-merge smoke test, opt-in auto-rollback on smoke failure (`--auto-rollback-on-smoke-fail`). **No tasks.json commit**: spec is immutable from Ralph's side. On unresolved merge conflict mid-batch, marks already-merged peers as done before aborting (prevents re-dispatch). |
+| `MergeOrchestrator.cs` | Worktree merge pipeline: pre-merge tasks.json normalization, declared-vs-actual file validation, rebase-advance, merge with strategy chain, conflict resolution (auto-* or Claude), done-marking via `StateStore` (writes to `.ralph-logs/state.json`), post-merge smoke test, opt-in auto-fix-smoke via Claude (`--auto-fix-smoke`), opt-in auto-rollback on smoke failure (`--auto-rollback-on-smoke-fail`). **No tasks.json commit**: spec is immutable from Ralph's side. On unresolved merge conflict mid-batch, marks already-merged peers as done before aborting (prevents re-dispatch). |
 | `MergeLogService.cs` | Append-only merge transaction log at `.ralph-logs/merge-log.jsonl`. One entry per merged task per batch (ts, batchIndex, taskId, baseSha, mergedSha, stateMarked, smokeTest result). Auto-rollback adds a separate `event: "rollback"` entry referencing the revert SHA. Append failure is logged warn-level and is non-fatal. |
 | `PlanChunker.cs` | Heuristic for large PRDs: estimates token count and surfaces a chunking decision box (suggests splitting if PRD > ~100k tokens) before sending to Claude. Also detects truncation signals (output token cap, incomplete JSON) so the user can split a too-large PRD instead of silently losing tasks. |
 | `RalphPaths.cs` | Single source of truth for filesystem layout constants (`.ralph-logs/`, `.ralph-worktrees/`, ledger filenames, snapshot paths, branch prefix `ralph/`). |
@@ -104,6 +104,7 @@ ralph --run --shared-worktrees   # git worktree add --shared (saves disk/IO; aut
 ralph --run --no-smoke-test      # Skip post-merge smoke test
 ralph --run --smoke-test "..."   # One-shot smoke test override (bypasses workflow.smokeTest + auto-infer)
 ralph --run --auto-rollback-on-smoke-fail  # Opt-in: revert this batch's merges if smoke test fails
+ralph --run --auto-fix-smoke               # Opt-in: invoke Claude once on smoke failure to fix; revert the fix if it doesn't help
 ralph --run --model opus         # Model override — applies to ALL tasks for this run.
                                  # When omitted, each task runs on its planner-assigned model
                                  # (`task.model`: opus for reasoning-heavy, sonnet for routine),
@@ -154,6 +155,7 @@ ralph --version                  # Print ralph version (alias: -v)
 | `RALPH_BUDGET_USD` | (unset) | Cumulative cost ceiling. CLI `--budget-usd` wins. |
 | `RALPH_TASK_TIMEOUT_SEC` | (unset) | Per-Claude-call timeout (seconds). CLI `--task-timeout` wins. |
 | `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL` | false | Set to `true`/`1` to enable opt-in auto-rollback when post-merge smoke test fails. CLI `--auto-rollback-on-smoke-fail` wins, then this, then `workflow.autoRollbackOnSmokeFail`. |
+| `RALPH_AUTO_FIX_SMOKE` | false | Set to `true`/`1` to invoke Claude once for an automatic fix when post-merge smoke test fails. CLI `--auto-fix-smoke` wins, then this, then `workflow.autoFixSmoke`. |
 | `RALPH_WEBHOOK_URL` | (unset) | Default session-completion webhook |
 | `RALPH_LOG_RETENTION_DAYS` | 30 | Auto-delete logs older than N days |
 
@@ -180,6 +182,7 @@ Priority for shared knobs: CLI flag > env var > workflow setting in tasks.json >
     "verifyRetries": 1,
     "smokeTest": { "command": "dotnet build", "timeoutSec": 180 },
     "autoRollbackOnSmokeFail": false,
+    "autoFixSmoke": false,
     "categories": ["plan", "implementation", "testing", "commit"]
   }
 }
@@ -188,6 +191,7 @@ Priority for shared knobs: CLI flag > env var > workflow setting in tasks.json >
 - `verifyRetries` — self-fix retries when `verification.command` exits non-zero (default 1, 0 disables).
 - `smokeTest` — single command run on the base branch after each merge batch. Auto-inferred from repo-root markers (`*.csproj`/`*.sln` → `dotnet build`, `package.json` → `npm test`, `Cargo.toml` → `cargo build`, `go.mod` → `go build`). Explicit value always wins. Disable with `--no-smoke-test` / `RALPH_NO_SMOKE_TEST=true`.
 - `autoRollbackOnSmokeFail` — opt-in auto-rollback when smoke test fails. Captures pre-batch SHA, then revert-merges this batch's commits and resets the affected tasks' `done` bits to pending. Held (no rollback) when working tree is dirty or external commits intervened. CLI `--auto-rollback-on-smoke-fail` and env `RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL=true` are equivalent and override this.
+- `autoFixSmoke` — opt-in auto-fix attempt when smoke test fails. Before falling through to auto-rollback / batch failure, ralph captures the failed command + stdout/stderr + this batch's changed files and invokes Claude **once** in repo root with full tools to fix the underlying cause. If Claude's changes make smoke pass, a single `[smoke-fix] ...` commit is left on base and the run continues. If Claude makes no changes or smoke still fails, the fix commit is hard-reset away and the original failure path resumes (auto-rollback if enabled, else batch failure). Skipped when HEAD is off `baseBranch` or working tree is dirty. CLI `--auto-fix-smoke` and env `RALPH_AUTO_FIX_SMOKE=true` are equivalent and override this. Cost is recorded under `smoke-fix` in `cost.jsonl`.
 - `categories` — override the default 4-stage list (`plan / implementation / testing / commit`) when generating plans.
 
 ## Conventions

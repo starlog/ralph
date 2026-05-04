@@ -18,4 +18,5 @@ public sealed record RunOptions(
     bool SharedWorktrees = false,
     bool NoSmokeTest = false,
     string? SmokeTestCommandOverride = null,
-    bool AutoRollbackOnSmokeFail = false);
+    bool AutoRollbackOnSmokeFail = false,
+    bool AutoFixSmoke = false);

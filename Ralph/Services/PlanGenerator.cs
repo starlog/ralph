@@ -407,6 +407,17 @@ public partial class PlanGenerator
 
                If unsure, **prefer omitting `workflow.smokeTest` over guessing a file list**.
 
+            15. **Config files must be internally self-consistent.** When a setup/scaffold task creates a config file (`tsconfig.json`, `pyproject.toml`, `Cargo.toml`, `vite.config.ts`, `webpack.config.js`, `eslint.config.*`, etc.), the options inside that file must NOT contradict each other — even if individually each option looks plausible. Examples of contradictions that have caused latent failures in past runs:
+
+               - `tsconfig.json` with `"rootDir": "src"` AND `"include": ["src/**/*", "tests/**/*"]` — `tests/` lives outside `rootDir`. Compiles fine while `tests/` is empty (e.g., only `.gitkeep`), then explodes with `TS6059` the first time a later task adds a `.ts` file under `tests/`. If you want tests included, either drop `rootDir`, set `rootDir: "."`, or maintain a separate `tsconfig.test.json` that extends the base.
+               - `pyproject.toml` declaring a package layout (`[tool.setuptools.packages.find] where = ["src"]`) while sources live at the project root.
+               - `Cargo.toml` with `[lib] path = "src/lib.rs"` while the file is actually at `src/main.rs` (or vice versa).
+               - ESLint flat config that `extends` a preset incompatible with `parserOptions.ecmaVersion`.
+
+               Before finalizing a setup-task prompt that emits a config file, mentally run through the file's options pairwise and ask: "if a later task adds a normal file matching `include`/`paths`/`packages`, will the build/typecheck still pass?" If the answer is "only because the matched directory is currently empty," the config is wrong — fix it now, not after the latent bug detonates mid-run.
+
+               This is broader than tooling-specific lint: per-task `verification.command` cannot catch config self-contradictions when the contradicting input doesn't yet exist (e.g., empty `tests/`), and `workflow.smokeTest` will only fire once a later batch creates the triggering file. Plan the config correctly the first time.
+
             ## JSON Schema
             """);
 
