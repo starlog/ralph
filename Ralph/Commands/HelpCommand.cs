@@ -50,6 +50,7 @@ public sealed class HelpCommand : ICommand
         AnsiConsole.MarkupLine("  [green]--smoke-test[/] <cmd>   1회용 smoke test 명령 override (workflow.smokeTest와 자동 추론을 모두 우회)");
         AnsiConsole.MarkupLine("  [green]--auto-fix-smoke[/]     smoke 실패 시 Claude를 1회 호출해 base에서 자동 수정 (실패 시 fix 폐기)");
         AnsiConsole.MarkupLine("  [green]--auto-rollback-on-smoke-fail[/]  smoke 실패 시 batch의 머지 커밋들을 자동 revert");
+        AnsiConsole.MarkupLine("  [green]--strict-cleanup[/]     pre-rebase cleanup이 미선언 소스 파일을 폐기하려 하면 즉시 중단 (plan 결함 fail-fast)");
         AnsiConsole.MarkupLine("  [green]--llm-critique[/]       --plan 직후 LLM 기반 PRD/plan 비평 추가 1회 실행 (기본 off, 추가 비용)");
         AnsiConsole.MarkupLine("  [green]--budget-usd[/] <amt>   누적 비용이 amt(USD) 도달 시 새 태스크 시작 중단 (--run only)");
         AnsiConsole.MarkupLine("  [green]--task-timeout[/] <dur> Per-Claude-call timeout (예: 30m, 1h, 90s, 1800). hang 방지");
@@ -73,6 +74,7 @@ public sealed class HelpCommand : ICommand
         AnsiConsole.MarkupLine("  RALPH_SMOKE_TEST_COMMAND    Override smoke test 명령. CLI --smoke-test가 우선");
         AnsiConsole.MarkupLine("  RALPH_AUTO_FIX_SMOKE        'true'/'1' 시 smoke 실패에 Claude로 자동 수정 시도. CLI --auto-fix-smoke가 우선");
         AnsiConsole.MarkupLine("  RALPH_AUTO_ROLLBACK_ON_SMOKE_FAIL  'true'/'1' 시 smoke 실패에 batch 자동 revert. CLI --auto-rollback-on-smoke-fail이 우선");
+        AnsiConsole.MarkupLine("  RALPH_STRICT_CLEANUP        'true'/'1' 시 pre-rebase cleanup이 미선언 소스 폐기하면 즉시 중단. CLI --strict-cleanup이 우선");
         AnsiConsole.MarkupLine("  RALPH_BUDGET_USD            누적 비용 임계값(USD). CLI --budget-usd가 우선");
         AnsiConsole.MarkupLine("  RALPH_TASK_TIMEOUT_SEC      Per-Claude-call timeout(seconds). CLI --task-timeout이 우선");
         AnsiConsole.MarkupLine("  RALPH_WEBHOOK_URL           Default webhook for session completion notifications");

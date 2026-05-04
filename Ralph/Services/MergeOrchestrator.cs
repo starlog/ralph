@@ -128,7 +128,7 @@ internal sealed class MergeOrchestrator
             // 같은 batch의 앞선 머지로 baseBranch가 advance된 경우 충돌 감소를 위해 rebase.
             // fix2 #5: rebase 충돌은 silent fallback 없이 RebaseConflict로 분류해 task만 실패.
             var advance = await _worktree.AdvanceWorktreeOntoBaseAsync(
-                taskId, baseBranch, _logger, ct);
+                taskId, baseBranch, _logger, _options.StrictCleanup, ct);
 
             if (!advance.Success && advance.FailureKind == MergeFailureKind.RebaseConflict)
             {

@@ -153,6 +153,21 @@ public sealed class RunCommand : ICommand
                 logger.Info($"auto-fix-smoke enabled (source: {origin})");
             }
 
+            // pre-rebase cleanup이 미선언 소스 파일을 폐기하려 할 때 즉시 중단 — opt-in.
+            // CLI > env > false (workflow에 두지 않음 — 메타-안전 정책이라 사용자가 명시 활성화).
+            var cliStrictCleanup = _ctx.Args.Contains("--strict-cleanup");
+            var envStrictCleanupRaw = Environment.GetEnvironmentVariable(
+                "RALPH_STRICT_CLEANUP")?.ToLowerInvariant();
+            var envStrictCleanup = envStrictCleanupRaw is "true" or "1";
+            var strictCleanup = cliStrictCleanup || envStrictCleanup;
+            if (strictCleanup)
+            {
+                var origin = cliStrictCleanup ? "CLI" : "env";
+                AnsiConsole.MarkupLine(
+                    $"[cyan]Strict cleanup:[/] 미선언 소스 파일 폐기 시 즉시 중단 [dim]({origin})[/]");
+                logger.Info($"strict-cleanup enabled (source: {origin})");
+            }
+
             var runOptions = new RunOptions(
                 TasksFile: _ctx.TasksFile,
                 ModelOverride: modelOverride,
@@ -162,7 +177,8 @@ public sealed class RunCommand : ICommand
                 NoSmokeTest: _ctx.NoSmokeTest,
                 SmokeTestCommandOverride: _ctx.SmokeTestCommandOverride,
                 AutoRollbackOnSmokeFail: autoRollbackOnSmokeFail,
-                AutoFixSmoke: autoFixSmoke);
+                AutoFixSmoke: autoFixSmoke,
+                StrictCleanup: strictCleanup);
 
             var executor = new ParallelExecutor(
                 tm, claude, git, worktree, logger, runOptions, cost: costTracker);

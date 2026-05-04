@@ -458,7 +458,8 @@ public class WorktreeService
     /// 호출자는 분류에 따라 task만 실패 처리하거나 batch를 중단합니다 (silent 3-way fallback 없음).
     /// </summary>
     public async Task<MergeResult> AdvanceWorktreeOntoBaseAsync(
-        string taskId, string baseRef, RalphLogger? logger = null, CancellationToken ct = default)
+        string taskId, string baseRef, RalphLogger? logger = null,
+        bool strictCleanup = false, CancellationToken ct = default)
     {
         logger ??= RalphLogger.Null;
         var worktreePath = Path.GetFullPath(Path.Combine(_worktreeBase, taskId));
@@ -469,7 +470,8 @@ public class WorktreeService
         // testing task가 흔히 흘리는 coverage / vitest cache / package-lock 같은
         // 부산물이 "cannot rebase: You have unstaged changes" preflight 실패로 batch를
         // 깨뜨리던 케이스를 일관되게 차단.
-        await PreRebaseCleanupAsync(taskId, worktreePath, logger, ct);
+        // strictCleanup=true면 source 파일이 폐기 대상이면 fail-fast로 throw.
+        await PreRebaseCleanupAsync(taskId, worktreePath, logger, strictCleanup, ct);
 
         var (exitCode, output) = await _git.RunAsync(
             ["rebase", baseRef], worktreePath, ct);
@@ -549,7 +551,8 @@ public class WorktreeService
     /// near-no-op이며 실패해도 흐름을 깨지 않는다.
     /// </summary>
     private async Task PreRebaseCleanupAsync(
-        string taskId, string worktreePath, RalphLogger logger, CancellationToken ct)
+        string taskId, string worktreePath, RalphLogger logger,
+        bool strictCleanup, CancellationToken ct)
     {
         var snapshot = await TryCaptureStatusSnapshotAsync(worktreePath, ct);
         if (snapshot.Length > 0)
@@ -558,6 +561,36 @@ public class WorktreeService
             logger.Info(
                 $"[merge:advance] {taskId} pre-rebase 정리 — 미선언 변경 {lineCount}건 폐기:\n  " +
                 snapshot.Replace("\n", "\n  "));
+
+            // 분류: source 파일이 undeclared로 남아있으면 plan에서 outputFiles 누락된
+            // 진짜 코드일 가능성이 높다. 시각적으로 알리거나 (strict면) 즉시 중단.
+            var report = CleanupClassifier.Classify(snapshot);
+            if (report.SourceFiles.Count > 0)
+            {
+                var preview = string.Join("\n  ", report.SourceFiles.Take(10));
+                var more = report.SourceFiles.Count - Math.Min(10, report.SourceFiles.Count);
+                var msg =
+                    $"[red]⚠ {taskId}: pre-rebase cleanup이 미선언 소스 파일 " +
+                    $"{report.SourceFiles.Count}개를 폐기하려 합니다.[/]\n" +
+                    $"[yellow]plan에서 outputFiles/modifiedFiles 누락 가능성 — " +
+                    $"머지 후 base에서 import 깨짐을 유발할 수 있습니다.[/]\n" +
+                    $"폐기 대상:\n  {Spectre.Console.Markup.Escape(preview)}" +
+                    (more > 0 ? $"\n  ... (+{more}개)" : "");
+                Spectre.Console.AnsiConsole.MarkupLine(msg);
+                logger.Warn(
+                    $"[merge:advance] {taskId} undeclared source files about to be discarded: " +
+                    string.Join(", ", report.SourceFiles));
+
+                if (strictCleanup)
+                {
+                    var bare =
+                        $"{taskId}: pre-rebase cleanup이 미선언 소스 파일 " +
+                        $"{report.SourceFiles.Count}개를 폐기하려 합니다 (--strict-cleanup 활성). " +
+                        $"plan의 outputFiles에 추가하거나 task prompt에서 해당 파일을 만들지 않게 수정하세요.\n" +
+                        $"파일: {string.Join(", ", report.SourceFiles)}";
+                    throw new RalphUserException(bare);
+                }
+            }
         }
 
         var (resetExit, resetOut) = await _git.RunAsync(

@@ -19,4 +19,5 @@ public sealed record RunOptions(
     bool NoSmokeTest = false,
     string? SmokeTestCommandOverride = null,
     bool AutoRollbackOnSmokeFail = false,
-    bool AutoFixSmoke = false);
+    bool AutoFixSmoke = false,
+    bool StrictCleanup = false);
