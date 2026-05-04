@@ -158,7 +158,7 @@ public static class RalphIgnoreGuard
             "추적 중인 엔트리:\n  " + string.Join("\n  ", preview) +
             (more > 0 ? $"\n  ... (+{more}개)" : "") +
             "\n\n해결 (한 번만 실행):\n" +
-            "  git rm --cached -r " + string.Join(' ', ManagedSegments) + "\n" +
+            "  git rm --cached -r --ignore-unmatch " + string.Join(' ', ManagedSegments) + "\n" +
             "  git commit -m \"chore: ralph artifact 경로 untrack\"\n\n" +
             "이후 ralph가 .git/info/exclude에 이 경로들을 자동 등록해 재발을 막습니다.";
 
