@@ -129,7 +129,7 @@ public class RalphIgnoreGuardTests
                 ["commit", "-m", "accidentally tracked"], repo);
             Assert.Equal(0, e3);
 
-            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            var ex = await Assert.ThrowsAsync<RalphUserException>(() =>
                 RalphIgnoreGuard.EnsureAsync(git, repo, RalphLogger.Null));
 
             Assert.Contains(".ralph-smoke", ex.Message);
@@ -157,7 +157,7 @@ public class RalphIgnoreGuardTests
             var (e2, _) = await git.RunAsync(["commit", "-m", "oops"], repo);
             Assert.Equal(0, e2);
 
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            await Assert.ThrowsAsync<RalphUserException>(() =>
                 RalphIgnoreGuard.EnsureAsync(git, repo, RalphLogger.Null));
         }
         finally

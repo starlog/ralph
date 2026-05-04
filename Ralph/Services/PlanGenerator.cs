@@ -442,6 +442,19 @@ public partial class PlanGenerator
 
                This rule overrides any earlier rule that suggested whole-project commands. The earlier examples like `dotnet test` / `npm test --silent` were correct for project-level smoke tests but wrong for per-task verification. Use this rule's file-scoped forms for `verification.command`. Use rule 14's whole-project forms for `workflow.smokeTest`.
 
+            16.1. **TypeScript test tasks MUST chain `tsc --noEmit` before vitest/jest (CRITICAL — fixes silent type-error pass-through).** Vitest and Jest transpile TypeScript via esbuild/swc and execute the JS — they do NOT enforce strict type checking. So a test file that misuses types (e.g., `Record<Seat, Card[]>` populated with only seat 0) runs fine under vitest but fails `tsc -p tsconfig.json`. Result: per-task verification (`vitest run tests/X.test.ts`) reports pass, the task gets merged, and post-merge `workflow.smokeTest` (which usually runs `tsc`/`npm run build`) catches the type error and triggers auto-rollback — wasting a full batch.
+
+               For every test task that runs vitest or jest on TypeScript, prepend a typecheck step:
+
+               PREFERRED forms:
+               - `npx tsc --noEmit -p tsconfig.json && npx vitest run tests/X.test.ts` — the typecheck is whole-project (TS module resolution requires it), but it runs against the worktree which already contains all dependsOn outputs.
+               - If the project has a separate test tsconfig: `npx tsc --noEmit -p tsconfig.test.json && npx vitest run tests/X.test.ts`.
+               - For plain JS tests (no `.ts` files in `tests/`), the typecheck step is unnecessary — vitest alone is fine.
+
+               WHY whole-project tsc here is OK (unlike rule 16's per-task tsc warning): test tasks have `dependsOn: [<feature>-impl]`, which means the impl is already merged into base before the test task starts. The worktree therefore contains all the source files needed for tsc to resolve imports. Skipping this step let `play-test`-like cases through in past runs.
+
+               Apply the same logic to other transpile-then-execute test runners: jest with `--no-typecheck` (default), bun test on TS, etc. Compiled-language test runners (`go test`, `cargo test`, `dotnet test`, `pytest` with type stubs) already perform their own type checks during compilation/import and don't need the prepended step.
+
             ## JSON Schema
             """);
 

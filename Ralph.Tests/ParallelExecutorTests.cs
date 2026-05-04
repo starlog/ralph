@@ -424,7 +424,8 @@ public class ParallelExecutorTests : IDisposable
     private sealed class WorktreeAwareRunner : IAgentRunner
     {
         private readonly Func<string, string?, ClaudeResult> _callback;
-        public int CallCount { get; private set; }
+        private int _callCount;
+        public int CallCount => Volatile.Read(ref _callCount);
         public bool Debug { get; set; }
         public int? TaskTimeoutSec { get; set; }
 
@@ -438,7 +439,7 @@ public class ParallelExecutorTests : IDisposable
             RalphLogger? logger = null, TextWriter? output = null,
             CancellationToken ct = default, string? allowedTools = null)
         {
-            CallCount++;
+            Interlocked.Increment(ref _callCount);
             return Task.FromResult(_callback(prompt, workingDirectory));
         }
 
