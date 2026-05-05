@@ -181,9 +181,10 @@ public sealed class PlanCommand : ICommand
         {
             warningCorrectionAttempt++;
             var infoCount = report.Warnings.Count - actionableWarnings.Count;
+            // [info]는 Spectre markup이 style로 잘못 해석하지 않게 [[ ]]로 이스케이프.
             AnsiConsole.MarkupLine(
                 $"\n[yellow]⚠ Plan 검증 actionable 경고 {actionableWarnings.Count}개" +
-                (infoCount > 0 ? $" ([dim]+{infoCount}개 [info] 생략[/])" : "") +
+                (infoCount > 0 ? $" ([dim]+{infoCount}개 [[info]] 생략[/])" : "") +
                 $". AI 정정으로 개선합니다 (시도 {warningCorrectionAttempt}/{maxWarningCorrectionAttempts}):[/]");
             foreach (var w in actionableWarnings)
                 AnsiConsole.MarkupLine($"  [yellow]•[/] {Markup.Escape(w)}");

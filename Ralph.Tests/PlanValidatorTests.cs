@@ -711,6 +711,42 @@ public class PlanValidatorTests
         Assert.DoesNotContain(r.Warnings, w => w.Contains("npx"));
     }
 
+    [Theory]
+    [InlineData("npm ci --silent && npx tsc --noEmit src/foo.ts")]
+    [InlineData("test -d node_modules || npm ci --silent; npx tsc --noEmit src/foo.ts")]
+    [InlineData("test -d node_modules || npm ci --silent --no-audit --no-fund >/dev/null 2>&1; npx tsc --noEmit src/foo.ts")]
+    [InlineData("npm install && npx vitest run tests/foo.test.ts")]
+    [InlineData("pnpm install --frozen-lockfile && npx tsc --noEmit src/foo.ts")]
+    [InlineData("yarn install --frozen-lockfile && npx tsc --noEmit src/foo.ts")]
+    [InlineData("bun install && bunx tsc --noEmit src/foo.ts")]
+    public async Task Verification_NpxWithSelfBootstrap_NoWarning(string command)
+    {
+        // npx 호출 앞/뒤에 install 단계가 있으면 cold install이 아니라 lockfile 기반 install이므로 OK.
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/foo.ts"],
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Warnings,
+            w => w.Contains("verification.command") && w.Contains("npx"));
+    }
+
+    [Fact]
+    public async Task SmokeTest_NpxWithSelfBootstrap_NoWarning()
+    {
+        var encoded = System.Text.Json.JsonSerializer.Serialize(
+            "npm ci --silent && npx tsc --noEmit && npx vitest run --silent");
+        var json = "{\"tasks\":[{\"id\":\"x\",\"title\":\"X\",\"prompt\":\"p\"}],"
+                 + "\"workflow\":{\"smokeTest\":{\"command\":" + encoded + "}}}";
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("workflow.smokeTest") && w.Contains("npx"));
+    }
+
     [Fact]
     public async Task SmokeTest_NpxUsage_IsWarning()
     {

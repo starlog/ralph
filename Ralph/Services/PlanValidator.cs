@@ -94,6 +94,17 @@ public static class PlanValidator
         RegexOptions.Compiled);
 
     /// <summary>
+    /// 같은 명령 안에 자기-부트스트랩 install 단계가 포함되어 있는지 검사. 있으면 npx 호출이
+    /// cold install이 아니라 lockfile 기반 결정론적 install 후 실행되므로 경고를 건너뛴다.
+    /// 패턴: `npm ci`, `npm install`, `pnpm install`, `pnpm i`, `yarn install`, `yarn` (인자 없는),
+    /// `bun install`. 또한 `test -d node_modules || npm ci` 같은 가드도 자연스럽게 포함된다 —
+    /// 명령 어디에든 install 토큰이 등장하면 OK로 본다.
+    /// </summary>
+    private static readonly Regex SelfBootstrapInstallPattern = new(
+        @"(?<![\w.\-/])(?:npm\s+(?:ci|install)|pnpm\s+(?:install|i)\b|yarn\s+install|bun\s+install)",
+        RegexOptions.Compiled);
+
+    /// <summary>
     /// 보편적인 npm/yarn/pnpm/bun lockfile 이름 — package.json 을 만드는 task가 lockfile을
     /// outputFiles에 선언하지 않으면 머지 후 base에 lockfile이 빠져 후속 worktree가 `npm ci`로
     /// 결정론적 install을 못한다 (cold install 누적). 개선 D 보조 검사.
@@ -461,15 +472,19 @@ public static class PlanValidator
             if (string.IsNullOrWhiteSpace(cmd)) continue;
             var stripped = StripStringLiterals(cmd);
             var npxMatch = NpxRunnerPattern.Match(stripped);
-            if (npxMatch.Success)
-            {
-                var tool = npxMatch.Groups[1].Value;
-                report.Warnings.Add(
-                    $"'{task.Id}' verification.command이 `npx {tool}`을 사용합니다 — git worktree에는 " +
-                    "node_modules가 없어 매 task마다 cold install이 발생하고 package.json의 pinned 버전이 무시됩니다. " +
-                    "`npm test` / `npm run build` 같은 npm script로 감싸거나, scaffold task의 outputFiles에 " +
-                    "`package-lock.json`을 추가해 후속 worktree가 base lockfile로 `npm ci`를 수행하게 하세요.");
-            }
+            if (!npxMatch.Success) continue;
+            // 같은 명령 안에 npm ci / npm install / pnpm install / yarn install / bun install이
+            // 함께 있으면 self-bootstrap이므로 경고 건너뜀. `test -d node_modules || npm ci; npx ...`
+            // 같은 가드 패턴도 자연스럽게 포함된다.
+            if (SelfBootstrapInstallPattern.IsMatch(stripped)) continue;
+
+            var tool = npxMatch.Groups[1].Value;
+            report.Warnings.Add(
+                $"'{task.Id}' verification.command이 `npx {tool}`을 사용합니다 — git worktree에는 " +
+                "node_modules가 없어 매 task마다 cold install이 발생하고 package.json의 pinned 버전이 무시됩니다. " +
+                "`npm test` / `npm run build` 같은 npm script로 감싸거나, scaffold task의 outputFiles에 " +
+                "`package-lock.json`을 추가해 후속 worktree가 base lockfile로 `npm ci`를 수행하게 하세요. " +
+                "또는 명령 자체에 `test -d node_modules || npm ci --silent; ...` 같은 self-bootstrap을 추가하세요.");
         }
 
         // 11. (개선 C) workflow.smokeTest가 specific source files를 enumerate하면 error.
@@ -493,12 +508,12 @@ public static class PlanValidator
                     "안전한 명령이 없으면 workflow.smokeTest를 비워두세요(ralph가 stack을 자동 추론합니다).");
             }
 
-            // 11.6. (개선 D) smoke가 `npx <tool>`을 사용하면 warn — `.ralph-smoke` worktree에는
-            //       node_modules가 없으므로 매 batch마다 cold install이 반복된다. 240s timeout으로는
-            //       빠듯하고 npm registry 일시 장애에 취약. `npm ci && npm test` 형태로 lockfile
-            //       기반 결정론적 install + 테스트를 한 번에 수행하도록 권장.
+            // 11.6. (개선 D) smoke가 `npx <tool>`을 사용하고 self-bootstrap install이 없으면 warn.
+            //       `.ralph-smoke` worktree에는 node_modules가 없어 매 batch마다 cold install이
+            //       반복되어 240s timeout으로 빠듯하고 npm registry 일시 장애에 취약. `npm ci`로
+            //       lockfile 기반 결정론적 install을 명시적으로 추가하도록 권장.
             var smokeNpxMatch = NpxRunnerPattern.Match(stripped);
-            if (smokeNpxMatch.Success)
+            if (smokeNpxMatch.Success && !SelfBootstrapInstallPattern.IsMatch(stripped))
             {
                 var tool = smokeNpxMatch.Groups[1].Value;
                 report.Warnings.Add(
