@@ -85,6 +85,25 @@ public static class PlanValidator
     /// <summary>VC-BACKTICK-EXTERN 에 매치되지 않은 잔여 일반 backtick 치환.</summary>
     private static readonly Regex GenericBacktickPattern = new(@"`[^`]+`", RegexOptions.Compiled);
 
+    /// <summary>
+    /// verification.command / workflow.smokeTest.command에서 declared 검사를 위해
+    /// "이 토큰은 source 파일 경로다" 라고 인식할 확장자 화이트리스트.
+    /// 컴파일/빌드 매니페스트(.csproj/.sln/.fsproj)도 포함 — `dotnet build src/Foo/Foo.csproj`
+    /// 같은 호출도 declared scope 안에 있어야 한다.
+    /// </summary>
+    private static readonly HashSet<string> SourceFileExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte",
+        ".py", ".pyi",
+        ".go", ".rs",
+        ".cs", ".fs", ".vb", ".csproj", ".fsproj", ".vbproj", ".sln",
+        ".java", ".kt", ".kts", ".scala",
+        ".rb", ".php", ".swift", ".m", ".mm",
+        ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".hh",
+        ".lua", ".dart", ".ex", ".exs", ".clj", ".cljs",
+        ".sql", ".proto", ".graphql",
+    };
+
     /// <summary>알려진 빌드/테스트 러너. 첫 토큰이 여기에 없으면 [info] 권장 메시지를 추가한다.</summary>
     private static readonly string[] WhitelistedTools =
     [
@@ -359,7 +378,151 @@ public static class PlanValidator
             }
         }
 
+        // 9. (개선 A) implementation/testing 카테고리 task은 outputFiles ∪ modifiedFiles ≥ 1.
+        //    빈 set이면 (1) file-scoped verification이 무의미하고 (2) pre-rebase cleanup의
+        //    `git reset --hard HEAD && git clean -fd` 가 worktree의 모든 변경을 silent
+        //    discard 하므로 머지 후 base에서 import 깨짐 → smoke 실패 → auto-rollback.
+        //    mighty2 측정에서 batch 한 사이클을 통째 날린 가장 흔한 패턴.
+        foreach (var task in tasks)
+        {
+            if (task.Category != "implementation" && task.Category != "testing") continue;
+            var declaredCount = (task.OutputFiles?.Count ?? 0) + (task.ModifiedFiles?.Count ?? 0);
+            if (declaredCount == 0)
+            {
+                report.Errors.Add(
+                    $"'{task.Id}' (category={task.Category})는 outputFiles와 modifiedFiles가 모두 비어있습니다. " +
+                    "이 task가 만들거나 수정할 파일을 outputFiles에 명시하세요. " +
+                    "미선언 파일은 머지 직전 pre-rebase cleanup으로 폐기되어 smoke 실패의 직접 원인이 됩니다.");
+            }
+        }
+
+        // 10. (개선 B) verification.command이 source 파일 경로를 enumerate한다면 그 파일은
+        //     반드시 task의 outputFiles ∪ modifiedFiles ∪ deps의 outputFiles/modifiedFiles에
+        //     속해야 한다. 빠진 파일은 worktree에 존재하지 않거나(머지 누락) silent discard
+        //     대상이 되어 verification은 통과해도 머지 후 같은 명령이 base에서 깨진다.
+        //     실 plan은 항상 category 또는 declared scope를 갖는다 — 둘 다 비어있는 task는
+        //     legacy/test 데이터 형태이므로 이 검사에서 제외한다.
+        // 중복 ID는 위 1번에서 이미 error로 보고됨. 여기서는 예외를 피하기 위해 첫 항목만 채택.
+        var taskById = tasks
+            .Where(t => !string.IsNullOrEmpty(t.Id))
+            .GroupBy(t => t.Id, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        foreach (var task in tasks)
+        {
+            var cmd = task.Verification?.Command;
+            if (string.IsNullOrWhiteSpace(cmd)) continue;
+            var hasCategory = !string.IsNullOrWhiteSpace(task.Category);
+            var hasDeclared = (task.OutputFiles?.Count ?? 0) + (task.ModifiedFiles?.Count ?? 0) > 0;
+            if (!hasCategory && !hasDeclared) continue;
+
+            var declared = BuildDeclaredScope(task, taskById);
+            var stripped = StripStringLiterals(cmd);
+            var fileTokens = ExtractFileTokens(stripped);
+            foreach (var token in fileTokens)
+            {
+                var norm = NormalizeRepoPath(token);
+                if (!declared.Contains(norm))
+                {
+                    report.Errors.Add(
+                        $"'{task.Id}' verification.command이 파일 '{token}'을 참조하는데 " +
+                        "이 파일이 task의 outputFiles/modifiedFiles 또는 의존 task의 outputFiles에 없습니다. " +
+                        "해당 파일을 outputFiles/modifiedFiles에 추가하거나 verification 명령에서 제거하세요. " +
+                        "(미선언 파일은 pre-rebase cleanup으로 폐기되어 머지 후 base에서 사라집니다.)");
+                }
+            }
+        }
+
+        // 11. (개선 C) workflow.smokeTest가 specific source files를 enumerate하면 error.
+        //     smoke는 모든 batch마다 base 위에서 실행되므로 후속 batch가 만들 파일은 첫 batch
+        //     시점에 존재하지 않는다. 파일을 나열하는 명령은 첫 batch부터 false-failure를 만들고
+        //     auto-rollback을 유발한다. 전체 트리 명령(pytest -q, npm test, dotnet test 등)으로
+        //     교체하거나, 안전한 명령이 없으면 workflow.smokeTest를 생략(ralph 자동 추론).
+        var smokeCmd = tm.Data.Workflow?.SmokeTest?.Command;
+        if (!string.IsNullOrWhiteSpace(smokeCmd))
+        {
+            var stripped = StripStringLiterals(smokeCmd!);
+            var fileTokens = ExtractFileTokens(stripped);
+            if (fileTokens.Count > 0)
+            {
+                report.Errors.Add(
+                    $"workflow.smokeTest.command이 specific source 파일을 enumerate합니다 ({string.Join(", ", fileTokens.Take(5))}" +
+                    (fileTokens.Count > 5 ? $" 외 {fileTokens.Count - 5}건" : "") + "). " +
+                    "smoke는 batch마다 base에서 실행되므로 후속 batch가 만들 파일은 첫 batch에 아직 없습니다. " +
+                    "전체 트리 명령(예: 'pytest -q', 'npm run build && npm test --silent', 'dotnet build && dotnet test', " +
+                    "'cargo build && cargo test', 'go build ./... && go test ./...')으로 교체하거나, " +
+                    "안전한 명령이 없으면 workflow.smokeTest를 비워두세요(ralph가 stack을 자동 추론합니다).");
+            }
+        }
+
         return report;
+    }
+
+    /// <summary>
+    /// task 본인의 outputFiles ∪ modifiedFiles에 deps 체인의 outputFiles ∪ modifiedFiles를 합쳐
+    /// "이 task가 verification 시점에 worktree에서 참조 가능한 파일" 의 normalized set을 만든다.
+    /// 경로는 forward-slash로 정규화하고 trim해 비교 안정성을 확보한다.
+    /// </summary>
+    private static HashSet<string> BuildDeclaredScope(
+        TaskItem task, IReadOnlyDictionary<string, TaskItem> taskById)
+    {
+        var scope = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddNormalized(scope, task.OutputFiles);
+        AddNormalized(scope, task.ModifiedFiles);
+        if (task.DependsOn is { Count: > 0 })
+        {
+            foreach (var depId in task.DependsOn)
+            {
+                if (!taskById.TryGetValue(depId, out var dep)) continue;
+                AddNormalized(scope, dep.OutputFiles);
+                AddNormalized(scope, dep.ModifiedFiles);
+            }
+        }
+        return scope;
+    }
+
+    private static void AddNormalized(HashSet<string> set, IList<string>? files)
+    {
+        if (files is not { Count: > 0 }) return;
+        foreach (var f in files)
+        {
+            if (string.IsNullOrWhiteSpace(f)) continue;
+            set.Add(NormalizeRepoPath(f));
+        }
+    }
+
+    private static string NormalizeRepoPath(string path)
+        => path.Replace('\\', '/').Trim().TrimStart('/');
+
+    /// <summary>
+    /// shell 명령에서 source 파일로 보이는 토큰을 추출한다. flag(`-x`/`--y`),
+    /// glob(`*`/`?`), 디렉터리(`tests/`), 셸 메타문자만 있는 토큰은 제외한다.
+    /// 입력은 string-literal이 이미 stripped된 상태여야 한다 (false positive 방지).
+    /// </summary>
+    private static IReadOnlyList<string> ExtractFileTokens(string strippedCmd)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(strippedCmd)) return result;
+
+        var separators = new[] { ' ', '\t', '\n', '\r' };
+        foreach (var raw in strippedCmd.Split(separators, StringSplitOptions.RemoveEmptyEntries))
+        {
+            // 양 끝 셸 메타/구두점 제거 — `cmd1;` `(cmd)` 같은 형태에서 토큰만 남긴다.
+            var tok = raw.Trim().Trim(';', '&', '|', '(', ')', '"', '\'', '`', ',', ':');
+            if (tok.Length == 0) continue;
+            if (tok.StartsWith("-")) continue;            // flag
+            if (tok.Contains('*') || tok.Contains('?')) continue; // glob
+            if (tok.EndsWith("/") || tok.EndsWith("\\")) continue; // directory
+            if (tok.Contains('=')) continue;              // env assignment / kw arg
+            if (tok.StartsWith("$") || tok.StartsWith("`")) continue; // env / cmd-sub residue
+
+            // 확장자 검사 — Path.GetExtension은 path가 dot으로 시작해도 안전하게 동작.
+            var ext = Path.GetExtension(tok);
+            if (string.IsNullOrEmpty(ext)) continue;
+            if (!SourceFileExtensions.Contains(ext)) continue;
+
+            result.Add(tok);
+        }
+        return result;
     }
 
     /// <summary>

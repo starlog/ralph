@@ -163,9 +163,11 @@ public class PlanValidatorTests
     [Fact]
     public async Task Testing_category_without_test_keyword_is_warning()
     {
+        // outputFiles 명시 — 개선 A(implementation/testing은 declared files 필수)에 걸리지 않게.
+        // 본 테스트의 의도는 category-prompt 키워드 불일치 경고이므로, declared scope는 충족시킨다.
         var tm = await Tm("""
         {"tasks":[
-          {"id":"x-test","title":"Test","done":false,"category":"testing","prompt":"do something else"}
+          {"id":"x-test","title":"Test","done":false,"category":"testing","prompt":"do something else","outputFiles":["tests/x.test.ts"]}
         ]}
         """);
         var r = PlanValidator.Validate(tm);
@@ -439,5 +441,233 @@ public class PlanValidatorTests
         Assert.False(r.HasErrors, $"unexpected errors: {string.Join("; ", r.Errors)}");
         Assert.True(r.HasWarnings, "expected [info] warning for unknown tool");
         Assert.Contains(r.Warnings, w => w.Contains("[info]") && w.Contains("mytool"));
+    }
+
+    // --- 개선 A: implementation/testing 카테고리는 declared files 필수 ---
+
+    [Theory]
+    [InlineData("implementation")]
+    [InlineData("testing")]
+    public async Task DeclaredScope_ImplOrTesting_EmptyDeclared_IsError(string category)
+    {
+        var json = $$"""
+        {"tasks":[
+          {"id":"x","title":"X","prompt":"do something","category":"{{category}}"}
+        ]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.True(r.HasErrors, $"expected error for category={category} with empty declared scope");
+        Assert.Contains(r.Errors, e =>
+            e.Contains($"category={category}")
+            && (e.Contains("outputFiles") || e.Contains("modifiedFiles"))
+            && e.Contains("비어있"));
+    }
+
+    [Fact]
+    public async Task DeclaredScope_ImplWithOutputFiles_NoError()
+    {
+        var json = """
+        {"tasks":[
+          {"id":"x","title":"X","prompt":"do","category":"implementation","outputFiles":["src/foo.ts"]}
+        ]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("비어있"));
+    }
+
+    [Fact]
+    public async Task DeclaredScope_TestingWithModifiedFilesOnly_NoError()
+    {
+        var json = """
+        {"tasks":[
+          {"id":"x","title":"X","prompt":"do","category":"testing","modifiedFiles":["tests/x.test.ts"]}
+        ]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("비어있"));
+    }
+
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("commit")]
+    public async Task DeclaredScope_PlanOrCommit_EmptyDeclared_NoError(string category)
+    {
+        // plan/commit은 산출물(파일 변경)이 없을 수 있으므로 빈 declared scope 허용.
+        var json = $$"""
+        {"tasks":[
+          {"id":"x","title":"X","prompt":"do","category":"{{category}}"}
+        ]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("비어있"));
+    }
+
+    [Fact]
+    public async Task DeclaredScope_NoCategory_EmptyDeclared_NoError()
+    {
+        // category 미지정 task는 기존 동작 유지 — 개선 A는 implementation/testing에만 적용.
+        var json = """
+        {"tasks":[
+          {"id":"x","title":"X","prompt":"p"}
+        ]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("비어있"));
+    }
+
+    // --- 개선 B: verification.command 파일 참조 ⊆ declared scope ---
+
+    [Fact]
+    public async Task VerificationFiles_RefMatchesOutputFiles_NoError()
+    {
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/foo.ts"],
+          "verification":{"command":"tsc --noEmit src/foo.ts"}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command이 파일"));
+    }
+
+    [Fact]
+    public async Task VerificationFiles_UndeclaredRef_IsError()
+    {
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/foo.ts"],
+          "verification":{"command":"tsc --noEmit src/bar.ts"}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.True(r.HasErrors);
+        Assert.Contains(r.Errors, e => e.Contains("verification.command이 파일") && e.Contains("src/bar.ts"));
+    }
+
+    [Fact]
+    public async Task VerificationFiles_RefSatisfiedByDependencyOutputs_NoError()
+    {
+        // a-test의 verification은 a-impl의 outputFiles에 있는 파일을 참조 — 머지 시점에 worktree에 존재 보장.
+        var json = """
+        {"tasks":[
+          {"id":"a-impl","title":"A","prompt":"p","category":"implementation","outputFiles":["src/a.ts"]},
+          {"id":"a-test","title":"A test","prompt":"test it","category":"testing",
+           "dependsOn":["a-impl"],"outputFiles":["tests/a.test.ts"],
+           "verification":{"command":"tsc --noEmit src/a.ts tests/a.test.ts"}}
+        ]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command이 파일"));
+    }
+
+    [Theory]
+    [InlineData("pytest -q tests/")]
+    [InlineData("dotnet test")]
+    [InlineData("npm test --silent")]
+    [InlineData("cargo check -p foo")]
+    [InlineData("go vet ./internal/foo/...")]
+    public async Task VerificationFiles_NoFileTokens_NoError(string command)
+    {
+        // 디렉터리/패키지/런처 only — 파일 token이 없으므로 declared 검사 트리거 안 함.
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "modifiedFiles":["whatever.cs"],
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command이 파일"));
+    }
+
+    [Fact]
+    public async Task VerificationFiles_CsprojRefDeclared_NoError()
+    {
+        // .csproj 같은 빌드 매니페스트도 source extension으로 인식.
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/Foo/Foo.csproj","src/Foo/Foo.cs"],
+          "verification":{"command":"dotnet build src/Foo/Foo.csproj"}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command이 파일"));
+    }
+
+    [Fact]
+    public async Task VerificationFiles_StringLiteralFalsePositiveAvoided()
+    {
+        // string literal 안의 파일명은 stripping되어 검사되지 않음 (false positive 방지).
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/foo.ts"],
+          "verification":{"command":"node -e \"console.log('reading bar.ts')\" && tsc --noEmit src/foo.ts"}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("verification.command이 파일") && e.Contains("bar.ts"));
+    }
+
+    // --- 개선 C: workflow.smokeTest source 파일 enumerate 차단 ---
+
+    [Theory]
+    [InlineData("python3 -m py_compile add.py subtract.py main.py")]
+    [InlineData("node src/index.js src/util.js")]
+    [InlineData("gcc src/a.c src/b.c -o app")]
+    [InlineData("tsc --noEmit src/a.ts src/b.ts")]
+    public async Task SmokeTest_EnumeratesFiles_IsError(string smokeCmd)
+    {
+        var encoded = System.Text.Json.JsonSerializer.Serialize(smokeCmd);
+        var json = "{\"tasks\":[{\"id\":\"x\",\"title\":\"X\",\"prompt\":\"p\"}],"
+                 + "\"workflow\":{\"smokeTest\":{\"command\":" + encoded + "}}}";
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.True(r.HasErrors, $"expected error for smoke command: {smokeCmd}");
+        Assert.Contains(r.Errors, e => e.Contains("workflow.smokeTest") && e.Contains("enumerate"));
+    }
+
+    [Theory]
+    [InlineData("pytest -q")]
+    [InlineData("pytest -q tests/")]
+    [InlineData("npm run build && npm test --silent")]
+    [InlineData("dotnet build -nologo && dotnet test")]
+    [InlineData("cargo build --quiet && cargo test --quiet")]
+    [InlineData("go build ./... && go test ./...")]
+    [InlineData("tsc --noEmit")]
+    [InlineData("python3 -m compileall -q .")]
+    public async Task SmokeTest_WholeTreeCommand_NoError(string smokeCmd)
+    {
+        var encoded = System.Text.Json.JsonSerializer.Serialize(smokeCmd);
+        var json = "{\"tasks\":[{\"id\":\"x\",\"title\":\"X\",\"prompt\":\"p\"}],"
+                 + "\"workflow\":{\"smokeTest\":{\"command\":" + encoded + "}}}";
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("workflow.smokeTest"));
+    }
+
+    [Fact]
+    public async Task SmokeTest_Empty_NoError()
+    {
+        var json = """
+        {"tasks":[{"id":"x","title":"X","prompt":"p"}]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Errors, e => e.Contains("workflow.smokeTest"));
     }
 }

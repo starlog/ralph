@@ -62,6 +62,35 @@ public class PlanGeneratorPromptTests
     }
 
     [Fact]
+    public void Prompt_includes_critical_hazards_section_above_rules()
+    {
+        // 개선 F: hazard 4종을 Rule 1 위에 우선순위로 노출.
+        var prompt = PlanGenerator.BuildPlanPrompt(
+            prdFilePath: "/tmp/PRD.md",
+            schemaContent: "{}",
+            tasksFilePath: "/tmp/tasks.json");
+
+        Assert.Contains("Critical Run-Time Hazards", prompt);
+        // hazards 섹션이 Rule 1 위에 와야 한다.
+        var hazardIdx = prompt.IndexOf("Critical Run-Time Hazards", StringComparison.Ordinal);
+        var rulesIdx = prompt.IndexOf("## Task Generation Rules", StringComparison.Ordinal);
+        Assert.True(hazardIdx > 0 && rulesIdx > hazardIdx,
+            $"hazards 섹션({hazardIdx})이 Rules 섹션({rulesIdx}) 위에 있어야 합니다.");
+
+        // 4 hazards 마커 — H1~H4가 모두 등장.
+        Assert.Contains("H1", prompt);
+        Assert.Contains("H2", prompt);
+        Assert.Contains("H3", prompt);
+        Assert.Contains("H4", prompt);
+
+        // 각 hazard의 핵심 키워드.
+        Assert.Contains("silently deleted", prompt);     // H1: silent discard
+        Assert.Contains("workflow.smokeTest", prompt);    // H2
+        Assert.Contains("server.fs.strict", prompt);      // H3
+        Assert.Contains("tasks.json", prompt);            // H4
+    }
+
+    [Fact]
     public void Prompt_positive_examples_use_host_python_command()
     {
         // 13/14번 규칙의 ALLOWED/PREFERRED 예시는 호스트에 맞게 치환되어야 한다.

@@ -430,7 +430,8 @@ public class PlanChunkerTests
                 {
                   "id": "feat-a-impl", "title": "A Impl", "prompt": "Impl A.",
                   "category": "implementation",
-                  "dependsOn": ["feat-a-plan"]
+                  "dependsOn": ["feat-a-plan"],
+                  "outputFiles": ["src/feat_a.py"]
                 },
                 {
                   "id": "feat-b-plan", "title": "B Plan", "prompt": "Plan B.",
@@ -439,7 +440,8 @@ public class PlanChunkerTests
                 {
                   "id": "feat-b-impl", "title": "B Impl", "prompt": "Impl B.",
                   "category": "implementation",
-                  "dependsOn": ["feat-b-plan"]
+                  "dependsOn": ["feat-b-plan"],
+                  "outputFiles": ["src/feat_b.py"]
                 }
               ]
             }

@@ -245,6 +245,42 @@ public partial class PlanGenerator
             ## Your Goal
             Read the PRD file at `{{prdFilePath}}`, explore the codebase, and write a valid JSON task plan to `{{tasksFilePath}}`.
 
+            ## Critical Run-Time Hazards (read this BEFORE Rule 1)
+
+            These four are the failure modes that have actually wasted whole batches in past runs.
+            Every other rule below is a more specific elaboration of one of these. Get these right
+            and the rest of the plan generally falls into place.
+
+            **H1. Every file your task creates or modifies MUST be declared.** Each task runs in its
+            own git worktree at `.ralph-worktrees/{taskId}/`. Right before merge, ralph runs
+            `git reset --hard HEAD && git clean -fd` to discard any change not staged at commit time —
+            and only files in the task's `outputFiles` ∪ `modifiedFiles` get staged. So a file the
+            implementation creates but forgets to declare is **silently deleted** before merge. If
+            anything imports that file (or it's needed by smoke), the next batch breaks and ralph
+            auto-rollbacks the whole batch. When in doubt, declare it. "It's just a small helper" is
+            exactly the file that disappears and breaks the build.
+
+            **H2. `workflow.smokeTest` MUST NOT enumerate specific source files.** Smoke runs after
+            *every* batch on the integrated base branch. Files produced by later batches don't exist
+            yet at smoke time, so a command like `python3 -m py_compile add.py subtract.py main.py`
+            fails the first batch even when the plan is correct. Use whole-tree commands
+            (`pytest -q`, `npm run build && npm test --silent`, `dotnet build && dotnet test`,
+            `cargo build && cargo test`, `go build ./... && go test ./...`) — or omit
+            `workflow.smokeTest` entirely and let ralph's built-in inference pick the right command.
+            See Rule 14.
+
+            **H3. vite/vitest projects MUST set `server.fs.strict: false` at scaffold time.**
+            Smoke runs in an isolated `.ralph-smoke` worktree alongside the main repo. Vite's default
+            (`true`) blocks the test runner from loading setup files like `@testing-library/jest-dom`
+            from the workspace `node_modules`, so every smoke run fails immediately. The scaffold
+            task that creates `vitest.config.*` must include the setting from the start and list the
+            file in its `modifiedFiles`. Don't defer this. See Rule 3.5.
+
+            **H4. Tasks MUST NOT modify `tasks.json`.** It's the spec ralph reads to dispatch every
+            worktree; concurrent edits to it from inside a worktree cause every other worktree's
+            merge to conflict. Progress tracking lives in `.ralph-logs/state.json` (orchestrator-only,
+            not git-tracked). Never instruct a task prompt to "update tasks.json".
+
             ## Task Generation Rules
 
             1. **Break down the PRD into logical features or components.** Each feature becomes a group of 1~4 sequential tasks depending on the feature's complexity.
@@ -490,6 +526,9 @@ public partial class PlanGenerator
         sb.AppendLine("- **dangling dependsOn**: 존재하는 task ID만 참조하도록 수정 (오타 가능성 점검)");
         sb.AppendLine("- **중복 ID**: 고유한 ID로 rename");
         sb.AppendLine("- **민감 파일**(.env, .pem, .key, credentials.json 등)이 modifiedFiles/outputFiles에 명시된 경우 → 제거");
+        sb.AppendLine("- **implementation/testing 카테고리 task의 outputFiles/modifiedFiles 빈 set** (Hazard H1): task가 만들거나 수정할 파일을 빠짐없이 outputFiles에 추가하세요. 미선언 파일은 머지 직전 silent discard됩니다.");
+        sb.AppendLine("- **verification.command이 미선언 파일 참조** (Hazard H1): 명령에 등장하는 파일(`src/foo.ts`, `tests/test_x.py`, `Foo/Foo.csproj` 등)을 task의 outputFiles/modifiedFiles 또는 의존 task의 outputFiles에 추가하세요.");
+        sb.AppendLine("- **workflow.smokeTest가 specific source 파일 enumerate** (Hazard H2): 전체 트리 명령(예: `pytest -q`, `npm run build && npm test --silent`, `dotnet build && dotnet test`)으로 교체하거나 smokeTest 자체를 비워 ralph 자동 추론에 맡기세요.");
         sb.AppendLine("- **verification.command 이스케이프 오류** (`\\n`/`\\t` 포함 시): `;` separator로 single statement로 바꾸거나, 프로젝트 표준 test runner(예: `dotnet test`, `pytest -q`, `npm test`)를 사용");
         sb.AppendLine();
         sb.AppendLine("아래는 원래의 plan 생성 지침과 schema입니다. 동일한 규칙을 따르되 위 정정 사항을 반영하세요.");
