@@ -273,8 +273,10 @@ public class ParallelExecutorTests : IDisposable
             () => executor.RunAsync(maxConcurrent: 4, cts.Token));
         sw.Stop();
 
-        // 60초 timeout이 아닌 부모 CT 취소로 즉시 중단 → 3초 이내 완료 확인
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3),
+        // 60초 timeout이 아닌 부모 CT 취소로 중단 → 8초 이내 완료 확인.
+        // 임계값은 Windows CI 러너의 file I/O / process spawn 지연(보통 2~3x slowdown)에
+        // 여유를 둔 값. 60초 timeout과는 충분히 멀어 회귀 시그널은 그대로 유지.
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(8),
             $"Expected cleanup to abort quickly on CT cancellation, but took {sw.Elapsed.TotalSeconds:F1}s");
         Assert.True(executor.CleanupFailureCount >= 1,
             $"Expected at least 1 cleanup failure, got {executor.CleanupFailureCount}");
