@@ -735,6 +735,26 @@ public class PlanValidatorTests
             w => w.Contains("verification.command") && w.Contains("npx"));
     }
 
+    [Theory]
+    [InlineData("test -d node_modules || npm ci --silent; npx tsc --noEmit src/foo.ts")]
+    [InlineData("test -f package-lock.json && npm ci && npx vitest run tests/foo.test.ts")]
+    [InlineData("[ -d node_modules ] || npm ci; npm run build")]
+    public async Task Verification_GuardedRunner_NoInfoWarning(string command)
+    {
+        // 첫 토큰이 `test`/`[`라도 체인 안에 npx/npm/pytest 등 known runner가 등장하면 [info] 생략.
+        // mighty4 회귀 — guard 패턴 26건 false positive 차단.
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/foo.ts"],
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("[info]") && w.Contains("verification.command"));
+    }
+
     [Fact]
     public async Task SmokeTest_NpxWithSelfBootstrap_NoWarning()
     {

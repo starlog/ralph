@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Ralph is a CLI task orchestrator that generates execution plans from PRD (Product Requirements Document) files and runs them in parallel (or sequentially) using Claude Code. It follows a 4-phase pattern per feature: **plan → implementation → testing → commit** (configurable via `workflow.categories`), with dependency tracking between tasks. Built with .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.45**.
+Ralph is a CLI task orchestrator that generates execution plans from PRD (Product Requirements Document) files and runs them in parallel (or sequentially) using Claude Code. It follows a 4-phase pattern per feature: **plan → implementation → testing → commit** (configurable via `workflow.categories`), with dependency tracking between tasks. Built with .NET 8 for cross-platform support (Windows, macOS, Linux). Current version: **v1.46**.
 
 ## Architecture
 

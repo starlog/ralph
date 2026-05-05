@@ -360,8 +360,11 @@ public static class PlanValidator
                 report.Warnings.Add(
                     $"'{task.Id}' verification.command 가 5개 이상의 statement 로 구성되어 있습니다 — 단일 빌드/테스트 호출(`dotnet test`, `npm test` 등)로 단순화를 권장합니다.");
 
-            // --- info: errors 가 없고 warnings 도 빈약한 경우, 첫 토큰이 화이트리스트에 없으면 권장 메시지 ---
-            if (!taskHadInjectionError)
+            // --- info: errors 가 없고 명령 어디에도 화이트리스트 러너가 없으면 권장 메시지.
+            //     `test -d node_modules || npm ci; npx tsc ...` 같은 guard 패턴은 첫 토큰이 `test`라
+            //     화이트리스트 미스이지만 체인 안에 npx/npm이 있으므로 의미 없는 경고. 명령 어디에든
+            //     known runner 토큰이 등장하면 [info] 자체를 생략한다.
+            if (!taskHadInjectionError && !ContainsAnyWhitelistedTool(topLevel))
             {
                 var first = ExtractFirstToken(cmd);
                 if (first is not null
@@ -698,6 +701,25 @@ public static class PlanValidator
             sb.Append(c);
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// string-literal-stripped 명령에서 화이트리스트 러너 토큰이 어디든 등장하는지 확인합니다.
+    /// guard 체인(`test -d node_modules || npm ci; npx tsc ...`)에서 실제 러너가 후속 statement에
+    /// 있는 경우 [info] false positive를 막기 위해 사용합니다.
+    /// </summary>
+    private static bool ContainsAnyWhitelistedTool(string strippedCmd)
+    {
+        if (string.IsNullOrWhiteSpace(strippedCmd)) return false;
+        var separators = new[] { ' ', '\t', '\n', '\r', ';', '|', '&', '(', ')' };
+        foreach (var raw in strippedCmd.Split(separators, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var tok = raw.Trim();
+            if (tok.Length == 0) continue;
+            if (WhitelistedTools.Contains(tok, StringComparer.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

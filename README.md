@@ -3,7 +3,7 @@
 [English](README.en.md) | **한국어**
 
 > 큰 일거리 한 장 → 여러 명의 Claude가 동시에 작업 → 자동으로 합쳐서 완성.
-> .NET 8 기반 단일 바이너리. Windows / macOS / Linux. 현재 버전: **v1.45**.
+> .NET 8 기반 단일 바이너리. Windows / macOS / Linux. 현재 버전: **v1.46**.
 
 ---
 
