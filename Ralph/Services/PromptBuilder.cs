@@ -76,16 +76,12 @@ public static class PromptBuilder
             sb.AppendLine();
         }
 
-        // 테스트 태스크 전용: 워크트리 환경 주의사항
+        // 테스트 태스크 전용: verification 범위 안내
         if (task.Category is "testing")
         {
-            sb.AppendLine("## 워크트리 실행 환경 주의사항 (테스트 태스크)");
-            sb.AppendLine("이 태스크는 `.ralph-worktrees/{taskId}/` git worktree 안에서 실행됩니다. 메인 레포 루트에 있는 `node_modules/`는 worktree 루트의 **상위**가 아닌 **형제** 디렉토리이므로, Vite 기본값인 `server.fs.strict: true`가 setupFile(예: `@testing-library/jest-dom/vitest`) 로드를 차단할 수 있습니다.");
-            sb.AppendLine();
-            sb.AppendLine("**vitest / vite 기반 프론트엔드 테스트라면 다음을 확인하세요:**");
-            sb.AppendLine("1. 테스트 실행 전 `npx vitest run --reporter=verbose 2>&1 | head -20` 으로 fs.strict 오류 여부를 먼저 확인하세요.");
-            sb.AppendLine("2. `Failed to load url` / `ENOENT` / `Access denied to` 오류가 나오면 `vitest.config.ts` (또는 `vite.config.ts`)의 `test:` 블록에 `server: { fs: { strict: false } }` 를 추가하세요.");
-            sb.AppendLine("3. `vitest.config.ts`가 이 태스크의 Scope(modifiedFiles)에 포함되어 있다면 수정해도 됩니다. **Scope에 없으면 수정하지 말고 완료 보고에 명시하세요** (pre-rebase cleanup이 미선언 변경을 폐기하므로 fix가 반영되지 않습니다).");
+            sb.AppendLine("## 테스트 태스크 안내");
+            sb.AppendLine("이 태스크는 테스트 코드를 **작성**하는 단계입니다. 전체 테스트 스위트 실행은 머지 후 `workflow.smokeTest`가 격리 worktree(`.ralph-smoke`)에서 수행하므로, 본 태스크의 `verification.command`는 작성한 테스트 파일의 **컴파일/타입 체크만** 수행해야 합니다 (예: `tsc --noEmit tests/X.test.ts`, `python -m py_compile tests/test_x.py`).");
+            sb.AppendLine("worktree 안에서 `npx vitest run` / `npm test` / `pytest tests/` 같은 실제 실행 명령을 verification으로 사용하지 마세요 — sibling 미머지 import 실패와 vite `server.fs.strict` 차단으로 false-failure가 빈번합니다 (이런 시나리오는 smoke 단계가 정상 처리합니다).");
             sb.AppendLine();
         }
 

@@ -273,22 +273,19 @@ public partial class PlanGenerator
                **Implementation task** (category: "implementation", id: `{feature}-impl` or `{feature}` for trivial/small)
                   - dependsOn: [`{feature}-plan`] if a plan task exists for this feature, otherwise `[]`.
                   - The prompt must instruct Claude to: implement the feature (according to the plan if one exists), create all necessary files, follow project conventions.
-                  - **STRONGLY RECOMMENDED**: include a `verification` field running the build/typecheck command (NOT the test suite — that belongs on the testing task). Examples: `{ "command": "dotnet build -nologo", "timeoutSec": 180 }`, `{ "command": "tsc --noEmit", "timeoutSec": 120 }`, `{ "command": "go build ./...", "timeoutSec": 120 }`, `{ "command": "cargo check --quiet", "timeoutSec": 180 }`. This catches compilation errors immediately so the testing task starts from a known-good state.
+                  - **STRONGLY RECOMMENDED**: include a `verification` field running a **file-scoped** build/typecheck command (NOT the project test suite — full test execution happens post-merge in `workflow.smokeTest`, see Rule 14). Examples: `{ "command": "dotnet build src/Foo/Foo.csproj", "timeoutSec": 180 }`, `{ "command": "tsc --noEmit src/foo.ts src/bar.ts", "timeoutSec": 120 }`, `{ "command": "go build ./internal/foo/", "timeoutSec": 120 }`, `{ "command": "cargo check -p foo", "timeoutSec": 180 }`. See Rule 16 for why file-scoped matters.
 
                **Testing task** (category: "testing", id: `{feature}-test`)
                   - dependsOn: [`{feature}-impl`]
-                  - The prompt must instruct Claude to: write and run tests for the implemented feature, ensure all tests pass, fix any issues found.
-                  - **MUST include a `verification` field** that runs the project's test command. This is the ground-truth gate — Ralph runs this externally and exit code 0 = success (Claude self-report is NOT trusted). Examples by stack:
-                    - .NET: `{ "command": "dotnet test", "timeoutSec": 300 }`
-                    - Python (pytest): `{ "command": "pytest -q tests/", "timeoutSec": 180 }`
-                    - Go: `{ "command": "go test ./...", "timeoutSec": 120 }`
-                    - Node/TS: `{ "command": "npm test --silent", "timeoutSec": 180 }`
-                    - Rust: `{ "command": "cargo test --quiet", "timeoutSec": 300 }`
-                    Detect the actual stack from the codebase (e.g., `Ralph.csproj` → .NET) and pick a command that runs the **specific test suite added by this feature** if possible (e.g. `dotnet test --filter "FullyQualifiedName~FeatureXTests"`).
-                  - Skip this task if the feature is mechanical (doc, config, single-line edit) where tests provide no value.
-                  - **Frontend test tasks — worktree fs restriction (vitest / vite monorepos):** Tasks run inside a git worktree at `.ralph-worktrees/{taskId}/`. The worktree root is a sibling of the main repo root, so Vite's default `server.fs.strict: true` blocks the test runner from loading setup files (e.g., `@testing-library/jest-dom/vitest`) that live in the workspace `node_modules` at the repo root — outside the worktree root. This causes the first verification attempt to fail immediately (< 1 s, exit 1) even though the test code is correct. To avoid this:
-                    1. If only **one** test task needs this fix: include `vitest.config.ts` (or `vite.config.ts`, `vitest.workspace.ts`) in that task's `modifiedFiles`.
-                    2. If **multiple** test tasks would each need the same fix: create a shared **test-env-prep task** instead (see rule 3.5 below).
+                  - The prompt must instruct Claude to: **write** tests for the implemented feature. Tests are EXECUTED post-merge by `workflow.smokeTest` (Rule 14), not by this task's verification command — so the task itself only needs to author the tests, not run them.
+                  - **`verification` field**: compile/typecheck only, file-scoped to this task's test files. The point is to catch syntax/type errors before merge; full execution belongs in smoke. Examples by stack:
+                    - .NET: `{ "command": "dotnet build src/Foo.Tests/Foo.Tests.csproj", "timeoutSec": 120 }`
+                    - Python (pytest): `{ "command": "python -m py_compile tests/test_bid.py", "timeoutSec": 30 }`
+                    - Go: `{ "command": "go vet ./internal/bid/...", "timeoutSec": 60 }`
+                    - Node/TS: `{ "command": "tsc --noEmit tests/bid.test.ts", "timeoutSec": 60 }` — NOT `npx vitest run`, NOT `npm test`, NOT bare `tsc --noEmit`.
+                    - Rust: `{ "command": "cargo check -p bid_test", "timeoutSec": 60 }`
+                  - **Why this split:** per-task verification runs in a git worktree (`.ralph-worktrees/{taskId}/`) BEFORE sibling tasks have merged. Running the full test suite there hits two failure classes that have caused most recent loop breakages: (a) sibling-not-merged-yet imports fail tsc/test, (b) vitest/jest in a worktree can't load setup files from the main repo's `node_modules` due to vite `server.fs.strict`. Both vanish when test execution moves to smoke (which runs against the integrated base branch). Per-task verification is the syntax gate; smoke is the behavior gate.
+                  - Skip this task entirely if the feature is mechanical (doc, config, single-line edit) where tests provide no value.
 
                **Commit task** (category: "commit", id: `{feature}-commit`)
                   - dependsOn: previous task in this feature's chain (test → impl → plan, whichever is the last that exists)
@@ -302,16 +299,11 @@ public partial class PlanGenerator
                     g. Create a single `git commit` with a descriptive message in Korean summarizing this feature's changes.
                   - The commit task can be skipped entirely if `workflow.onTaskComplete.commitChanges` is `true` (Ralph auto-commits after each task) AND the feature is small enough that one commit suffices.
 
-            3.5. **Shared-config prep task (REQUIRED when multiple test tasks need the same config change):**
-               When you detect a vitest / jest / vite-based frontend package **and** there are two or more test tasks that would each need to touch the same shared config file (most commonly `vitest.config.ts`, `vite.config.ts`, `vitest.workspace.ts`, `jest.config.ts`, or `webpack.config.js`), do NOT have each test task modify that file independently. Instead:
-               - Create exactly **one** config-prep task (category: `"implementation"`, suggested id: `test-env-prep` or `<package>-test-config`) before any of those test tasks.
-               - List the shared config file(s) in the prep task's `modifiedFiles`.
-               - Every affected test task `dependsOn` this prep task (in addition to its impl dep).
-               - The prep task prompt must: open the config file, add `server: { fs: { strict: false } }` inside the `test:` block (vitest) or the equivalent for other runners, and verify the change compiles (`tsc --noEmit` or `npm run build --silent`).
+            3.5. **vite/vitest projects: fs.strict must be disabled at scaffold time.** When the project uses vite or vitest (presence of `vite.config.ts` / `vitest.config.ts` / `vitest.workspace.ts`, or `vite`/`vitest` in `package.json` deps), the **scaffold/setup task** (the first task that creates or owns the test-runner config) MUST set `server: { fs: { strict: false } }` inside the `test:` block (vitest) or the equivalent for other runners.
 
-               **Why this is critical:** Ralph's pre-rebase cleanup discards changes to files not listed in a task's `modifiedFiles` before rebase to prevent accidental merge conflicts. A test task that fixes `vitest.config.ts` without declaring it in `modifiedFiles` will have that fix silently discarded at merge time — the next worktree re-encounters the same fs.strict failure. The prep-task pattern guarantees the fix lands in the base branch before any test task runs.
+               **Why:** `workflow.smokeTest` executes the full test suite in an isolated `.ralph-smoke` worktree, which is a sibling of the main repo root. Vite's default `server.fs.strict: true` blocks the test runner from loading setup files like `@testing-library/jest-dom/vitest` that live in the workspace `node_modules` outside the worktree root. Without the fix, every smoke run on a vitest project fails immediately and triggers an auto-rollback, wasting the entire batch.
 
-               **When to emit the prep task:** whenever you identify a vitest/jest/vite frontend package **and** two or more test tasks exist for it. A single test task does not need the prep task — just include the config file in its own `modifiedFiles`.
+               **How:** the scaffold task that creates `vitest.config.ts` (or modifies an existing one) must include the file in its `modifiedFiles` and emit the setting from the start. Don't defer this to a test task — by the time any test task merges, smoke already needs the fix. If the repo already has a vitest config without the setting, add a one-line setup task at the top of the plan that patches it.
 
             3. **Cross-feature dependencies (IMPORTANT for parallel execution):**
                - Features that are **independent** (don't share files or code dependencies) should have NO cross-feature dependencies. This allows Ralph to execute them in parallel using git worktrees.
@@ -392,20 +384,25 @@ public partial class PlanGenerator
                - `ruby -e "require 'm'\\nputs M.f(1,2)"` — same problem
                Any `<lang> -c|-e|--eval "..."` whose body contains a `\\n`, `\\t`, or `\\r` escape is wrong.
 
-            14. **`workflow.smokeTest` (CRITICAL — must be progressively safe).** This command runs on the base branch after **every parallel batch merge**, not only at the end. So at the time it runs, only files produced by *already-merged* batches exist; files scheduled for later batches do NOT exist yet.
+            14. **`workflow.smokeTest` is THE test execution gate (CRITICAL — must be progressively safe).** This command runs in an isolated `.ralph-smoke` worktree on the base branch after **every parallel batch merge**, not only at the end. It is the canonical place to RUN the project's full test suite — per-task verification only typechecks/compiles (Rule 13, Rule 16). Smoke is where actual `dotnet test` / `npm test` / `pytest` / `go test` lives.
 
-               Therefore the smoke test command MUST NOT enumerate specific files by name. A command like `python3 -m py_compile add.py subtract.py main.py` will fail on the first batch if `main.py` is in a later batch — even though the plan is correct.
+               At the time it runs, only files produced by *already-merged* batches exist; files scheduled for later batches do NOT exist yet. Therefore the smoke test command MUST NOT enumerate specific files by name. A command like `python3 -m py_compile add.py subtract.py main.py` will fail on the first batch if `main.py` is in a later batch — even though the plan is correct.
 
                PREFERRED forms (work at every batch, regardless of which files exist yet):
-               - **Project test/build runner** — `dotnet build -nologo`, `npm test --silent`, `cargo build --quiet`, `go build ./...`, `pytest -q` (only if a test runner is set up).
-               - **Recursive compile/typecheck** — `{{pythonCmd}} -m compileall -q .`, `tsc --noEmit`, `ruby -wc *.rb` (glob expanded by shell at run time, so empty-match is fine on most shells with `nullglob`-equivalent — verify per stack).
-               - **Omit entirely** — if no safe whole-tree command exists for the stack, leave `workflow.smokeTest` unset. Ralph will fall back to its built-in inference (`pyproject.toml`/`setup.py`/`requirements.txt` → `{{pythonCmd}} -m compileall -q .`, etc.). Setting an over-specific smoke test is worse than setting none.
+               - **Build + test chain (canonical when both exist)** — chain build then test so a build break is reported before tests run:
+                 - .NET: `dotnet build -nologo && dotnet test`
+                 - Node/TS: `npm run build && npm test --silent` (or `pnpm`/`yarn`/`bun` equivalents)
+                 - Rust: `cargo build --quiet && cargo test --quiet`
+                 - Go: `go build ./... && go test ./...`
+                 - Python: `pytest -q` (no separate build step)
+               - **Build/typecheck only** — when the project has no test runner set up: `tsc --noEmit`, `dotnet build -nologo`, `cargo check`, `{{pythonCmd}} -m compileall -q .`, `ruby -wc *.rb`.
+               - **Omit entirely** — if no safe whole-tree command exists for the stack, leave `workflow.smokeTest` unset. Ralph will fall back to its built-in inference (`package.json` with both build+test scripts → `<pm> run build && <pm> test --silent`; `pyproject.toml`/`setup.py`/`requirements.txt` → `{{pythonCmd}} -m compileall -q .`; etc.). Setting an over-specific smoke test is worse than setting none.
 
                FORBIDDEN forms:
                - Any command that names specific source files the plan creates (`python3 -m py_compile a.py b.py c.py`, `node a.js b.js`, `gcc a.c b.c -o app`). These break the moment a referenced file lives in a later batch.
                - Test commands that import from yet-to-be-created modules.
 
-               If unsure, **prefer omitting `workflow.smokeTest` over guessing a file list**.
+               If unsure, **prefer omitting `workflow.smokeTest` over guessing a file list** — the built-in inference is conservative and correct for most stacks.
 
             15. **Config files must be internally self-consistent.** When a setup/scaffold task creates a config file (`tsconfig.json`, `pyproject.toml`, `Cargo.toml`, `vite.config.ts`, `webpack.config.js`, `eslint.config.*`, etc.), the options inside that file must NOT contradict each other — even if individually each option looks plausible. Examples of contradictions that have caused latent failures in past runs:
 
@@ -424,14 +421,14 @@ public partial class PlanGenerator
 
                The fix: make `verification.command` check ONLY the files in this task's `outputFiles` ∪ `modifiedFiles` (plus any `outputFiles` of tasks listed in this task's `dependsOn`, since those are guaranteed merged before this task starts).
 
-               PREFERRED forms (file-scoped):
-               - **TypeScript**: `tsc --noEmit src/bid.ts src/bid-helpers.ts` — list this task's .ts files explicitly. NOT bare `tsc --noEmit` (whole project).
-               - **Vitest/Jest**: `vitest run tests/bid.test.ts` or `jest tests/bid.test.ts` — name the test file. NOT bare `npm test`.
-               - **Python (pytest)**: `pytest -q tests/test_bid.py` — name the test file. NOT bare `pytest` or `pytest tests/`.
-               - **Python (compile)**: `python3 -m py_compile src/bid.py` — name the source file. NOT `python3 -m compileall .`.
-               - **Go**: `go build ./internal/bid/` or `go test ./internal/bid/...` — name the package. NOT `go build ./...` or `go test ./...`.
-               - **Rust**: `cargo check -p bid` (per-crate) when in a workspace; in a single-crate project `cargo check` is acceptable since there's no cross-task contamination risk.
-               - **.NET**: `dotnet build src/Bid/Bid.csproj` (per-project). NOT `dotnet build` from a solution root with sibling projects mid-flight.
+               PREFERRED forms (file-scoped, **compile/typecheck only — no test execution**):
+               - **TypeScript**: `tsc --noEmit src/bid.ts src/bid-helpers.ts` — list this task's .ts files explicitly. NOT bare `tsc --noEmit` (whole project), NOT `npx vitest run`, NOT `npm test`.
+               - **Python (compile)**: `python3 -m py_compile src/bid.py` — name the source file. NOT `python3 -m compileall .`, NOT `pytest`.
+               - **Go**: `go build ./internal/bid/` or `go vet ./internal/bid/...` — name the package. NOT `go build ./...`, NOT `go test ./...`.
+               - **Rust**: `cargo check -p bid` (per-crate) when in a workspace; in a single-crate project `cargo check` is acceptable since there's no cross-task contamination risk. NOT `cargo test`.
+               - **.NET**: `dotnet build src/Bid/Bid.csproj` (per-project). NOT `dotnet build` from a solution root with sibling projects mid-flight, NOT `dotnet test`.
+
+               **Test execution belongs in `workflow.smokeTest`, not in per-task verification.** See Rule 14. The smoke gate runs against the integrated base branch in an isolated worktree (with full `node_modules`/dependencies intact) and reports failures with batch-level attribution.
 
                EXCEPTION — when whole-project verification IS appropriate:
                - Trivial single-feature repos with no parallel sibling tasks (planner can confirm this from the DAG).
@@ -440,20 +437,7 @@ public partial class PlanGenerator
 
                How to choose the scope: take the union of this task's `outputFiles` and `modifiedFiles`. If those files import from sibling-task outputs not in this task's `dependsOn`, restructure the task graph (add the dependency, or split the work) — do NOT widen the verification command to compensate, because that re-introduces the sibling-not-merged-yet problem.
 
-               This rule overrides any earlier rule that suggested whole-project commands. The earlier examples like `dotnet test` / `npm test --silent` were correct for project-level smoke tests but wrong for per-task verification. Use this rule's file-scoped forms for `verification.command`. Use rule 14's whole-project forms for `workflow.smokeTest`.
-
-            16.1. **TypeScript test tasks MUST chain `tsc --noEmit` before vitest/jest (CRITICAL — fixes silent type-error pass-through).** Vitest and Jest transpile TypeScript via esbuild/swc and execute the JS — they do NOT enforce strict type checking. So a test file that misuses types (e.g., `Record<Seat, Card[]>` populated with only seat 0) runs fine under vitest but fails `tsc -p tsconfig.json`. Result: per-task verification (`vitest run tests/X.test.ts`) reports pass, the task gets merged, and post-merge `workflow.smokeTest` (which usually runs `tsc`/`npm run build`) catches the type error and triggers auto-rollback — wasting a full batch.
-
-               For every test task that runs vitest or jest on TypeScript, prepend a typecheck step:
-
-               PREFERRED forms:
-               - `npx tsc --noEmit -p tsconfig.json && npx vitest run tests/X.test.ts` — the typecheck is whole-project (TS module resolution requires it), but it runs against the worktree which already contains all dependsOn outputs.
-               - If the project has a separate test tsconfig: `npx tsc --noEmit -p tsconfig.test.json && npx vitest run tests/X.test.ts`.
-               - For plain JS tests (no `.ts` files in `tests/`), the typecheck step is unnecessary — vitest alone is fine.
-
-               WHY whole-project tsc here is OK (unlike rule 16's per-task tsc warning): test tasks have `dependsOn: [<feature>-impl]`, which means the impl is already merged into base before the test task starts. The worktree therefore contains all the source files needed for tsc to resolve imports. Skipping this step let `play-test`-like cases through in past runs.
-
-               Apply the same logic to other transpile-then-execute test runners: jest with `--no-typecheck` (default), bun test on TS, etc. Compiled-language test runners (`go test`, `cargo test`, `dotnet test`, `pytest` with type stubs) already perform their own type checks during compilation/import and don't need the prepended step.
+               This rule overrides any earlier rule that suggested whole-project commands. The earlier examples like `dotnet test` / `npm test --silent` were correct for project-level smoke tests but wrong for per-task verification. Use this rule's file-scoped forms for `verification.command`. Use Rule 14's whole-project forms for `workflow.smokeTest`.
 
             ## JSON Schema
             """);

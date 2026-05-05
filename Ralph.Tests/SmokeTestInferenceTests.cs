@@ -209,6 +209,34 @@ public class SmokeTestPlannerTests : IDisposable
     }
 
     [Fact]
+    public void PackageJson_with_build_and_test_scripts_chains_them()
+    {
+        // Option A: per-task verification은 compile만 하고 실제 test 실행은 smoke가 담당.
+        // 따라서 build와 test가 둘 다 있으면 chain하여 한 번에 검증한다.
+        File.WriteAllText(Path.Combine(_root, "package.json"),
+            "{\"scripts\": {\"build\": \"vite build\", \"test\": \"vitest run\"}}");
+
+        var spec = SmokeTestPlanner.Infer(_root);
+
+        Assert.NotNull(spec);
+        Assert.Equal("npm run build && npm test --silent", spec!.Command);
+    }
+
+    [Fact]
+    public void PackageJson_with_build_and_test_scripts_pnpm_chains_with_recursive_build()
+    {
+        // pnpm + workspaces인 경우 build에는 -r 추가, test는 그대로.
+        File.WriteAllText(Path.Combine(_root, "package.json"),
+            "{\"workspaces\": [\"packages/*\"], \"scripts\": {\"build\": \"turbo run build\", \"test\": \"vitest run\"}}");
+        File.WriteAllText(Path.Combine(_root, "pnpm-lock.yaml"), "");
+
+        var spec = SmokeTestPlanner.Infer(_root);
+
+        Assert.NotNull(spec);
+        Assert.Equal("pnpm -r run build && pnpm test --silent", spec!.Command);
+    }
+
+    [Fact]
     public void PackageJson_with_test_script_only_uses_pm_test()
     {
         File.WriteAllText(Path.Combine(_root, "package.json"),

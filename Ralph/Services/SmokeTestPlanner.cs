@@ -139,11 +139,14 @@ internal static class SmokeTestPlanner
     }
 
     /// <summary>
-    /// package.json 내용을 보고 Node 빌드 검증 명령을 결정.
-    ///   - scripts.build 존재   → `<pm> [-r] run build` (workspace면 -r 추가, pm이 지원할 때만)
-    ///   - tsconfig.json 존재    → `npx --no-install tsc --noEmit`
-    ///   - scripts.test 존재     → `<pm> test --silent`
-    ///   - 셋 다 없음            → null (스킵; npm test 강제 실행 회피)
+    /// package.json 내용을 보고 Node 빌드/테스트 검증 명령을 결정.
+    /// per-task verification은 compile/typecheck만 수행하고 실제 test 실행은 smoke가 담당하므로
+    /// (PlanGenerator Rule 13/14), build와 test script가 모두 있으면 chain하여 두 단계를 한 번에 검증한다.
+    ///   - scripts.build + scripts.test → `<pm> [-r] run build && <pm> test --silent` (test 실행이 smoke의 본업)
+    ///   - scripts.build만               → `<pm> [-r] run build`
+    ///   - scripts.test만                → `<pm> test --silent`
+    ///   - tsconfig.json만               → `npx --no-install tsc --noEmit`
+    ///   - 모두 없음                     → null (스킵; npm test 강제 실행 회피)
     /// </summary>
     private static (string Command, int TimeoutSec)? InferNodeCommand(string repoRoot)
     {
@@ -156,19 +159,22 @@ internal static class SmokeTestPlanner
             || File.Exists(Path.Combine(repoRoot, "pnpm-workspace.yaml"))
             || File.Exists(Path.Combine(repoRoot, "turbo.json"));
 
+        // pnpm/yarn(berry/classic 모두) -r 지원. npm/bun은 monorepo도 단일 build script만 실행.
+        var recursive = isMonorepo && pm is "pnpm" or "yarn";
+        var buildCmd = recursive ? $"{pm} -r run build" : $"{pm} run build";
+        var testCmd = $"{pm} test --silent";
+
+        if (info.HasBuildScript && info.HasTestScript)
+            return ($"{buildCmd} && {testCmd}", 480);
+
         if (info.HasBuildScript)
-        {
-            // pnpm/yarn(berry/classic 모두) -r 지원. npm/bun은 monorepo도 단일 build script만 실행.
-            var recursive = isMonorepo && pm is "pnpm" or "yarn";
-            var cmd = recursive ? $"{pm} -r run build" : $"{pm} run build";
-            return (cmd, 300);
-        }
+            return (buildCmd, 300);
 
         if (File.Exists(Path.Combine(repoRoot, "tsconfig.json")))
             return ("npx --no-install tsc --noEmit", 180);
 
         if (info.HasTestScript)
-            return ($"{pm} test --silent", 180);
+            return (testCmd, 180);
 
         return null;
     }
