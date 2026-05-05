@@ -260,6 +260,13 @@ public partial class PlanGenerator
             auto-rollbacks the whole batch. When in doubt, declare it. "It's just a small helper" is
             exactly the file that disappears and breaks the build.
 
+            *Most-missed file in Node projects:* the lockfile. If a task runs `npm install` /
+            `pnpm install` / `yarn install` (typically the scaffold task), the resulting
+            `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` / `bun.lockb` MUST be in that
+            task's `outputFiles`. Without it, the lockfile gets discarded and every later worktree
+            re-resolves dependencies from scratch — slow, non-deterministic, and prone to
+            registry/network failure.
+
             **H2. `workflow.smokeTest` MUST NOT enumerate specific source files.** Smoke runs after
             *every* batch on the integrated base branch. Files produced by later batches don't exist
             yet at smoke time, so a command like `python3 -m py_compile add.py subtract.py main.py`
@@ -427,7 +434,7 @@ public partial class PlanGenerator
                PREFERRED forms (work at every batch, regardless of which files exist yet):
                - **Build + test chain (canonical when both exist)** — chain build then test so a build break is reported before tests run:
                  - .NET: `dotnet build -nologo && dotnet test`
-                 - Node/TS: `npm run build && npm test --silent` (or `pnpm`/`yarn`/`bun` equivalents)
+                 - Node/TS: `npm ci --silent && npm run build && npm test --silent` — **the `npm ci` prefix is mandatory** for Node projects. The `.ralph-smoke` worktree is a fresh checkout with no `node_modules`; without `npm ci` the build/test commands either fail immediately or trigger npm's slow auto-install of unpinned versions every batch. This requires a committed lockfile — the scaffold task that creates `package.json` MUST also declare its lockfile (`package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` / `bun.lockb`) in `outputFiles`. Use the install command matching the lockfile (`pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile`, `bun install --frozen-lockfile`).
                  - Rust: `cargo build --quiet && cargo test --quiet`
                  - Go: `go build ./... && go test ./...`
                  - Python: `pytest -q` (no separate build step)
@@ -464,7 +471,7 @@ public partial class PlanGenerator
                - **Rust**: `cargo check -p bid` (per-crate) when in a workspace; in a single-crate project `cargo check` is acceptable since there's no cross-task contamination risk. NOT `cargo test`.
                - **.NET**: `dotnet build src/Bid/Bid.csproj` (per-project). NOT `dotnet build` from a solution root with sibling projects mid-flight, NOT `dotnet test`.
 
-               **Test execution belongs in `workflow.smokeTest`, not in per-task verification.** See Rule 14. The smoke gate runs against the integrated base branch in an isolated worktree (with full `node_modules`/dependencies intact) and reports failures with batch-level attribution.
+               **Test execution belongs in `workflow.smokeTest`, not in per-task verification.** See Rule 14. The smoke gate runs against the integrated base branch in an isolated worktree and reports failures with batch-level attribution. (For Node projects, smoke must `npm ci` from a committed lockfile — see Rule 14 — so the smoke worktree has reproducible deps.)
 
                EXCEPTION — when whole-project verification IS appropriate:
                - Trivial single-feature repos with no parallel sibling tasks (planner can confirm this from the DAG).
@@ -567,6 +574,8 @@ public partial class PlanGenerator
         sb.AppendLine("- **파일 중복 수정**: 동일 파일을 수정하는 독립 태스크들에 dependsOn을 추가하거나 outputFiles/modifiedFiles를 명확히 분리");
         sb.AppendLine("- **카테고리 불일치**: 카테고리와 실제 작업이 맞지 않으면 prompt 내용이나 카테고리를 일치시킬 것");
         sb.AppendLine("- **verification.command 복잡성**: 5개 이상의 명령은 프로젝트 표준 test runner(`dotnet test`, `pytest -q`, `npm test` 등)로 단순화");
+        sb.AppendLine("- **`npx <tool>` 사용 (verification 또는 smokeTest)** (Hazard H1 보조): worktree에는 node_modules가 없어 매번 cold install이 발생합니다. `npm test` / `npm run build` 같은 npm script로 감싸거나, scaffold task의 outputFiles에 `package-lock.json`을 추가하세요. smoke는 가능하면 `npm ci --silent && npm test --silent` 형태로 결정론적 install을 명시하세요.");
+        sb.AppendLine("- **package.json 만드는 task의 lockfile 선언 누락**: scaffold가 `npm install`을 돌리면 생기는 `package-lock.json`(또는 `pnpm-lock.yaml`/`yarn.lock`/`bun.lockb`)을 그 task의 outputFiles에 추가하세요. 미선언이면 cleanup이 폐기해 base에서 사라집니다.");
         sb.AppendLine("- **알 수 없는 명령어**: 검증 명령에 표준 도구를 사용했는지 확인");
         sb.AppendLine("- **새로운 errors를 절대 도입하지 마세요** — 현재 통과된 검증 규칙은 그대로 유지해야 합니다.");
         sb.AppendLine();

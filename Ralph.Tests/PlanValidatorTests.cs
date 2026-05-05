@@ -670,4 +670,116 @@ public class PlanValidatorTests
         var r = PlanValidator.Validate(tm);
         Assert.DoesNotContain(r.Errors, e => e.Contains("workflow.smokeTest"));
     }
+
+    // --- 개선 D: npx 사용 + lockfile 누락 경고 ---
+
+    [Theory]
+    [InlineData("npx tsc --noEmit -p tsconfig.json", "tsc")]
+    [InlineData("npx vitest run --silent", "vitest")]
+    [InlineData("npx -y prettier --check .", "prettier")]
+    [InlineData("pnpx jest", "jest")]
+    [InlineData("bunx tsc --noEmit", "tsc")]
+    public async Task Verification_NpxUsage_IsWarning(string command, string expectedTool)
+    {
+        var json = $$"""
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/foo.ts"],
+          "verification":{"command":{{System.Text.Json.JsonSerializer.Serialize(command)}}}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.False(r.HasErrors, $"unexpected errors: {string.Join("; ", r.Errors)}");
+        Assert.Contains(r.Warnings,
+            w => w.Contains("verification.command") && w.Contains($"npx {expectedTool}"));
+    }
+
+    [Fact]
+    public async Task Verification_NpmScript_NoNpxWarning()
+    {
+        // `npm test` / `npm run build`는 npm script라서 lockfile 기반 install이 가능 → warn 없음.
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "outputFiles":["src/foo.ts"],
+          "verification":{"command":"npm run build --silent"}
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("npx"));
+    }
+
+    [Fact]
+    public async Task SmokeTest_NpxUsage_IsWarning()
+    {
+        var encoded = System.Text.Json.JsonSerializer.Serialize("npx tsc --noEmit -p tsconfig.json && npx vitest run");
+        var json = "{\"tasks\":[{\"id\":\"x\",\"title\":\"X\",\"prompt\":\"p\"}],"
+                 + "\"workflow\":{\"smokeTest\":{\"command\":" + encoded + "}}}";
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.False(r.HasErrors, $"unexpected errors: {string.Join("; ", r.Errors)}");
+        Assert.Contains(r.Warnings, w => w.Contains("workflow.smokeTest") && w.Contains("npx"));
+    }
+
+    [Fact]
+    public async Task SmokeTest_NpmCi_NoNpxWarning()
+    {
+        var encoded = System.Text.Json.JsonSerializer.Serialize("npm ci --silent && npm run build && npm test --silent");
+        var json = "{\"tasks\":[{\"id\":\"x\",\"title\":\"X\",\"prompt\":\"p\"}],"
+                 + "\"workflow\":{\"smokeTest\":{\"command\":" + encoded + "}}}";
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("workflow.smokeTest") && w.Contains("npx"));
+    }
+
+    [Fact]
+    public async Task PackageJson_WithoutLockfile_IsWarning()
+    {
+        var json = """
+        {"tasks":[{
+          "id":"scaffold","title":"Scaffold","prompt":"set up node project","category":"implementation",
+          "outputFiles":["package.json","tsconfig.json"]
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.False(r.HasErrors, $"unexpected errors: {string.Join("; ", r.Errors)}");
+        Assert.Contains(r.Warnings,
+            w => w.Contains("scaffold") && w.Contains("package.json") && w.Contains("lockfile"));
+    }
+
+    [Theory]
+    [InlineData("package-lock.json")]
+    [InlineData("pnpm-lock.yaml")]
+    [InlineData("yarn.lock")]
+    [InlineData("bun.lockb")]
+    public async Task PackageJson_WithLockfile_NoWarning(string lockfile)
+    {
+        var json = $$"""
+        {"tasks":[{
+          "id":"scaffold","title":"Scaffold","prompt":"set up node project","category":"implementation",
+          "outputFiles":["package.json","tsconfig.json","{{lockfile}}"]
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("lockfile"));
+    }
+
+    [Fact]
+    public async Task PackageJson_NotCreated_NoLockfileWarning()
+    {
+        // package.json을 안 만드는 task (예: 기존 프로젝트 수정만)는 lockfile 검사 대상이 아님.
+        var json = """
+        {"tasks":[{
+          "id":"x","title":"X","prompt":"p","category":"implementation",
+          "modifiedFiles":["src/foo.ts"]
+        }]}
+        """;
+        var tm = await Tm(json);
+        var r = PlanValidator.Validate(tm);
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("lockfile"));
+    }
 }

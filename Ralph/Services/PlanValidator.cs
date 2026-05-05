@@ -86,6 +86,22 @@ public static class PlanValidator
     private static readonly Regex GenericBacktickPattern = new(@"`[^`]+`", RegexOptions.Compiled);
 
     /// <summary>
+    /// `npx <tool>` (또는 `pnpx`/`bunx`) 호출의 첫 도구 이름을 캡처. 옵션 `--package &lt;name&gt;`는
+    /// skip 한다. 개선 D — worktree에 node_modules가 없어 cold install 비용이 누적되는 패턴 검출.
+    /// </summary>
+    private static readonly Regex NpxRunnerPattern = new(
+        @"(?<![\w.\-/])(?:npx|pnpx|bunx)\s+(?:--package\s+\S+\s+)?(?:-y\s+|--yes\s+)?([\w@][-\w/]*)",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// 보편적인 npm/yarn/pnpm/bun lockfile 이름 — package.json 을 만드는 task가 lockfile을
+    /// outputFiles에 선언하지 않으면 머지 후 base에 lockfile이 빠져 후속 worktree가 `npm ci`로
+    /// 결정론적 install을 못한다 (cold install 누적). 개선 D 보조 검사.
+    /// </summary>
+    private static readonly string[] NodeLockfileNames =
+        ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"];
+
+    /// <summary>
     /// verification.command / workflow.smokeTest.command에서 declared 검사를 위해
     /// "이 토큰은 source 파일 경로다" 라고 인식할 확장자 화이트리스트.
     /// 컴파일/빌드 매니페스트(.csproj/.sln/.fsproj)도 포함 — `dotnet build src/Foo/Foo.csproj`
@@ -432,6 +448,30 @@ public static class PlanValidator
             }
         }
 
+        // 11.5. (개선 D) verification.command이 `npx <tool>`을 사용하면 warn.
+        //       git worktree에는 node_modules가 없어 npx가 매 task마다 cold install을 유발한다 —
+        //       latency 누적, package.json pin 무시(latest 끌어옴), 네트워크 실패에 취약.
+        //       해결: `npm test` / `npm run build` 같은 npm script 또는 `node --check tests/X.ts`
+        //       같은 install-free 도구로 교체하거나, scaffold task가 package-lock.json을
+        //       outputFiles에 선언해 후속 worktree가 base에서 lockfile을 받아 `npm ci`로
+        //       결정론적 install을 할 수 있게 만든다.
+        foreach (var task in tasks)
+        {
+            var cmd = task.Verification?.Command;
+            if (string.IsNullOrWhiteSpace(cmd)) continue;
+            var stripped = StripStringLiterals(cmd);
+            var npxMatch = NpxRunnerPattern.Match(stripped);
+            if (npxMatch.Success)
+            {
+                var tool = npxMatch.Groups[1].Value;
+                report.Warnings.Add(
+                    $"'{task.Id}' verification.command이 `npx {tool}`을 사용합니다 — git worktree에는 " +
+                    "node_modules가 없어 매 task마다 cold install이 발생하고 package.json의 pinned 버전이 무시됩니다. " +
+                    "`npm test` / `npm run build` 같은 npm script로 감싸거나, scaffold task의 outputFiles에 " +
+                    "`package-lock.json`을 추가해 후속 worktree가 base lockfile로 `npm ci`를 수행하게 하세요.");
+            }
+        }
+
         // 11. (개선 C) workflow.smokeTest가 specific source files를 enumerate하면 error.
         //     smoke는 모든 batch마다 base 위에서 실행되므로 후속 batch가 만들 파일은 첫 batch
         //     시점에 존재하지 않는다. 파일을 나열하는 명령은 첫 batch부터 false-failure를 만들고
@@ -451,6 +491,46 @@ public static class PlanValidator
                     "전체 트리 명령(예: 'pytest -q', 'npm run build && npm test --silent', 'dotnet build && dotnet test', " +
                     "'cargo build && cargo test', 'go build ./... && go test ./...')으로 교체하거나, " +
                     "안전한 명령이 없으면 workflow.smokeTest를 비워두세요(ralph가 stack을 자동 추론합니다).");
+            }
+
+            // 11.6. (개선 D) smoke가 `npx <tool>`을 사용하면 warn — `.ralph-smoke` worktree에는
+            //       node_modules가 없으므로 매 batch마다 cold install이 반복된다. 240s timeout으로는
+            //       빠듯하고 npm registry 일시 장애에 취약. `npm ci && npm test` 형태로 lockfile
+            //       기반 결정론적 install + 테스트를 한 번에 수행하도록 권장.
+            var smokeNpxMatch = NpxRunnerPattern.Match(stripped);
+            if (smokeNpxMatch.Success)
+            {
+                var tool = smokeNpxMatch.Groups[1].Value;
+                report.Warnings.Add(
+                    $"workflow.smokeTest.command이 `npx {tool}`을 사용합니다 — `.ralph-smoke` worktree에도 " +
+                    "node_modules가 없어 매 batch마다 cold install이 반복되며 timeout/네트워크 실패 위험이 누적됩니다. " +
+                    "`npm ci --silent && npm run build && npm test --silent` 같은 lockfile 기반 명령으로 교체하고, " +
+                    "scaffold task의 outputFiles에 `package-lock.json`을 포함시키세요.");
+            }
+        }
+
+        // 12. (개선 D 보조) `package.json`을 만드는 task가 lockfile(`package-lock.json`/
+        //     `pnpm-lock.yaml`/`yarn.lock`/`bun.lockb`)을 outputFiles에 선언하지 않으면 warn.
+        //     scaffold가 npm install을 실행해도 lockfile은 untracked → pre-rebase cleanup이
+        //     artifact로 silent discard → base에 lockfile 없음 → 후속 worktree가 결정론적
+        //     install을 못함. 명시적 선언으로 lockfile을 base에 영구 반영시켜야 한다.
+        foreach (var task in tasks)
+        {
+            var declared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddNormalized(declared, task.OutputFiles);
+            AddNormalized(declared, task.ModifiedFiles);
+
+            var createsPackageJson = declared.Contains("package.json");
+            if (!createsPackageJson) continue;
+
+            var hasLockfile = NodeLockfileNames.Any(declared.Contains);
+            if (!hasLockfile)
+            {
+                report.Warnings.Add(
+                    $"'{task.Id}'가 `package.json`을 만들지만 lockfile(package-lock.json/yarn.lock/" +
+                    "pnpm-lock.yaml/bun.lockb)을 outputFiles에 선언하지 않았습니다. " +
+                    "lockfile이 없으면 후속 worktree가 매번 npm registry에서 latest 버전을 cold install하게 되어 " +
+                    "느리고 비결정적입니다. `npm install` 후 생성되는 lockfile을 outputFiles에 명시하세요.");
             }
         }
 

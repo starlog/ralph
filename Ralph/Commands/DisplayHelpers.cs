@@ -8,7 +8,7 @@ namespace Ralph.Commands;
 /// </summary>
 public static class DisplayHelpers
 {
-    public const string Version = "1.43";
+    public const string Version = "1.44";
 
     /// <summary>
     /// 세션 시작 시 한 번 출력하는 ralph 버전 배너. 이후의 Model/그래프 스캔/실행 모드/
